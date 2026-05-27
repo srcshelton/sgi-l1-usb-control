@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    name: Test and package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            debhelper \
+            dkms \
+            dpkg-dev \
+            kmod \
+            linux-headers-generic \
+            sparse
+
+      - name: Select kernel headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          kdir=""
+          if [ -e "/lib/modules/$(uname -r)/build" ]; then
+            kdir="/lib/modules/$(uname -r)/build"
+          else
+            kdir="$(find /usr/src -maxdepth 1 -type d -name 'linux-headers-*-generic' | sort -V | tail -n 1)"
+          fi
+          if [ -z "$kdir" ] || [ ! -d "$kdir" ]; then
+            echo "No usable kernel header tree found" >&2
+            exit 1
+          fi
+          echo "KDIR=$kdir" >> "$GITHUB_ENV"
+          echo "Using KDIR=$kdir"
+
+      - name: Run test suite
+        run: make test
+
+      - name: Build Debian packages
+        run: make deb
+
+      - name: Upload Debian package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-packages
+          path: _build/*.deb
+          if-no-files-found: error
+
+  release:
+    name: Release versioned package
+    needs: test-and-package
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install changelog tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+
+      - name: Check whether Debian version changed
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(dpkg-parsechangelog -S Version)"
+          before="${{ github.event.before }}"
+          previous=""
+          if [ -n "$before" ] &&
+             [ "$before" != "0000000000000000000000000000000000000000" ] &&
+             git cat-file -e "${before}^{commit}" 2>/dev/null &&
+             git cat-file -e "${before}:debian/changelog" 2>/dev/null; then
+            previous="$(git show "${before}:debian/changelog" | dpkg-parsechangelog -l- -S Version 2>/dev/null || true)"
+          fi
+
+          if [ "$current" = "$previous" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Debian version unchanged at $current"
+            exit 0
+          fi
+
+          tag="v${current}"
+          {
+            echo "release=true"
+            echo "version=$current"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+          dpkg-parsechangelog -S Changes > release-notes.txt
+
+      - name: Download package artifacts
+        if: steps.version.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: debian-packages
+          path: dist
+
+      - name: Create or update GitHub release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.deb --clobber
+          else
+            gh release create "$TAG" dist/*.deb \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes-file release-notes.txt
+          fi
