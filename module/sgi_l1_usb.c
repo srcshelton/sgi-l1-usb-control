@@ -23,7 +23,7 @@
 
 #include <sgi_l1_ioctl.h>
 
-#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb 0.1.0"
+#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb 0.1.42"
 #define SGI_L1_MINOR_BASE	208
 #define SGI_L1_STATUS_MINOR	249
 #define SGI_L1_MAX_TRANSFER	4096
@@ -77,12 +77,21 @@ module_param(reset_on_close, bool, 0644);
 MODULE_PARM_DESC(reset_on_close,
 		 "reset the USB device when the char device is closed; disabled by default");
 
+static uint max_write_size = SGI_L1_MAX_TRANSFER;
+module_param(max_write_size, uint, 0644);
+MODULE_PARM_DESC(max_write_size,
+		 "maximum write transfer size in bytes; defaults to the legacy 4096-byte transport limit and is clamped to 2..4096");
+
 static int sgi_l1_probe(struct usb_interface *interface,
 			const struct usb_device_id *id);
 static void sgi_l1_disconnect(struct usb_interface *interface);
+static bool sgi_l1_is_present(struct sgi_l1_device *dev);
 
 static const struct usb_device_id sgi_l1_id_table[] = {
-	{ USB_DEVICE(SGIL1_VENDOR_ID, SGIL1_PRODUCT_ID) },
+	{ USB_DEVICE_AND_INTERFACE_INFO(SGIL1_VENDOR_ID, SGIL1_PRODUCT_ID,
+					USB_CLASS_VENDOR_SPEC, USB_SUBCLASS_VENDOR_SPEC, 0) },
+	{ USB_DEVICE_AND_INTERFACE_INFO(SGIL1_VENDOR_ID, SGIL1_PRODUCT_ID,
+					0, 0, 0xff) },
 	{ }
 };
 MODULE_DEVICE_TABLE(usb, sgi_l1_id_table);
@@ -105,6 +114,8 @@ static void sgi_l1_delete(struct kref *kref)
 				  dev->read_dma);
 
 	kfree(dev->write_buf);
+	if (dev->interface)
+		usb_put_intf(dev->interface);
 	usb_put_dev(dev->udev);
 	kfree(dev);
 }
@@ -122,6 +133,18 @@ static void sgi_l1_read_complete(struct urb *urb)
 	spin_unlock_irqrestore(&dev->state_lock, flags);
 
 	wake_up_interruptible(&dev->read_wait);
+}
+
+static void sgi_l1_clear_read_state(struct sgi_l1_device *dev)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->state_lock, flags);
+	dev->read_pending = false;
+	dev->read_ready = false;
+	dev->read_status = 0;
+	dev->read_count = 0;
+	spin_unlock_irqrestore(&dev->state_lock, flags);
 }
 
 static int sgi_l1_submit_read_locked(struct sgi_l1_device *dev, gfp_t gfp)
@@ -161,20 +184,37 @@ static int sgi_l1_submit_read_locked(struct sgi_l1_device *dev, gfp_t gfp)
 	return ret;
 }
 
+static size_t sgi_l1_max_write_size(struct sgi_l1_device *dev)
+{
+	uint limit = READ_ONCE(max_write_size);
+
+	if (limit < 2)
+		limit = 2;
+	else if (limit > SGI_L1_MAX_TRANSFER)
+		limit = SGI_L1_MAX_TRANSFER;
+
+	return min_t(size_t, dev->write_size, limit);
+}
+
 static int sgi_l1_open(struct inode *inode, struct file *file)
 {
 	struct sgi_l1_device *dev;
-	unsigned long flags;
-	int index = iminor(inode) - SGI_L1_MINOR_BASE;
+	unsigned int minor = iminor(inode);
+	int i;
 	int ret = 0;
 
-	if (index < 0 || index >= SGIL1_MAX_DEVICES)
-		return -ENODEV;
-
 	mutex_lock(&sgi_l1_table_lock);
-	dev = sgi_l1_devices[index];
-	if (dev && !kref_get_unless_zero(&dev->kref))
-		dev = NULL;
+	dev = NULL;
+	for (i = 0; i < SGIL1_MAX_DEVICES; i++) {
+		struct sgi_l1_device *candidate = sgi_l1_devices[i];
+
+		if (candidate && candidate->minor == minor) {
+			dev = candidate;
+			if (!kref_get_unless_zero(&dev->kref))
+				dev = NULL;
+			break;
+		}
+	}
 	mutex_unlock(&sgi_l1_table_lock);
 
 	if (!dev)
@@ -191,19 +231,10 @@ static int sgi_l1_open(struct inode *inode, struct file *file)
 	file->private_data = dev;
 	mutex_unlock(&dev->open_mutex);
 
-	mutex_lock(&dev->io_mutex);
-	spin_lock_irqsave(&dev->state_lock, flags);
-	dev->read_pending = false;
-	dev->read_ready = false;
-	dev->read_status = 0;
-	dev->read_count = 0;
-	spin_unlock_irqrestore(&dev->state_lock, flags);
+	sgi_l1_clear_read_state(dev);
 
-	if (!dev->present)
+	if (!sgi_l1_is_present(dev))
 		ret = -ENODEV;
-	else
-		ret = sgi_l1_submit_read_locked(dev, GFP_KERNEL);
-	mutex_unlock(&dev->io_mutex);
 
 	if (ret) {
 		mutex_lock(&dev->open_mutex);
@@ -221,7 +252,6 @@ static int sgi_l1_open(struct inode *inode, struct file *file)
 static int sgi_l1_release(struct inode *inode, struct file *file)
 {
 	struct sgi_l1_device *dev = file->private_data;
-	unsigned long flags;
 	bool do_reset = false;
 
 	if (!dev)
@@ -229,22 +259,13 @@ static int sgi_l1_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&dev->io_mutex);
 	usb_kill_urb(dev->read_urb);
+	sgi_l1_clear_read_state(dev);
 
-	spin_lock_irqsave(&dev->state_lock, flags);
-	dev->read_pending = false;
-	dev->read_ready = false;
-	spin_unlock_irqrestore(&dev->state_lock, flags);
-
-	do_reset = reset_on_close && dev->present;
+	do_reset = reset_on_close && sgi_l1_is_present(dev);
 	mutex_unlock(&dev->io_mutex);
 
-	if (do_reset) {
-		int ret = usb_reset_device(dev->udev);
-
-		if (ret)
-			dev_warn(&dev->interface->dev,
-				 "USB reset on close failed: %d\n", ret);
-	}
+	if (do_reset)
+		usb_queue_reset_device(dev->interface);
 
 	mutex_lock(&dev->open_mutex);
 	dev->open = false;
@@ -268,6 +289,12 @@ static ssize_t sgi_l1_read(struct file *file, char __user *buffer,
 
 	if (!dev)
 		return -ENODEV;
+
+	mutex_lock(&dev->io_mutex);
+	ret = sgi_l1_submit_read_locked(dev, GFP_KERNEL);
+	mutex_unlock(&dev->io_mutex);
+	if (ret)
+		return ret;
 
 	for (;;) {
 		spin_lock_irqsave(&dev->state_lock, flags);
@@ -314,7 +341,7 @@ static ssize_t sgi_l1_read(struct file *file, char __user *buffer,
 		spin_unlock_irqrestore(&dev->state_lock, flags);
 
 		if (present)
-			sgi_l1_submit_read_locked(dev, GFP_KERNEL);
+			sgi_l1_clear_read_state(dev);
 
 		mutex_unlock(&dev->io_mutex);
 		return status;
@@ -334,9 +361,6 @@ static ssize_t sgi_l1_read(struct file *file, char __user *buffer,
 	dev->read_ready = false;
 	spin_unlock_irqrestore(&dev->state_lock, flags);
 
-	if (present)
-		sgi_l1_submit_read_locked(dev, GFP_KERNEL);
-
 	mutex_unlock(&dev->io_mutex);
 	return actual;
 }
@@ -350,11 +374,13 @@ static ssize_t sgi_l1_write(struct file *file, const char __user *buffer,
 
 	if (!dev)
 		return -ENODEV;
-	if (count < 2 || count > dev->write_size)
+	if (count < 2)
 		return -EINVAL;
+	if (count > sgi_l1_max_write_size(dev))
+		return -EMSGSIZE;
 
 	mutex_lock(&dev->io_mutex);
-	if (!dev->present) {
+	if (!sgi_l1_is_present(dev)) {
 		mutex_unlock(&dev->io_mutex);
 		return -ENODEV;
 	}
@@ -390,63 +416,118 @@ static __poll_t sgi_l1_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &dev->read_wait, wait);
 
+	if (mutex_trylock(&dev->io_mutex)) {
+		if (sgi_l1_is_present(dev))
+			sgi_l1_submit_read_locked(dev, GFP_ATOMIC);
+		mutex_unlock(&dev->io_mutex);
+	}
+
 	spin_lock_irqsave(&dev->state_lock, flags);
 	if (!dev->present)
 		mask |= EPOLLHUP;
+	else
+		mask |= EPOLLOUT | EPOLLWRNORM;
 	if (dev->read_ready)
 		mask |= EPOLLIN | EPOLLRDNORM;
 	spin_unlock_irqrestore(&dev->state_lock, flags);
 
-	mask |= EPOLLOUT | EPOLLWRNORM;
 	return mask;
 }
 
 static int sgi_l1_clear_halt(struct sgi_l1_device *dev, unsigned int pipe)
 {
-	int ret = usb_clear_halt(dev->udev, pipe);
+	unsigned int endpoint = usb_pipeendpoint(pipe);
+	int ret;
 
+	if (usb_pipein(pipe))
+		endpoint |= USB_DIR_IN;
+
+	ret = usb_clear_halt(dev->udev, pipe);
 	if (ret)
-		dev_warn(&dev->interface->dev, "clear halt failed: %d\n", ret);
+		dev_warn(&dev->udev->dev,
+			 "clear halt failed for endpoint 0x%02x: %d\n",
+			 endpoint, ret);
 
 	return ret;
+}
+
+static bool sgi_l1_is_present(struct sgi_l1_device *dev)
+{
+	unsigned long flags;
+	bool present;
+
+	spin_lock_irqsave(&dev->state_lock, flags);
+	present = dev->present;
+	spin_unlock_irqrestore(&dev->state_lock, flags);
+
+	return present;
+}
+
+static int sgi_l1_reset_read_locked(struct sgi_l1_device *dev)
+{
+	usb_kill_urb(dev->read_urb);
+	sgi_l1_clear_read_state(dev);
+	return 0;
+}
+
+static int sgi_l1_reset_pipes_locked(struct sgi_l1_device *dev)
+{
+	int first_ret = 0;
+	int ret;
+
+	usb_kill_urb(dev->read_urb);
+	sgi_l1_clear_read_state(dev);
+
+	ret = sgi_l1_clear_halt(dev, dev->bulk_out_pipe);
+	if (ret && !first_ret)
+		first_ret = ret;
+
+	ret = sgi_l1_clear_halt(dev, dev->bulk_in_pipe);
+	if (ret && !first_ret)
+		first_ret = ret;
+
+	return first_ret;
 }
 
 static long sgi_l1_ioctl(struct file *file, unsigned int cmd,
 			 unsigned long arg)
 {
 	struct sgi_l1_device *dev = file->private_data;
-	unsigned long flags;
 	int ret = 0;
 
 	if (!dev)
 		return -ENODEV;
 
+	if (cmd == SGIL1_RESET_DEVICE) {
+		if (!sgi_l1_is_present(dev))
+			return -ENODEV;
+
+		/*
+		 * usb_reset_device() may synchronously unbind this interface and
+		 * call our disconnect method.  Queue the reset instead so an ioctl
+		 * caller cannot deadlock with disconnect or become unkillable while
+		 * holding driver locks.
+		 */
+		usb_queue_reset_device(dev->interface);
+		return 0;
+	}
+
 	mutex_lock(&dev->io_mutex);
 
-	if (!dev->present) {
+	if (!sgi_l1_is_present(dev)) {
 		mutex_unlock(&dev->io_mutex);
 		return -ENODEV;
 	}
 
 	switch (cmd) {
 	case SGIL1_RESET_READ:
-		usb_kill_urb(dev->read_urb);
-		spin_lock_irqsave(&dev->state_lock, flags);
-		dev->read_pending = false;
-		dev->read_ready = false;
-		spin_unlock_irqrestore(&dev->state_lock, flags);
-		ret = sgi_l1_submit_read_locked(dev, GFP_KERNEL);
+		ret = sgi_l1_reset_read_locked(dev);
 		break;
 	case SGIL1_RESET_WRITE:
 		ret = sgi_l1_clear_halt(dev, dev->bulk_out_pipe);
 		break;
 	case SGIL1_RESET_PIPES:
-		ret = sgi_l1_clear_halt(dev, dev->bulk_out_pipe);
-		if (!ret)
-			ret = sgi_l1_clear_halt(dev, dev->bulk_in_pipe);
-		break;
-	case SGIL1_RESET_DEVICE:
-		ret = usb_reset_device(dev->udev);
+		ret = sgi_l1_reset_pipes_locked(dev);
 		break;
 	case SGIL1_READ_CFG:
 		if (copy_to_user((void __user *)arg, &dev->cfg,
@@ -470,6 +551,9 @@ static const struct file_operations sgi_l1_fops = {
 	.write = sgi_l1_write,
 	.poll = sgi_l1_poll,
 	.unlocked_ioctl = sgi_l1_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = compat_ptr_ioctl,
+#endif
 	.llseek = noop_llseek,
 };
 
@@ -584,6 +668,9 @@ static const struct file_operations sgi_l1_status_fops = {
 	.read = sgi_l1_status_read,
 	.poll = sgi_l1_status_poll,
 	.unlocked_ioctl = sgi_l1_status_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = compat_ptr_ioctl,
+#endif
 	.llseek = noop_llseek,
 };
 
@@ -621,15 +708,39 @@ static int sgi_l1_probe(struct usb_interface *interface,
 {
 	struct usb_device *udev = interface_to_usbdev(interface);
 	struct usb_host_interface *iface_desc = interface->cur_altsetting;
+	struct usb_endpoint_descriptor *bulk_in;
+	struct usb_endpoint_descriptor *bulk_out;
 	struct sgi_l1_device *dev;
-	int i;
 	int ret;
 	int index;
-	bool have_bulk_in = false;
-	bool have_bulk_out = false;
 
-	if (!iface_desc || iface_desc->desc.bNumEndpoints != 2)
+	if (!iface_desc)
 		return -ENODEV;
+
+	dev_info(&interface->dev,
+		 "SGI L1 probe: ifnum=%u alt=%u class=0x%02x subclass=0x%02x proto=0x%02x endpoints=%u\n",
+		 iface_desc->desc.bInterfaceNumber,
+		 iface_desc->desc.bAlternateSetting,
+		 iface_desc->desc.bInterfaceClass,
+		 iface_desc->desc.bInterfaceSubClass,
+		 iface_desc->desc.bInterfaceProtocol,
+		 iface_desc->desc.bNumEndpoints);
+
+	if (iface_desc->desc.bNumEndpoints < 2) {
+		dev_warn(&interface->dev,
+			 "SGI L1 probe rejected: expected at least two endpoints, found %u\n",
+			 iface_desc->desc.bNumEndpoints);
+		return -ENODEV;
+	}
+
+	ret = usb_find_common_endpoints(iface_desc, &bulk_in, &bulk_out, NULL,
+					NULL);
+	if (ret) {
+		dev_warn(&interface->dev,
+			 "SGI L1 probe rejected: missing bulk endpoints: %d\n",
+			 ret);
+		return ret;
+	}
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
@@ -642,32 +753,15 @@ static int sgi_l1_probe(struct usb_interface *interface,
 	init_waitqueue_head(&dev->read_wait);
 
 	dev->udev = usb_get_dev(udev);
-	dev->interface = interface;
+	dev->interface = usb_get_intf(interface);
 	dev->read_size = min_t(size_t, SGI_L1_MAX_TRANSFER, PAGE_SIZE);
 	dev->write_size = min_t(size_t, SGI_L1_MAX_TRANSFER, PAGE_SIZE);
 	dev->present = true;
 
-	for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
-		struct usb_endpoint_descriptor *endpoint =
-			&iface_desc->endpoint[i].desc;
-
-		if (usb_endpoint_is_bulk_in(endpoint)) {
-			dev->bulk_in_endpoint = usb_endpoint_num(endpoint);
-			dev->bulk_in_pipe = usb_rcvbulkpipe(udev,
-							    dev->bulk_in_endpoint);
-			have_bulk_in = true;
-		} else if (usb_endpoint_is_bulk_out(endpoint)) {
-			dev->bulk_out_endpoint = usb_endpoint_num(endpoint);
-			dev->bulk_out_pipe = usb_sndbulkpipe(udev,
-							     dev->bulk_out_endpoint);
-			have_bulk_out = true;
-		}
-	}
-
-	if (!have_bulk_in || !have_bulk_out) {
-		ret = -ENODEV;
-		goto err_put;
-	}
+	dev->bulk_in_endpoint = bulk_in->bEndpointAddress;
+	dev->bulk_in_pipe = usb_rcvbulkpipe(udev, usb_endpoint_num(bulk_in));
+	dev->bulk_out_endpoint = bulk_out->bEndpointAddress;
+	dev->bulk_out_pipe = usb_sndbulkpipe(udev, usb_endpoint_num(bulk_out));
 
 	dev->read_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!dev->read_urb) {
@@ -699,26 +793,30 @@ static int sgi_l1_probe(struct usb_interface *interface,
 		goto err_put;
 	}
 
-	dev->minor = interface->minor;
-	index = dev->minor - SGI_L1_MINOR_BASE;
-	if (index < 0 || index >= SGIL1_MAX_DEVICES) {
-		ret = -ENODEV;
+	mutex_lock(&sgi_l1_table_lock);
+	for (index = 0; index < SGIL1_MAX_DEVICES; index++) {
+		if (!sgi_l1_devices[index])
+			break;
+	}
+	if (index == SGIL1_MAX_DEVICES) {
+		mutex_unlock(&sgi_l1_table_lock);
+		ret = -ENOSPC;
 		usb_deregister_dev(interface, &sgi_l1_class);
 		usb_set_intfdata(interface, NULL);
 		goto err_put;
 	}
-	dev->index = index;
 
-	mutex_lock(&sgi_l1_table_lock);
+	dev->minor = interface->minor;
+	dev->index = index;
 	sgi_l1_devices[index] = dev;
 	mutex_unlock(&sgi_l1_table_lock);
 
 	sgi_l1_status_changed();
 
 	dev_info(&interface->dev,
-		 "SGI L1 connected: /dev/sgil1_%u, bus=%u dev=%u in=0x%02x out=0x%02x\n",
-		 dev->index, dev->cfg.bus, dev->cfg.dev,
-		 dev->bulk_in_endpoint | USB_DIR_IN, dev->bulk_out_endpoint);
+		 "SGI L1 connected: index=%u minor=%u bus=%u dev=%u in=0x%02x out=0x%02x\n",
+		 dev->index, dev->minor, dev->cfg.bus, dev->cfg.dev,
+		 dev->bulk_in_endpoint, dev->bulk_out_endpoint);
 
 	return 0;
 
@@ -736,14 +834,6 @@ static void sgi_l1_disconnect(struct usb_interface *interface)
 	if (!dev)
 		return;
 
-	usb_deregister_dev(interface, &sgi_l1_class);
-
-	mutex_lock(&sgi_l1_table_lock);
-	if (dev->index < SGIL1_MAX_DEVICES && sgi_l1_devices[dev->index] == dev)
-		sgi_l1_devices[dev->index] = NULL;
-	mutex_unlock(&sgi_l1_table_lock);
-
-	mutex_lock(&dev->io_mutex);
 	spin_lock_irqsave(&dev->state_lock, flags);
 	dev->present = false;
 	dev->read_pending = false;
@@ -751,15 +841,20 @@ static void sgi_l1_disconnect(struct usb_interface *interface)
 	dev->read_count = 0;
 	dev->read_ready = true;
 	spin_unlock_irqrestore(&dev->state_lock, flags);
+	wake_up_interruptible(&dev->read_wait);
 
 	usb_kill_urb(dev->read_urb);
-	mutex_unlock(&dev->io_mutex);
+	usb_deregister_dev(interface, &sgi_l1_class);
 
-	wake_up_interruptible(&dev->read_wait);
+	mutex_lock(&sgi_l1_table_lock);
+	if (dev->index < SGIL1_MAX_DEVICES && sgi_l1_devices[dev->index] == dev)
+		sgi_l1_devices[dev->index] = NULL;
+	mutex_unlock(&sgi_l1_table_lock);
+
 	sgi_l1_status_changed();
 
-	dev_info(&interface->dev, "SGI L1 disconnected: /dev/sgil1_%u\n",
-		 dev->index);
+	dev_info(&interface->dev, "SGI L1 disconnected: index=%u minor=%u\n",
+		 dev->index, dev->minor);
 
 	kref_put(&dev->kref, sgi_l1_delete);
 }
@@ -802,7 +897,7 @@ static void __exit sgi_l1_exit(void)
 module_init(sgi_l1_init);
 module_exit(sgi_l1_exit);
 
-MODULE_AUTHOR("OpenAI Codex; based on SGI sgil1 by Steve Hein and Bob Cutler");
+MODULE_AUTHOR("Stuart Shelton <stuart@shelton.me>");
 MODULE_DESCRIPTION("USB transport driver for SGI L1 system controllers");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_MISCDEV(SGI_L1_STATUS_MINOR);
