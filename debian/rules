@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) -C tools
+
+override_dh_auto_clean:
+	$(MAKE) -C tools clean
+	$(MAKE) -C module clean || true

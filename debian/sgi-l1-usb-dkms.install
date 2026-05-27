@@ -1,0 +1,7 @@
+dkms.conf usr/src/sgi-l1-usb-0.1.0/
+include/sgi_l1_ioctl.h usr/src/sgi-l1-usb-0.1.0/include/
+module/Makefile usr/src/sgi-l1-usb-0.1.0/module/
+module/sgi_l1_usb.c usr/src/sgi-l1-usb-0.1.0/module/
+udev/99-sgi-l1-usb.rules lib/udev/rules.d/
+docs/pi-software-first.md usr/share/doc/sgi-l1-usb-dkms/
+scripts/pi-software-first-diagnostics.sh usr/share/doc/sgi-l1-usb-dkms/examples/

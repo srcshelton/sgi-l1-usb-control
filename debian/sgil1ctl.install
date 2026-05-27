@@ -1,0 +1,3 @@
+tools/sgil1ctl usr/bin/
+include/sgi_l1_ioctl.h usr/include/sgi-l1/
+README.md usr/share/doc/sgil1ctl/

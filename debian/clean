@@ -1,0 +1,8 @@
+tools/sgil1ctl
+tools/*.o
+module/*.o
+module/*.ko
+module/*.mod
+module/*.mod.c
+module/*.symvers
+module/*.order

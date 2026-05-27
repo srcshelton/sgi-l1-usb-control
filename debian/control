@@ -1,0 +1,22 @@
+Source: sgi-l1-usb-control
+Section: kernel
+Priority: optional
+Maintainer: Stuart <stuart@localhost>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: sgi-l1-usb-dkms
+Architecture: all
+Depends: dkms, udev, ${misc:Depends}
+Description: DKMS driver for SGI L1 USB system controllers
+ This package installs the sgi_l1_usb out-of-tree kernel module source for
+ DKMS.  The module exposes the legacy SGI sgil1 raw USB transport devices for
+ L1/L3 system controller communication.
+
+Package: sgil1ctl
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: utility for SGI L1 USB transport diagnostics
+ sgil1ctl reads status/configuration from the sgi_l1_usb driver and provides
+ raw frame send/receive helpers for protocol discovery.

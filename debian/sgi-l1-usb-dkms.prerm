@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+PACKAGE_NAME="sgi-l1-usb"
+PACKAGE_VERSION="0.1.0"
+
+case "$1" in
+	remove|deconfigure)
+		if command -v dkms >/dev/null 2>&1; then
+			dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all >/dev/null 2>&1 || true
+		fi
+		;;
+esac
+
+#DEBHELPER#
+
+exit 0

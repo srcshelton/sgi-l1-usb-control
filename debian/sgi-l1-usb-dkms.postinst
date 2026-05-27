@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+PACKAGE_NAME="sgi-l1-usb"
+PACKAGE_VERSION="0.1.0"
+
+case "$1" in
+	configure)
+		if command -v dkms >/dev/null 2>&1; then
+			dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all >/dev/null 2>&1 || true
+			dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+			dkms build -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
+			dkms install -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --force
+		fi
+		;;
+esac
+
+#DEBHELPER#
+
+exit 0
