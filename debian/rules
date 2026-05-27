@@ -1,5 +1,9 @@
 #!/usr/bin/make -f
 
+include /usr/share/dpkg/pkg-info.mk
+
+DKMS_SRC := debian/sgi-l1-usb-dkms/usr/src/sgi-l1-usb-$(DEB_VERSION_UPSTREAM)
+
 %:
 	dh $@
 
@@ -9,3 +13,13 @@ override_dh_auto_build:
 override_dh_auto_clean:
 	$(MAKE) -C tools clean
 	$(MAKE) -C module clean || true
+
+override_dh_auto_test:
+	:
+
+override_dh_install:
+	dh_install
+	install -d $(DKMS_SRC)/include $(DKMS_SRC)/module
+	install -m 0644 dkms.conf $(DKMS_SRC)/
+	install -m 0644 include/sgi_l1_ioctl.h $(DKMS_SRC)/include/
+	install -m 0644 module/Makefile module/sgi_l1_usb.c $(DKMS_SRC)/module/

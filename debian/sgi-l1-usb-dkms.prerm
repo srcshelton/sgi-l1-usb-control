@@ -2,11 +2,11 @@
 set -e
 
 PACKAGE_NAME="sgi-l1-usb"
-PACKAGE_VERSION="0.1.0"
+PACKAGE_VERSION="$(dpkg-query -W -f='${Version}' sgi-l1-usb-dkms 2>/dev/null | sed 's/-.*//; s/.*://')"
 
 case "$1" in
 	remove|deconfigure)
-		if command -v dkms >/dev/null 2>&1; then
+		if [ -n "$PACKAGE_VERSION" ] && command -v dkms >/dev/null 2>&1; then
 			dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all >/dev/null 2>&1 || true
 		fi
 		;;

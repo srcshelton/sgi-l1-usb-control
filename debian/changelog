@@ -1,5 +1,358 @@
+sgi-l1-usb-control (0.1.42) unstable; urgency=medium
+
+  * Add a GPL-2.0 license file suitable for kernel-module distribution.
+  * Refresh README installation, hardware-scope, and reference documentation.
+  * Add GitHub Actions CI for tests, package artifacts, and versioned releases.
+  * Rename host-specific USB diagnostics documentation and examples to generic
+    names.
+  * Normalize historical Debian changelog maintainer identities.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 22:05:00 +0100
+
+sgi-l1-usb-control (0.1.41) unstable; urgency=medium
+
+  * Restrict SGI L1 device nodes to the sgil1 system group with mode 0660.
+  * Drop the local-seat uaccess ACL rule so USB access is controlled by sgil1
+    group membership.
+  * Create the sgil1 system group from the DKMS package postinst.
+  * Document sgil1 group membership for users who need remote-management
+    access to L1 controllers.
+  * Use Stuart Shelton's full maintainer/copyright identity in Debian metadata.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 21:30:00 +0100
+
+sgi-l1-usb-control (0.1.40) unstable; urgency=medium
+
+  * Set module authorship to Stuart Shelton and remove generated-code
+    attribution.
+  * Parse --timeout with checked integer conversion.
+  * Make poll read-arming nonblocking and use direct clear-halt endpoint
+    recovery.
+  * Add a max_write_size module parameter for hosts that want to cap raw USB
+    writes below the legacy 4096-byte transport limit.
+  * Add a hardware-free test suite for the DKMS driver and sgil1ctl, including
+    a mocked L1 USB/status transport for unsafe command paths.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 21:15:00 +0100
+
+sgi-l1-usb-control (0.1.39) unstable; urgency=medium
+
+  * Cap sgil1ctl L1 text commands at the observed direct-USB safe limit of
+    72 command bytes, producing a 109-byte IRouter transfer.
+  * Document the observed 110-byte transfer disconnect/re-enumeration behavior.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 20:25:00 +0100
+
+sgi-l1-usb-control (0.1.38) unstable; urgency=medium
+
+  * Treat L1 discovery timeouts as explicit command failures instead of
+    suggesting pass-through force after live-help lookup fails.
+  * Attempt reset-pipes recovery after L1 discovery, response, write, and read
+    failures.
+  * Reject bare L1 broadcast-prefix commands clearly and parse
+    star-prefixed commands against the command after the broadcast prefix.
+  * Preserve additional text arguments in L1 responses, including broadcast
+    responses that include a target prefix plus command output.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 19:35:00 +0100
+
+sgi-l1-usb-control (0.1.37) unstable; urgency=medium
+
+  * Restrict help replacement to documented namespace parent commands whose
+    command-specific help lists child commands.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 15:10:00 +0100
+
+sgi-l1-usb-control (0.1.36) unstable; urgency=medium
+
+  * Suppress the L1 namespace-only "command not found" response when a live
+    command-specific help page is available.
+  * Point no-argument invocations at --help instead of printing only "missing
+    command".
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 14:55:00 +0100
+
+sgi-l1-usb-control (0.1.35) unstable; urgency=medium
+
+  * Make date the documented clock command while retaining existing aliases.
+  * Prefer SGI-native power up/down syntax and retain power-up/power-down
+    aliases for compatibility.
+  * Add compact and full help modes and print L1 subcommand help after
+    pass-through command failures when available.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 14:10:00 +0100
+
+sgi-l1-usb-control (0.1.34) unstable; urgency=medium
+
+  * Default clock-setting timezone updates to the host timezone when --set-time
+    is used without an explicit --timezone.
+  * Add guarded wait --power-down and wait --reset post-bind actions.
+  * Clarify pass-through command syntax in help text.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 13:45:00 +0100
+
+sgi-l1-usb-control (0.1.33) unstable; urgency=medium
+
+  * Add a global --debug flag for IRouter framing diagnostics and keep normal
+    L1 text commands quiet by default.
+  * Add a clock command for L1 time display and optional correction, making the
+    direct status command read-only.
+  * Tighten help text defaults and stop printing full usage for invalid command
+    input.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 13:10:00 +0100
+
+sgi-l1-usb-control (0.1.32) unstable; urgency=medium
+
+  * Make L1 data devices world-readable and writable by default, matching the
+    physical-access security model for this USB transport.
+  * Streamline sgil1ctl status output for normal users and avoid duplicating
+    power/fan data that is already present in the environmental monitor table.
+  * Require explicit command/l1cmd/send pass-through instead of treating
+    unknown sgil1ctl commands as L1 commands.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 12:55:00 +0100
+
+sgi-l1-usb-control (0.1.31) unstable; urgency=medium
+
+  * Move sgil1ctl's primary transaction lock path to /var/lock.
+  * Drop the model-specific stable udev symlink in favor of generic L1 index
+    links.
+  * Document the legacy device nodes and stable udev aliases.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 12:40:00 +0100
+
+sgi-l1-usb-control (0.1.30) unstable; urgency=medium
+
+  * Move sgil1ctl's primary transaction lock path to /var/run for broader
+    cross-platform compatibility.
+  * Drain stale IRouter frames until a short quiet period before native L1 text
+    commands are sent.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 12:20:00 +0100
+
+sgi-l1-usb-control (0.1.29) unstable; urgency=medium
+
+  * Serialize sgil1ctl L1 transactions with a host-local advisory flock so
+    multi-step commands cannot receive each other's L1 response frames.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 12:10:00 +0100
+
+sgi-l1-usb-control (0.1.28) unstable; urgency=medium
+
+  * Expand timezone arguments from host tzdata when the host has richer rules,
+    including IANA zone names and local abbreviation-style specifications.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 12:02:00 +0100
+
+sgi-l1-usb-control (0.1.27) unstable; urgency=medium
+
+  * Include the concise L1 fan summary in sgil1ctl status output.
+  * Expand --timezone GMT0BST to the full current UK POSIX timezone rule before
+    sending date tz to the L1.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 11:48:00 +0100
+
+sgi-l1-usb-control (0.1.26) unstable; urgency=medium
+
+  * Rename the confirmation flag to --force while keeping --yes as a
+    compatibility alias.
+  * Add wait --defer and --deferred aliases for --background/--next-bind.
+  * Add live-help-checked L1 command pass-through, with --force available for
+    commands not advertised by the L1 help output.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 11:15:00 +0100
+
+sgi-l1-usb-control (0.1.25) unstable; urgency=medium
+
+  * Teach sgil1ctl power-down to inspect the L1 response and issue the second
+    power down command only when the L1 explicitly prompts for it.
+  * Confirm power-down by polling power check until the workstation appears
+    off.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 10:50:00 +0100
+
+sgi-l1-usb-control (0.1.24) unstable; urgency=medium
+
+  * Drain stale raw IRouter frames before native text commands so delayed
+    responses from an earlier failed probe do not shift later command output.
+  * In wait mode, pause briefly after bind, reset the L1 USB pipes, and retry
+    the consolidated status probe once after a failed early probe.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 10:38:00 +0100
+
+sgi-l1-usb-control (0.1.23) unstable; urgency=medium
+
+  * Confirm power-up asynchronously by polling power check after command send,
+    so slow L1 host-side reset responses are not reported as failures.
+  * Add wait --background/--next-bind to ignore an already-present USB device
+    until it disconnects and binds again.
+  * Keep the /dev/sgi-l1 inotify watch renewable if udev removes and recreates
+    the directory while background wait mode is armed.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 04:35:00 +0100
+
+sgi-l1-usb-control (0.1.21) unstable; urgency=medium
+
+  * Add sgil1ctl log for retrieving the L1 event log over USB.
+  * Accept trailing --yes for power-up, power-down, and reset commands.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 04:08:00 +0100
+
+sgi-l1-usb-control (0.1.20) unstable; urgency=medium
+
+  * Add an inotify-based sgil1ctl wait mode for L1 USB device appearance,
+    optional L1 time setting, and guarded workstation power-up.
+  * Replace sgil1ctl status with a consolidated L1 health report and keep the
+    old status bitmap as driver-status.
+  * Add quiet L1 text-command capture for status/wait automation.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 03:55:00 +0100
+
+sgi-l1-usb-control (0.1.19) unstable; urgency=medium
+
+  * Discover the L1 command destination with the legacy config probe before
+    native text commands, unless --dest or --no-discover is supplied.
+  * Enable the allowlisted power-up, power-down, and reset text commands only
+    when sgil1ctl is run with --yes.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 03:22:00 +0100
+
+sgi-l1-usb-control (0.1.18) unstable; urgency=medium
+
+  * Reassemble multi-frame IRouter text responses in sgil1ctl so larger
+    read-only commands such as env print their payload.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 02:58:00 +0100
+
+sgi-l1-usb-control (0.1.17) unstable; urgency=medium
+
+  * Make sgil1ctl send raw IRouter frames by default, matching the working
+    legacy L2 USB path.
+  * Default sgil1ctl to the discovered L1 command destination/source and
+    keep the previous SGI pipe-record wrapper as an explicit option.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 02:46:00 +0100
+
+sgi-l1-usb-control (0.1.16) unstable; urgency=medium
+
+  * Query endpoint halt status before clearing halts so SGI L1 firmware is not
+    asked to clear a non-halted endpoint, which it reports as EPIPE.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 02:32:00 +0100
+
+sgi-l1-usb-control (0.1.15) unstable; urgency=medium
+
+  * Match the legacy SGI driver by arming bulk-IN reads lazily from poll/read
+    rather than submitting a read URB on open.
+  * Leave read URBs idle after read and pipe-reset completion so L3-style
+    command probes send their OUT record before waiting for an IN response.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 02:20:00 +0100
+
+sgi-l1-usb-control (0.1.14) unstable; urgency=medium
+
+  * Default sgil1ctl to the l2cmd-derived L1 command destination 0x1ffff003.
+  * Default serialized IRouter class/pdata/auth fields to the legacy USB/OS
+    request path values and expose --class/--auth/--pdata overrides.
+  * Fix sgil1ctl's IRouter auth/pdata decode display.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 01:26:00 +0100
+
+sgi-l1-usb-control (0.1.13) unstable; urgency=medium
+
+  * Make reset-pipes clear endpoint halts without first setting a halt.
+  * Kill and restore the read URB around pipe resets.
+  * Wire fixed-layout ioctls through compat_ptr_ioctl for 32-bit callers.
+  * Add sgil1ctl --src/--dest address overrides and default the source
+    address to the legacy USB/OS path value discovered from L3.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 01:12:00 +0100
+
+sgi-l1-usb-control (0.1.12) unstable; urgency=medium
+
+  * Build L1 text-command probes with the legacy 0x0a argument class.
+  * Remove the broad VID/PID-only USB fallback match now that the live L1
+    descriptor is confirmed as interface class 00/00/ff.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 01:18:00 +0100
+
+sgi-l1-usb-control (0.1.11) unstable; urgency=medium
+
+  * Wrap sgil1ctl IRouter command probes in the legacy L3 SGI pipe records.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 01:05:00 +0100
+
+sgi-l1-usb-control (0.1.10) unstable; urgency=medium
+
+  * Match the legacy SGI reset-pipe sequence by setting endpoint halt before
+    clearing it.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:54:00 +0100
+
+sgi-l1-usb-control (0.1.9) unstable; urgency=medium
+
+  * Use the kernel USB endpoint helper during probe rather than manually
+    scanning endpoint descriptors.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:44:00 +0100
+
+sgi-l1-usb-control (0.1.8) unstable; urgency=medium
+
+  * Hold a USB interface reference while file handles can queue resets.
+  * Stop advertising writable poll state after disconnect and clarify
+    disconnect diagnostics.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:34:00 +0100
+
+sgi-l1-usb-control (0.1.7) unstable; urgency=medium
+
+  * Avoid reset/disconnect self-deadlocks by queueing USB device resets and
+    making disconnect independent of the I/O mutex.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:18:00 +0100
+
+sgi-l1-usb-control (0.1.6) unstable; urgency=medium
+
+  * Resolve opens by recorded USB minor rather than legacy fixed-minor index.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:14:00 +0100
+
+sgi-l1-usb-control (0.1.5) unstable; urgency=medium
+
+  * Allocate SGI L1 status indices independently from USB character-device
+    minors so kernels with dynamic USB minors can bind the device.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 27 May 2026 00:05:00 +0100
+
+sgi-l1-usb-control (0.1.4) unstable; urgency=medium
+
+  * Derive DKMS package install paths and maintainer-script versions from the
+    package version.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 26 May 2026 23:58:00 +0100
+
+sgi-l1-usb-control (0.1.3) unstable; urgency=medium
+
+  * Add explicit SGI L1 interface matches and probe diagnostics.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 26 May 2026 23:50:00 +0100
+
+sgi-l1-usb-control (0.1.2) unstable; urgency=medium
+
+  * Add read-only sgil1ctl IRouter text-command probe support.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 26 May 2026 22:45:00 +0100
+
+sgi-l1-usb-control (0.1.1) unstable; urgency=medium
+
+  * Fix DKMS build invocation so DKMS does not inject KERNELRELEASE into the
+    module subdirectory Makefile.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 12 May 2026 20:00:00 +0100
+
 sgi-l1-usb-control (0.1.0) unstable; urgency=medium
 
   * Initial DKMS driver and sgil1ctl packaging.
 
- -- Stuart <stuart@localhost>  Tue, 12 May 2026 20:00:00 +0100
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 12 May 2026 19:45:00 +0100

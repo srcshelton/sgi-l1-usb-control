@@ -2,11 +2,14 @@
 set -e
 
 PACKAGE_NAME="sgi-l1-usb"
-PACKAGE_VERSION="0.1.0"
+PACKAGE_VERSION="$(dpkg-query -W -f='${Version}' sgi-l1-usb-dkms 2>/dev/null | sed 's/-.*//; s/.*://')"
 
 case "$1" in
 	configure)
-		if command -v dkms >/dev/null 2>&1; then
+		if ! getent group sgil1 >/dev/null; then
+			addgroup --system sgil1 >/dev/null
+		fi
+		if [ -n "$PACKAGE_VERSION" ] && command -v dkms >/dev/null 2>&1; then
 			dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all >/dev/null 2>&1 || true
 			dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
 			dkms build -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"

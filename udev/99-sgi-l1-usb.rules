@@ -3,8 +3,5 @@
 # The kernel device names are intentionally legacy-compatible.  The stable
 # symlinks below give local tooling a predictable place to look.
 
-SUBSYSTEM=="usb", ATTR{idVendor}=="065e", ATTR{idProduct}=="1234", TAG+="uaccess"
-
-KERNEL=="sgil1_cs", MODE="0444", SYMLINK+="sgi-l1/status"
-KERNEL=="sgil1_[0-9]*", MODE="0660", GROUP="dialout", SYMLINK+="sgi-l1/l1-%n"
-KERNEL=="sgil1_0", MODE="0660", GROUP="dialout", SYMLINK+="sgi-l1/fuel-l1"
+KERNEL=="sgil1_cs", GROUP="sgil1", MODE="0660", SYMLINK+="sgi-l1/status"
+KERNEL=="sgil1_[0-9]*", GROUP="sgil1", MODE="0660", SYMLINK+="sgi-l1/l1-%n"
