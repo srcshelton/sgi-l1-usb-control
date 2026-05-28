@@ -29,6 +29,14 @@ class KernelDriverStaticTests(unittest.TestCase):
             text=True,
         ).strip()
 
+    def make_print_version(self, env=None):
+        return subprocess.check_output(
+            ["make", "--no-print-directory", "-s", "print-version"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+        ).strip()
+
     def test_module_builds_with_warning_and_sparse_checks(self):
         subprocess.run(["make", "-C", str(ROOT / "module"), "clean"], check=True)
         subprocess.run(["make", "-C", str(ROOT / "module"), "W=1"], check=True)
@@ -73,11 +81,7 @@ class KernelDriverStaticTests(unittest.TestCase):
 
     def test_versions_derive_from_debian_changelog(self):
         version = self.current_version()
-        make_version = subprocess.check_output(
-            ["make", "-s", "print-version"],
-            cwd=ROOT,
-            text=True,
-        ).strip()
+        make_version = self.make_print_version()
         module_make = MODULE_MAKEFILE.read_text()
         dkms_template = DKMS_TEMPLATE.read_text()
         debian_rules = DEBIAN_RULES.read_text()
@@ -113,12 +117,7 @@ class KernelDriverStaticTests(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{tmpdir}:{env.get('PATH', '')}"
 
-            make_version = subprocess.check_output(
-                ["make", "-s", "print-version"],
-                cwd=ROOT,
-                env=env,
-                text=True,
-            ).strip()
+            make_version = self.make_print_version(env=env)
             self.assertEqual(make_version, version)
 
             subprocess.run(["make", "-C", str(ROOT / "module"), "clean"], env=env, check=True)
