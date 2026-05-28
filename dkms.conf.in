@@ -1,0 +1,8 @@
+PACKAGE_NAME="sgi-l1-usb"
+PACKAGE_VERSION="@VERSION@"
+BUILT_MODULE_NAME[0]="sgi_l1_usb"
+BUILT_MODULE_LOCATION[0]="module"
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+AUTOINSTALL="yes"
+MAKE[0]="'make' SGI_L1_VERSION=@VERSION@ KDIR=/lib/modules/${kernelver}/build -C module"
+CLEAN="'make' SGI_L1_VERSION=@VERSION@ KDIR=/lib/modules/${kernelver}/build -C module clean"

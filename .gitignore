@@ -16,6 +16,7 @@
 /debian/sgi-l1-usb-dkms/
 /debian/*.substvars
 /debian/.debhelper/
+/dkms.conf
 /tools/sgil1ctl
 /_build/
 __pycache__/

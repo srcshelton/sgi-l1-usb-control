@@ -3,7 +3,7 @@
 include /usr/share/dpkg/pkg-info.mk
 include /usr/share/dpkg/architecture.mk
 
-DKMS_SRC := debian/sgi-l1-usb-dkms/usr/src/sgi-l1-usb-$(DEB_VERSION_UPSTREAM)
+DKMS_SRC := debian/sgi-l1-usb-dkms/usr/src/sgi-l1-usb-$(DEB_VERSION)
 
 ifeq ($(DEB_BUILD_GNU_TYPE),$(DEB_HOST_GNU_TYPE))
 DEB_CC := cc
@@ -32,6 +32,7 @@ override_dh_auto_test:
 override_dh_install:
 	dh_install
 	install -d $(DKMS_SRC)/include $(DKMS_SRC)/module
-	install -m 0644 dkms.conf $(DKMS_SRC)/
+	sed 's/@VERSION@/$(DEB_VERSION)/g' dkms.conf.in > $(DKMS_SRC)/dkms.conf
+	chmod 0644 $(DKMS_SRC)/dkms.conf
 	install -m 0644 include/sgi_l1_ioctl.h $(DKMS_SRC)/include/
 	install -m 0644 module/Makefile module/sgi_l1_usb.c $(DKMS_SRC)/module/

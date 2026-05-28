@@ -1,3 +1,15 @@
+sgi-l1-usb-control (0.1.45) unstable; urgency=medium
+
+  * Make debian/changelog the single source of truth for project versioning.
+  * Generate dkms.conf from dkms.conf.in during packaging and manual builds.
+  * Pass the package version into the kernel module build with a compiler
+    define, keeping source builds versioned without Debian tooling.
+  * Extend tests to verify package, DKMS template, Makefile, and module
+    versions all agree.
+  * Test non-Debian-style module builds where dpkg-parsechangelog is absent.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 28 May 2026 01:10:00 +0100
+
 sgi-l1-usb-control (0.1.44) unstable; urgency=medium
 
   * Replace the raw Linux arm64 sgil1ctl tarball CI artifact with a proper

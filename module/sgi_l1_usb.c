@@ -23,7 +23,10 @@
 
 #include <sgi_l1_ioctl.h>
 
-#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb 0.1.44"
+#ifndef SGI_L1_VERSION
+#define SGI_L1_VERSION		"unknown"
+#endif
+#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb " SGI_L1_VERSION
 #define SGI_L1_MINOR_BASE	208
 #define SGI_L1_STATUS_MINOR	249
 #define SGI_L1_MAX_TRANSFER	4096
@@ -899,5 +902,6 @@ module_exit(sgi_l1_exit);
 
 MODULE_AUTHOR("Stuart Shelton <stuart@shelton.me>");
 MODULE_DESCRIPTION("USB transport driver for SGI L1 system controllers");
+MODULE_VERSION(SGI_L1_VERSION);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_MISCDEV(SGI_L1_STATUS_MINOR);

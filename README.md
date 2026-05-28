@@ -115,6 +115,12 @@ make -C module KDIR=/lib/modules/$(uname -r)/build
 make -C tools
 ```
 
+The module build derives its version from `debian/changelog`. If Debian's
+`dpkg-parsechangelog` tool is unavailable, the build falls back to parsing the
+latest changelog entry directly, so source builds on non-Debian systems still
+produce a versioned module. If building a detached copy of `module/`, pass an
+explicit version with `SGI_L1_VERSION=...`.
+
 Install the module:
 
 ```sh
