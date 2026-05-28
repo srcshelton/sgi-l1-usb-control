@@ -163,9 +163,21 @@ static struct mock_fd *fd_entry(int fd)
 
 static bool is_data_path(const char *path)
 {
-	return !strcmp(path, "/dev/sgi-l1/l1-0") ||
-	       !strcmp(path, "/dev/sgil1_0") ||
-	       !strcmp(path, "/dev/usb/sgil1_0");
+	const char *index = getenv("SGIL1_MOCK_DATA_INDEX");
+	char stable[64];
+	char legacy[64];
+	char usb[64];
+
+	if (!index || !*index)
+		index = "0";
+
+	snprintf(stable, sizeof(stable), "/dev/sgi-l1/l1-%s", index);
+	snprintf(legacy, sizeof(legacy), "/dev/sgil1_%s", index);
+	snprintf(usb, sizeof(usb), "/dev/usb/sgil1_%s", index);
+
+	return !strcmp(path, stable) ||
+	       !strcmp(path, legacy) ||
+	       !strcmp(path, usb);
 }
 
 static bool is_status_path(const char *path)

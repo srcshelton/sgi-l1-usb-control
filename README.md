@@ -57,6 +57,10 @@ a specific SGI workstation or server model.
 - `/dev/usb/sgil1_N`: compatibility fallback path on systems that place USB
   character devices under `/dev/usb`.
 
+The data-node suffix is assigned by the host USB layer and may not match the
+status-device index shown by `sgil1ctl probe`. `sgil1ctl` auto mode scans the
+available `l1-*`/`sgil1_*` data nodes rather than assuming `0`.
+
 The package creates the `sgil1` system group if needed. Add users who need
 remote-management access to SGI L1 controllers to that group:
 

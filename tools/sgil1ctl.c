@@ -56,6 +56,7 @@
 #define SGIL1_WAIT_BIND_SETTLE_MS 1000
 #define SGIL1_L1CMD_RESPONSE_TIMEOUT 3
 #define SGIL1_L1CMD_DISCOVERY_TIMEOUT 4
+#define SGIL1_AUTO_DEVICE_MAX 255
 #define SGIL1_TZ_MAX 128
 #define SGIL1_LOCK_PATH "/var/lock/sgil1ctl.lock"
 #define SGIL1_LOCK_FALLBACK_PATH "/tmp/sgil1ctl.lock"
@@ -63,10 +64,10 @@
 
 static int sgil1_lock_fd = -1;
 
-static const char *data_candidates[] = {
-	"/dev/sgi-l1/l1-0",
-	"/dev/sgil1_0",
-	"/dev/usb/sgil1_0",
+static const char *data_candidate_patterns[] = {
+	"/dev/sgi-l1/l1-%u",
+	"/dev/sgil1_%u",
+	"/dev/usb/sgil1_%u",
 };
 
 static const char *status_candidates[] = {
@@ -117,6 +118,7 @@ static int do_power_up_confirmed(const struct options *opts,
 				 bool allow_destructive);
 static int do_power_down_confirmed(const struct options *opts,
 				   bool allow_destructive);
+static const char *find_existing_data_device(const struct options *opts);
 
 static void usage(FILE *out, bool full)
 {
@@ -125,7 +127,7 @@ static void usage(FILE *out, bool full)
 		"\n"
 			"Global options:\n"
 			"  --device PATH         data device path (default: auto)\n"
-			"                        auto tries /dev/sgi-l1/l1-0, /dev/sgil1_0, /dev/usb/sgil1_0\n"
+			"                        auto scans /dev/sgi-l1/l1-*, /dev/sgil1_*, /dev/usb/sgil1_*\n"
 			"  --status-device PATH  status device path (default: auto)\n"
 			"                        auto tries /dev/sgi-l1/status, /dev/sgil1_cs\n"
 			"  --timeout MS          poll timeout for reads (default 3000)\n"
@@ -170,7 +172,7 @@ static void usage(FILE *out, bool full)
 			"  --no-discover         skip automatic L1 command destination discovery\n"
 		"\n"
 		"Diagnostics:\n"
-		"  probe                 show status device and first data device\n"
+		"  probe                 show status device and first available data device\n"
 		"  discover              discover and print the L1 command destination\n"
 		"  driver-status         read sgil1_cs status bitmap\n"
 		"  read-cfg              read SGIL1_READ_CFG from the data device\n"
@@ -208,6 +210,33 @@ static const char *first_existing(const char *const *paths, size_t count)
 	}
 
 	return paths[0];
+}
+
+static int format_data_candidate(char *buf, size_t len, const char *pattern,
+				 unsigned int index)
+{
+	int n = snprintf(buf, len, pattern, index);
+
+	return n >= 0 && (size_t)n < len ? 0 : -1;
+}
+
+static const char *find_auto_data_device(char *buf, size_t len)
+{
+	size_t i;
+	unsigned int index;
+
+	for (i = 0; i < ARRAY_SIZE(data_candidate_patterns); i++) {
+		for (index = 0; index <= SGIL1_AUTO_DEVICE_MAX; index++) {
+			if (format_data_candidate(buf, len,
+						  data_candidate_patterns[i],
+						  index))
+				continue;
+			if (path_exists(buf))
+				return buf;
+		}
+	}
+
+	return NULL;
 }
 
 static int open_lock_file_at(const char *path)
@@ -304,11 +333,17 @@ static bool command_uses_l1_transaction(const char *cmd)
 
 static int open_data_device(const struct options *opts, int flags)
 {
+	char auto_path[PATH_MAX];
 	const char *path = opts->device;
 	int fd;
 
 	if (!path)
-		path = first_existing(data_candidates, ARRAY_SIZE(data_candidates));
+		path = find_auto_data_device(auto_path, sizeof(auto_path));
+	if (!path) {
+		fprintf(stderr,
+			"no SGI L1 data device found; tried /dev/sgi-l1/l1-*, /dev/sgil1_*, /dev/usb/sgil1_*\n");
+		return -1;
+	}
 
 	fd = open(path, flags);
 	if (fd < 0)
@@ -830,6 +865,7 @@ static int do_read_cfg(const struct options *opts)
 static int do_probe(const struct options *opts)
 {
 	char rev[SGIL1_REV_LEN];
+	const char *path;
 	int fd;
 	int ret = 0;
 
@@ -844,6 +880,10 @@ static int do_probe(const struct options *opts)
 	ret = do_driver_status(opts);
 	if (ret)
 		return ret;
+
+	path = find_existing_data_device(opts);
+	if (path)
+		printf("data device: %s\n", path);
 
 	return do_read_cfg(opts);
 }
@@ -2308,17 +2348,12 @@ static int trailing_force_only(int argc, char **argv, int command_index,
 
 static const char *find_existing_data_device(const struct options *opts)
 {
-	size_t i;
+	static char auto_path[PATH_MAX];
 
 	if (opts->device)
 		return path_exists(opts->device) ? opts->device : NULL;
 
-	for (i = 0; i < ARRAY_SIZE(data_candidates); i++) {
-		if (path_exists(data_candidates[i]))
-			return data_candidates[i];
-	}
-
-	return NULL;
+	return find_auto_data_device(auto_path, sizeof(auto_path));
 }
 
 static int parse_int_arg(const char *text, int min, int max, int *value)
@@ -3298,7 +3333,7 @@ static bool wait_event_may_remove_l1(const struct inotify_event *event,
 		return true;
 
 	return !strcmp(event->name, "sgi-l1") ||
-	       !strcmp(event->name, "sgil1_0") ||
+	       !strncmp(event->name, "sgil1_", strlen("sgil1_")) ||
 	       !strcmp(event->name, "usb");
 }
 
@@ -3373,7 +3408,7 @@ static int wait_for_data_device(const struct options *opts,
 
 		if (!reported) {
 			const char *path = opts->device ? opts->device :
-				"/dev/sgil1_0 or /dev/sgi-l1/*";
+				"/dev/sgi-l1/l1-* or /dev/sgil1_*";
 
 			if (background && !seen_absence)
 				printf("SGI L1 USB device already present at %s; waiting for disconnect before next bind\n",

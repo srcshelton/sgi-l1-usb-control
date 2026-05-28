@@ -51,6 +51,37 @@ class Sgil1CtlMockTests(unittest.TestCase):
             timeout=10,
         )
 
+    def run_ctl_auto_data(self, args, extra_env=None, check=False):
+        env = os.environ.copy()
+        env.update(
+            {
+                "LD_PRELOAD": str(MOCK),
+                "SGIL1_MOCK": "1",
+                "SGIL1_MOCK_NO_SLEEP": "1",
+                "TZ": "Europe/London",
+            }
+        )
+        if extra_env:
+            env.update(extra_env)
+
+        cmd = [
+            str(BIN),
+            "--status-device",
+            "/dev/sgi-l1/status",
+            "--timeout",
+            "10",
+        ] + args
+        return subprocess.run(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=check,
+            timeout=10,
+        )
+
     def run_with_log(self, args, extra_env=None):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "mock.log"
@@ -66,6 +97,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("driver=sgi-l1-usb mock", proc.stdout)
         self.assertIn("sgil1_0 present", proc.stdout)
+        self.assertIn("data device: /dev/sgi-l1/l1-0", proc.stdout)
         self.assertIn("bus=2 dev=10 level=2 path=1.1", proc.stdout)
 
     def test_version_uses_mock_irouter_transport_without_debug_noise(self):
@@ -75,6 +107,15 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("L1 1.24.11", proc.stdout)
         self.assertNotIn("sent L1 command", proc.stdout)
         self.assertIn("CMD version", log)
+
+    def test_auto_device_scans_nonzero_data_nodes(self):
+        proc = self.run_ctl_auto_data(
+            ["version"],
+            {"SGIL1_MOCK_DATA_INDEX": "2"},
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("L1 1.24.11", proc.stdout)
 
     def test_status_consolidates_expected_sections(self):
         proc = self.run_ctl(["status"])
