@@ -8,6 +8,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -84,6 +85,16 @@ static uint max_write_size = SGI_L1_MAX_TRANSFER;
 module_param(max_write_size, uint, 0644);
 MODULE_PARM_DESC(max_write_size,
 		 "maximum write transfer size in bytes; defaults to the legacy 4096-byte transport limit and is clamped to 2..4096");
+
+static bool legacy_status_ioctl;
+module_param(legacy_status_ioctl, bool, 0644);
+MODULE_PARM_DESC(legacy_status_ioctl,
+		 "accept the original SGI L2/L3 status revision ioctl encoding; disabled by default");
+
+static bool legacy_reset_pipes;
+module_param(legacy_reset_pipes, bool, 0644);
+MODULE_PARM_DESC(legacy_reset_pipes,
+		 "use the original SGI L2/L3 endpoint set-halt then clear-halt reset-pipes sequence; disabled by default");
 
 static int sgi_l1_probe(struct usb_interface *interface,
 			const struct usb_device_id *id);
@@ -437,13 +448,20 @@ static __poll_t sgi_l1_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
-static int sgi_l1_clear_halt(struct sgi_l1_device *dev, unsigned int pipe)
+static unsigned int sgi_l1_pipe_endpoint(unsigned int pipe)
 {
 	unsigned int endpoint = usb_pipeendpoint(pipe);
-	int ret;
 
 	if (usb_pipein(pipe))
 		endpoint |= USB_DIR_IN;
+
+	return endpoint;
+}
+
+static int sgi_l1_clear_halt(struct sgi_l1_device *dev, unsigned int pipe)
+{
+	unsigned int endpoint = sgi_l1_pipe_endpoint(pipe);
+	int ret;
 
 	ret = usb_clear_halt(dev->udev, pipe);
 	if (ret)
@@ -452,6 +470,36 @@ static int sgi_l1_clear_halt(struct sgi_l1_device *dev, unsigned int pipe)
 			 endpoint, ret);
 
 	return ret;
+}
+
+static int sgi_l1_set_endpoint_halt(struct sgi_l1_device *dev, unsigned int pipe)
+{
+	unsigned int endpoint = sgi_l1_pipe_endpoint(pipe);
+	int ret;
+
+	ret = usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0),
+			      USB_REQ_SET_FEATURE, USB_RECIP_ENDPOINT,
+			      USB_ENDPOINT_HALT, endpoint, NULL, 0,
+			      SGI_L1_WRITE_TIMEOUT_MS);
+	if (ret)
+		dev_warn(&dev->udev->dev,
+			 "set halt failed for endpoint 0x%02x: %d\n",
+			 endpoint, ret);
+
+	return ret;
+}
+
+static int sgi_l1_legacy_reset_halt(struct sgi_l1_device *dev,
+				    unsigned int pipe)
+{
+	int ret;
+
+	ret = sgi_l1_set_endpoint_halt(dev, pipe);
+	if (ret)
+		return ret;
+
+	msleep(20);
+	return sgi_l1_clear_halt(dev, pipe);
 }
 
 static bool sgi_l1_is_present(struct sgi_l1_device *dev)
@@ -481,11 +529,17 @@ static int sgi_l1_reset_pipes_locked(struct sgi_l1_device *dev)
 	usb_kill_urb(dev->read_urb);
 	sgi_l1_clear_read_state(dev);
 
-	ret = sgi_l1_clear_halt(dev, dev->bulk_out_pipe);
+	if (legacy_reset_pipes)
+		ret = sgi_l1_legacy_reset_halt(dev, dev->bulk_out_pipe);
+	else
+		ret = sgi_l1_clear_halt(dev, dev->bulk_out_pipe);
 	if (ret && !first_ret)
 		first_ret = ret;
 
-	ret = sgi_l1_clear_halt(dev, dev->bulk_in_pipe);
+	if (legacy_reset_pipes)
+		ret = sgi_l1_legacy_reset_halt(dev, dev->bulk_in_pipe);
+	else
+		ret = sgi_l1_clear_halt(dev, dev->bulk_in_pipe);
 	if (ret && !first_ret)
 		first_ret = ret;
 
@@ -637,6 +691,14 @@ static long sgi_l1_status_ioctl(struct file *file, unsigned int cmd,
 	switch (cmd) {
 	case SGIL1_ST_READ_REV:
 		if (copy_to_user((void __user *)arg, rev, sizeof(rev)))
+			ret = -EFAULT;
+		break;
+	case SGIL1_ST_READ_REV_LEGACY:
+		if (!legacy_status_ioctl) {
+			ret = -ENOTTY;
+			break;
+		}
+		if (copy_to_user((void __user *)arg, rev, sizeof(int)))
 			ret = -EFAULT;
 		break;
 	case SGIL1_ST_READ_DEV_CFG:

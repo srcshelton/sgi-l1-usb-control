@@ -29,6 +29,13 @@ typedef struct sgil1_cfg sgil1_cfg_t;
 #define SGIL1_RESET_PIPES	_IO(SGIL1_IOCTL_BASE, 5)
 
 #define SGIL1_ST_READ_REV	_IOR(SGIL1_IOCTL_BASE, 6, char[64])
+/*
+ * Original SGI L2/L3 binaries were built against an older header that encoded
+ * this status ioctl with sizeof(int).  Keep the distinct command number
+ * available so the driver can accept those binaries without changing the
+ * modern, bounded revision-buffer ABI above.
+ */
+#define SGIL1_ST_READ_REV_LEGACY	_IOR(SGIL1_IOCTL_BASE, 6, int)
 #define SGIL1_ST_READ_DEV_CFG	_IOWR(SGIL1_IOCTL_BASE, 7, struct sgil1_cfg)
 
 #endif /* _SGI_L1_IOCTL_H */

@@ -61,6 +61,8 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertNotRegex(info, r"(?m)^version:\s+unknown$")
         self.assertIn("parm:           reset_on_close:", info)
         self.assertIn("parm:           max_write_size:", info)
+        self.assertIn("parm:           legacy_status_ioctl:", info)
+        self.assertIn("parm:           legacy_reset_pipes:", info)
         self.assertIn("ic00isc00ipFF", info)
         self.assertIn("icFFiscFFip00", info)
 
@@ -72,9 +74,22 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertNotIn("usb_reset_device(dev->udev)", src)
         self.assertIn("mutex_trylock(&dev->io_mutex)", src)
         self.assertIn("GFP_ATOMIC", src)
+        self.assertIn("init_waitqueue_head(&dev->read_wait)", src)
+        self.assertLess(
+            src.index("init_waitqueue_head(&dev->read_wait)"),
+            src.index("usb_set_intfdata(interface, dev)"),
+        )
         self.assertIn("usb_clear_halt(dev->udev, pipe)", src)
+        self.assertIn("usb_control_msg(dev->udev, usb_sndctrlpipe(dev->udev, 0)", src)
+        self.assertIn("USB_REQ_SET_FEATURE", src)
+        self.assertIn("USB_ENDPOINT_HALT", src)
+        self.assertIn("msleep(20)", src)
         self.assertNotIn("usb_get_std_status", src)
         self.assertIn("module_param(max_write_size", src)
+        self.assertIn("module_param(legacy_status_ioctl", src)
+        self.assertIn("module_param(legacy_reset_pipes", src)
+        self.assertIn("static bool legacy_status_ioctl;", src)
+        self.assertIn("static bool legacy_reset_pipes;", src)
         self.assertIn('#define SGI_L1_VERSION\t\t"unknown"', src)
         self.assertIn('MODULE_VERSION(SGI_L1_VERSION)', src)
         self.assertNotIn("sgi-l1-usb 0.", src)
