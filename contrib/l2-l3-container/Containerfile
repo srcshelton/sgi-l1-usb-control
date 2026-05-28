@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Build with a locally extracted SGI L3 payload:
+#
+#   mkdir -p rootfs
+#   cd rootfs
+#   rpm2cpio /path/to/snxsc_l3-1.62.0-1.i386.rpm | cpio -id
+#   cd ..
+#   ../../scripts/build-l2-l3-container.sh podman
+
+ARG TARGETPLATFORM=linux/386
+FROM --platform=${TARGETPLATFORM} debian:trixie-slim
+
+COPY rootfs/ /opt/snxsc_l3/
+
+RUN test -x /opt/snxsc_l3/stand/sysco/bin/l2 && \
+    test -x /opt/snxsc_l3/stand/sysco/bin/l2cmd
+
+ENV PATH="/opt/snxsc_l3/stand/sysco/bin:${PATH}"
+WORKDIR /opt/snxsc_l3
+
+ENTRYPOINT ["/bin/sh", "-lc"]
+CMD ["l2cmd --help"]

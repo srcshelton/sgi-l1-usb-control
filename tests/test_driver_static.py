@@ -20,6 +20,9 @@ UDEV = ROOT / "udev" / "99-sgi-l1-usb.rules"
 POSTINST = ROOT / "debian" / "sgi-l1-usb-dkms.postinst"
 CONTROL = ROOT / "debian" / "control"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+L2_L3_CONTAINER = ROOT / "contrib" / "l2-l3-container" / "Containerfile"
+L2_L3_CONTAINER_README = ROOT / "contrib" / "l2-l3-container" / "README.md"
+L2_L3_CONTAINER_SCRIPT = ROOT / "scripts" / "build-l2-l3-container.sh"
 
 
 class KernelDriverStaticTests(unittest.TestCase):
@@ -156,6 +159,91 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("USB_DEVICE_AND_INTERFACE_INFO", src)
         self.assertIn("USB_CLASS_VENDOR_SPEC", src)
         self.assertIn("0, 0, 0xff", src)
+
+    def test_kernel_source_accepts_original_status_revision_ioctl(self):
+        src = MODULE.read_text()
+        header = (ROOT / "include" / "sgi_l1_ioctl.h").read_text()
+
+        self.assertIn("#define SGIL1_ST_READ_REV_LEGACY\t_IOR(SGIL1_IOCTL_BASE, 6, int)", header)
+        self.assertIn("case SGIL1_ST_READ_REV_LEGACY:", src)
+        self.assertIn("if (!legacy_status_ioctl)", src)
+        self.assertIn("copy_to_user((void __user *)arg, rev, sizeof(int))", src)
+        self.assertNotIn("static bool legacy_status_ioctl = true;", src)
+        self.assertIn("disabled by default", src)
+
+    def test_l2_l3_container_targets_are_documented_and_scripted(self):
+        makefile = MAKEFILE.read_text()
+        readme = (ROOT / "README.md").read_text()
+        container_readme = L2_L3_CONTAINER_README.read_text()
+        containerfile = L2_L3_CONTAINER.read_text()
+        script = L2_L3_CONTAINER_SCRIPT.read_text()
+
+        subprocess.run(["sh", "-n", str(L2_L3_CONTAINER_SCRIPT)], check=True)
+        self.assertIn("help:", makefile)
+        self.assertIn("L2_L3_CONTAINER_SCRIPT := scripts/build-l2-l3-container.sh", makefile)
+        self.assertIn("container-docker:", makefile)
+        self.assertIn("container-podman:", makefile)
+        self.assertIn("container-apple:", makefile)
+        self.assertIn("$(L2_L3_CONTAINER_SCRIPT) docker", makefile)
+        self.assertIn("$(L2_L3_CONTAINER_SCRIPT) podman", makefile)
+        self.assertIn("$(L2_L3_CONTAINER_SCRIPT) container", makefile)
+        self.assertIn("legacy_status_ioctl=1 legacy_reset_pipes=1", readme)
+        self.assertIn("legacy_status_ioctl=1 legacy_reset_pipes=1", container_readme)
+        self.assertIn("https://www.graphica.com.au/files/cd-ist-3.24.taz", script)
+        self.assertIn("https://usftp.irixnet.org/sgi-tools/l3-emulator-linux.tar.gz", script)
+        self.assertIn("SGI_L3_FETCH=1", script)
+        self.assertIn("snxsc_l3-1.62.0-1.i386.rpm", script)
+        self.assertIn("ARG TARGETPLATFORM=linux/386", containerfile)
+        self.assertIn("FROM --platform=${TARGETPLATFORM}", containerfile)
+        self.assertIn("test -x /opt/snxsc_l3/stand/sysco/bin/l2", containerfile)
+        self.assertIn("test -x /opt/snxsc_l3/stand/sysco/bin/l2cmd", containerfile)
+        self.assertIn("[ \"$(uname -s)\" = Darwin ]", script)
+        self.assertIn("[ \"$(uname -m)\" = arm64 ]", script)
+        self.assertIn("container build", script)
+        self.assertIn("--arch \"${SGI_L3_CONTAINER_ARCH:-amd64}\"", script)
+
+    def test_l2_l3_container_script_builds_with_existing_rootfs(self):
+        containerfile = L2_L3_CONTAINER.read_text()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            container_dir = tmp / "container"
+            fakebin = tmp / "bin"
+            log = tmp / "runtime.log"
+            (container_dir / "rootfs" / "stand" / "sysco" / "bin").mkdir(parents=True)
+            (container_dir / "Containerfile").write_text(containerfile)
+            for tool in ("l2", "l2cmd"):
+                path = container_dir / "rootfs" / "stand" / "sysco" / "bin" / tool
+                path.write_text("#!/bin/sh\nexit 0\n")
+                path.chmod(0o755)
+
+            fakebin.mkdir()
+            fake_podman = fakebin / "podman"
+            fake_podman.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$@\" > {log}\n"
+                "exit 0\n"
+            )
+            fake_podman.chmod(0o755)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fakebin}:{env.get('PATH', '')}"
+            env["SGI_L3_CONTAINER_DIR"] = str(container_dir)
+            env["SGI_L3_IMAGE"] = "sgil1-l2-l3-tools:test"
+
+            subprocess.run(
+                [str(L2_L3_CONTAINER_SCRIPT), "podman"],
+                cwd=ROOT,
+                env=env,
+                check=True,
+            )
+
+            args = log.read_text()
+            self.assertIn("build\n", args)
+            self.assertIn("--platform\nlinux/386\n", args)
+            self.assertIn("--build-arg\nTARGETPLATFORM=linux/386\n", args)
+            self.assertIn("-t\nsgil1-l2-l3-tools:test\n", args)
+            self.assertIn(f"-f\n{container_dir / 'Containerfile'}\n", args)
 
     def test_udev_rules_are_generic_and_group_restricted(self):
         rules = UDEV.read_text()

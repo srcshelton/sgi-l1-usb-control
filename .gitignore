@@ -19,4 +19,8 @@
 /dkms.conf
 /tools/sgil1ctl
 /_build/
+/contrib/l2-l3-container/_work/
+/contrib/l2-l3-container/downloads/
+/contrib/l2-l3-container/rootfs/
+/contrib/l2-l3-container/*.rpm
 __pycache__/

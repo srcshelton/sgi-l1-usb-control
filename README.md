@@ -219,6 +219,53 @@ sgil1ctl l1cmd '*' version
 Use `sgil1ctl --help` for the normal command set and `sgil1ctl --help-all` for
 developer and protocol-inspection options.
 
+## Legacy SGI L2/L3 Tools
+
+The driver keeps the legacy `/dev/sgil1_0` and `/dev/sgil1_cs` ABI so SGI's
+prebuilt L2/L3 tools can be tested without patching those binaries. For those
+tools, the expected path is to run SGI's `l2` daemon against the USB device and
+then use `l2cmd`, `l2find`, or `l2term` against the daemon:
+
+```sh
+sudo modprobe sgi_l1_usb legacy_status_ioctl=1 legacy_reset_pipes=1
+l2 -usb -nodiscover
+l2cmd --l2 127.0.0.1 "l1 version"
+```
+
+The compatibility parameters are disabled by default and should be enabled only
+when testing the prebuilt SGI tools:
+
+- `legacy_status_ioctl=1` accepts the original SGI status-revision ioctl number
+  used by L2/L3 startup probes.
+- `legacy_reset_pipes=1` enables the original endpoint set-halt, delay,
+  clear-halt sequence used by the SGI daemon when it opens and resets the USB
+  transport.
+
+Without these options, the driver keeps the smaller modern ioctl surface and the
+stricter kernel-standard `usb_clear_halt()` reset path.
+
+An optional container recipe is provided under `contrib/l2-l3-container/`.
+Supply an extracted `rootfs/`, a local `snxsc_l3-1.62.0-1.i386.rpm`, or an SGI
+CD-IST archive, then build with the runtime available on your host:
+
+```sh
+make container-podman SGI_L3_RPM=/path/to/snxsc_l3-1.62.0-1.i386.rpm
+make container-docker SGI_L3_ARCHIVE=/path/to/cd-ist-3.24.taz
+make container-apple SGI_L3_ARCHIVE=/path/to/cd-ist-3.24.taz
+```
+
+`container-apple` is limited to Apple Silicon macOS hosts with Apple's
+`container` CLI. It can package the SGI tools into an OCI image, but Docker or
+Podman with `linux/386` support remains the reference path for actually running
+the 32-bit SGI binaries.
+
+Direct SGI commands such as `l2cmd --scdev /dev/sgil1_0 version` or
+`l2cmd --scdev /dev/sgil1_0 --irtr version` may time out on a single L1 USB
+connection. In testing, those direct forms timed out both with this driver and
+with another modernized legacy `sgil1` driver, while the daemon-mediated
+`l2cmd --l2 127.0.0.1 ...` path successfully returned L1 `version`, `date`,
+`power`, `env`, `fan`, `usb`, and `log` output.
+
 ## Tests
 
 Run the hardware-free test suite:
@@ -234,6 +281,11 @@ mock L1 USB/status transport. To run tests and then build packages:
 ```sh
 make test-deb
 ```
+
+The SGI L3 package examined for compatibility contains controller utilities
+and man pages, but no explicit validation suite. Treat the read-only L2 daemon
+probes above as functional compatibility checks rather than a vendor test
+harness.
 
 ## USB Diagnostics
 
@@ -252,6 +304,16 @@ sudo modprobe sgi_l1_usb max_write_size=109
 
 The `reset_on_close=1` module parameter restores the original driver's
 reset-on-close behaviour for compatibility. It defaults to `0`.
+
+The `legacy_status_ioctl=1` module parameter enables the original SGI L2/L3
+status-revision ioctl encoding. It defaults to `0`, so modern callers use only
+the bounded ioctl ABI in `include/sgi_l1_ioctl.h`.
+
+The `legacy_reset_pipes=1` module parameter enables the original SGI L2/L3
+endpoint reset sequence for the `SGIL1_RESET_PIPES` ioctl. The default remains
+the kernel-standard `usb_clear_halt()` path; enable this only when testing
+prebuilt SGI L2/L3 binaries which expect the older set-halt, delay, clear-halt
+sequence.
 
 ## References
 
