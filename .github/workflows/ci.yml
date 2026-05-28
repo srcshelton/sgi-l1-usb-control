@@ -59,9 +59,58 @@ jobs:
           path: _build/*.deb
           if-no-files-found: error
 
+  sgil1ctl-arm64:
+    name: Build sgil1ctl for Linux arm64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install cross-build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            file \
+            gcc-aarch64-linux-gnu
+
+      - name: Build arm64 sgil1ctl
+        run: |
+          make -C tools clean
+          make -C tools CC=aarch64-linux-gnu-gcc
+          file tools/sgil1ctl
+
+      - name: Package arm64 sgil1ctl artifact
+        run: |
+          mkdir -p dist/sgil1ctl-linux-arm64
+          aarch64-linux-gnu-strip tools/sgil1ctl
+          cp tools/sgil1ctl dist/sgil1ctl-linux-arm64/
+          cp README.md COPYING dist/sgil1ctl-linux-arm64/
+          tar -C dist -czf dist/sgil1ctl-linux-arm64.tar.gz sgil1ctl-linux-arm64
+
+      - name: Add USB compatibility notice
+        run: |
+          {
+            echo "## Raspberry Pi USB compatibility note"
+            echo
+            echo "This workflow publishes a Linux arm64 sgil1ctl build, but that does not imply that every arm64 USB host can enumerate the SGI L1."
+            echo "Some Raspberry Pi USB host stacks may be incompatible with the SGI L1 controller's USB interface."
+            echo "If 065e:1234 does not appear reliably in lsusb, test with another USB host or controller."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload arm64 sgil1ctl artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sgil1ctl-linux-arm64
+          path: dist/sgil1ctl-linux-arm64.tar.gz
+          if-no-files-found: error
+
   release:
     name: Release versioned package
-    needs: test-and-package
+    needs:
+      - test-and-package
+      - sgil1ctl-arm64
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
     permissions:
@@ -115,6 +164,13 @@ jobs:
           name: debian-packages
           path: dist
 
+      - name: Download arm64 sgil1ctl artifact
+        if: steps.version.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: sgil1ctl-linux-arm64
+          path: dist
+
       - name: Create or update GitHub release
         if: steps.version.outputs.release == 'true'
         env:
@@ -124,9 +180,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.deb --clobber
+            gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/*.deb \
+            gh release create "$TAG" dist/* \
               --target "$GITHUB_SHA" \
               --title "$TAG" \
               --notes-file release-notes.txt

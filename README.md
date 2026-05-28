@@ -9,6 +9,14 @@ front-panel power button from working. It could also be useful with other
 L1-equipped SGI systems, including Origin 300x and Onyx 300x configurations,
 subject to the usual differences between L1 firmware revisions and brick types.
 
+> **Raspberry Pi USB compatibility note:** CI publishes a Linux arm64
+> `sgil1ctl` build for arm64 hosts, but that does not imply that every arm64
+> USB host can enumerate the quirky SGI L1 USB device. Some Raspberry Pi USB
+> host stacks may be incompatible with the SGI L1 controller's USB interface.
+> If `065e:1234` does not appear reliably in `lsusb` output, try a different
+> type/speed of USB port (if available) or see whether connecting the L1 cable
+> through a powered USB hub makes any difference.
+
 The L1 USB port is not a UART. SGI's original Linux software exposed it as a
 raw USB bulk transport carrying `IRouter` frames. This repository provides:
 
