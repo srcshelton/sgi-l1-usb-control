@@ -11,7 +11,7 @@ permissions:
 jobs:
   test-and-package:
     name: Test and package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out source
@@ -61,26 +61,24 @@ jobs:
 
   sgil1ctl-arm64:
     name: Build sgil1ctl Debian package for arm64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install cross-build dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
             debhelper \
             dpkg-dev \
-            file \
-            gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross
+            file
 
       - name: Build arm64 sgil1ctl Debian package
         run: |
-          dpkg-buildpackage -us -uc -B -aarm64
+          dpkg-buildpackage -us -uc -B
 
       - name: Verify arm64 package
         run: |
