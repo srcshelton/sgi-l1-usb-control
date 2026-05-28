@@ -1,3 +1,15 @@
+sgi-l1-usb-control (0.1.46) unstable; urgency=medium
+
+  * Add opt-in legacy SGI L2/L3 status ioctl and reset-pipes compatibility
+    paths while keeping both disabled by default.
+  * Document the module options needed when testing prebuilt SGI L2/L3 tools.
+  * Add Docker, Podman, and Apple container build targets for local SGI L2/L3
+    tool images.
+  * Extend static tests to cover the legacy compatibility options and
+    container build helper.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 28 May 2026 14:45:00 +0100
+
 sgi-l1-usb-control (0.1.45) unstable; urgency=medium
 
   * Make debian/changelog the single source of truth for project versioning.
