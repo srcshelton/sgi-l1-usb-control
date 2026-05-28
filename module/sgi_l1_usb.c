@@ -23,7 +23,7 @@
 
 #include <sgi_l1_ioctl.h>
 
-#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb 0.1.43"
+#define SGI_L1_DRIVER_VERSION	"sgi-l1-usb 0.1.44"
 #define SGI_L1_MINOR_BASE	208
 #define SGI_L1_STATUS_MINOR	249
 #define SGI_L1_MAX_TRANSFER	4096

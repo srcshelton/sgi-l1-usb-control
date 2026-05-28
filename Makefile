@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 PACKAGE := sgi-l1-usb-control
-VERSION := 0.1.43
+VERSION := 0.1.44
 BUILD_ROOT := _build
 BUILD_DIR := $(BUILD_ROOT)/$(PACKAGE)-$(VERSION)
 

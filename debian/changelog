@@ -1,3 +1,11 @@
+sgi-l1-usb-control (0.1.44) unstable; urgency=medium
+
+  * Replace the raw Linux arm64 sgil1ctl tarball CI artifact with a proper
+    sgil1ctl arm64 Debian package.
+  * Teach Debian packaging to honor cross-build compiler settings.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 28 May 2026 00:35:00 +0100
+
 sgi-l1-usb-control (0.1.43) unstable; urgency=medium
 
   * Build and publish a cross-compiled Linux arm64 sgil1ctl artifact from CI.
