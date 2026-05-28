@@ -175,6 +175,12 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("[ -z \"$missing_assets\" ]", workflow)
         self.assertIn("Release $tag is missing; publishing current version", workflow)
         self.assertIn("Release $tag is missing expected asset(s)", workflow)
+        self.assertIn("stale_notes=false", workflow)
+        self.assertIn("sgi-l1-usb-control (${current})", workflow)
+        self.assertIn("Release $tag notes contain Debian changelog metadata", workflow)
+        self.assertIn("Changes in %s", workflow)
+        self.assertIn("awk '", workflow)
+        self.assertIn('gh release edit "$TAG" --notes-file release-notes.txt', workflow)
 
 
 if __name__ == "__main__":

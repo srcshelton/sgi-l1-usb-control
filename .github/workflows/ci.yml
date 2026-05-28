@@ -128,7 +128,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dpkg-dev
 
-      - name: Check whether Debian version changed
+      - name: Check whether release should be published
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -158,22 +158,28 @@ jobs:
           )
           release_exists=false
           missing_assets=""
+          stale_notes=false
           if asset_names="$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null)"; then
             release_exists=true
+            body="$(gh release view "$tag" --json body --jq '.body')"
             for asset in "${expected_assets[@]}"; do
               if ! printf '%s\n' "$asset_names" | grep -Fxq "$asset"; then
                 missing_assets="${missing_assets}${missing_assets:+, }${asset}"
               fi
             done
+            if printf '%s\n' "$body" | grep -Fq "sgi-l1-usb-control (${current}) "; then
+              stale_notes=true
+            fi
           else
             missing_assets="release $tag does not exist"
           fi
 
           if [ "$version_changed" = false ] &&
              [ "$release_exists" = true ] &&
-             [ -z "$missing_assets" ]; then
+             [ -z "$missing_assets" ] &&
+             [ "$stale_notes" = false ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "Debian version unchanged at $current and release $tag has all expected assets"
+            echo "Debian version unchanged at $current and release $tag has all expected assets and notes"
             exit 0
           fi
 
@@ -187,11 +193,19 @@ jobs:
             echo "Debian version changed from ${previous:-<unknown>} to $current"
           elif [ "$release_exists" = false ]; then
             echo "Release $tag is missing; publishing current version"
+          elif [ "$stale_notes" = true ]; then
+            echo "Release $tag notes contain Debian changelog metadata; refreshing release notes"
           else
             echo "Release $tag is missing expected asset(s): $missing_assets"
           fi
 
-          dpkg-parsechangelog -S Changes > release-notes.txt
+          {
+            printf 'Changes in %s\n\n' "$tag"
+            dpkg-parsechangelog -S Changes | awk '
+              seen { sub(/^  /, ""); print }
+              /^\.$/ { seen = 1 }
+            '
+          } > release-notes.txt
 
       - name: Download package artifacts
         if: steps.version.outputs.release == 'true'
@@ -217,6 +231,7 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/*.deb --clobber
+            gh release edit "$TAG" --notes-file release-notes.txt
           else
             gh release create "$TAG" dist/*.deb \
               --target "$GITHUB_SHA" \
