@@ -19,6 +19,7 @@ VERSION_SCRIPT = ROOT / "scripts" / "package-version.sh"
 UDEV = ROOT / "udev" / "99-sgi-l1-usb.rules"
 POSTINST = ROOT / "debian" / "sgi-l1-usb-dkms.postinst"
 CONTROL = ROOT / "debian" / "control"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 class KernelDriverStaticTests(unittest.TestCase):
@@ -162,6 +163,18 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("addgroup --system sgil1", postinst)
         self.assertIn("getent group sgil1", postinst)
         self.assertIn("Depends: adduser, dkms, udev", control)
+
+    def test_ci_release_gate_backfills_missing_release_assets(self):
+        workflow = CI_WORKFLOW.read_text()
+
+        self.assertIn('tag="v${current}"', workflow)
+        self.assertIn("gh release view \"$tag\" --json assets", workflow)
+        self.assertIn('"sgi-l1-usb-dkms_${current}_all.deb"', workflow)
+        self.assertIn('"sgil1ctl_${current}_amd64.deb"', workflow)
+        self.assertIn('"sgil1ctl_${current}_arm64.deb"', workflow)
+        self.assertIn("[ -z \"$missing_assets\" ]", workflow)
+        self.assertIn("Release $tag is missing; publishing current version", workflow)
+        self.assertIn("Release $tag is missing expected asset(s)", workflow)
 
 
 if __name__ == "__main__":

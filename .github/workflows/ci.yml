@@ -130,10 +130,13 @@ jobs:
 
       - name: Check whether Debian version changed
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           current="$(dpkg-parsechangelog -S Version)"
+          tag="v${current}"
           before="${{ github.event.before }}"
           previous=""
           if [ -n "$before" ] &&
@@ -143,18 +146,50 @@ jobs:
             previous="$(git show "${before}:debian/changelog" | dpkg-parsechangelog -l- -S Version 2>/dev/null || true)"
           fi
 
+          version_changed=true
           if [ "$current" = "$previous" ]; then
+            version_changed=false
+          fi
+
+          expected_assets=(
+            "sgi-l1-usb-dkms_${current}_all.deb"
+            "sgil1ctl_${current}_amd64.deb"
+            "sgil1ctl_${current}_arm64.deb"
+          )
+          release_exists=false
+          missing_assets=""
+          if asset_names="$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            release_exists=true
+            for asset in "${expected_assets[@]}"; do
+              if ! printf '%s\n' "$asset_names" | grep -Fxq "$asset"; then
+                missing_assets="${missing_assets}${missing_assets:+, }${asset}"
+              fi
+            done
+          else
+            missing_assets="release $tag does not exist"
+          fi
+
+          if [ "$version_changed" = false ] &&
+             [ "$release_exists" = true ] &&
+             [ -z "$missing_assets" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
-            echo "Debian version unchanged at $current"
+            echo "Debian version unchanged at $current and release $tag has all expected assets"
             exit 0
           fi
 
-          tag="v${current}"
           {
             echo "release=true"
             echo "version=$current"
             echo "tag=$tag"
           } >> "$GITHUB_OUTPUT"
+
+          if [ "$version_changed" = true ]; then
+            echo "Debian version changed from ${previous:-<unknown>} to $current"
+          elif [ "$release_exists" = false ]; then
+            echo "Release $tag is missing; publishing current version"
+          else
+            echo "Release $tag is missing expected asset(s): $missing_assets"
+          fi
 
           dpkg-parsechangelog -S Changes > release-notes.txt
 
