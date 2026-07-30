@@ -209,14 +209,14 @@ jobs:
 
       - name: Download package artifacts
         if: steps.version.outputs.release == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: debian-packages
           path: dist
 
       - name: Download arm64 sgil1ctl Debian package
         if: steps.version.outputs.release == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sgil1ctl-arm64-deb
           path: dist
