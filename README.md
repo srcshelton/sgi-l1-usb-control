@@ -191,8 +191,11 @@ missed if the L1 log buffer wraps completely between polls. Use
 interval.
 
 `sgil1ctl leds --follow` repeatedly samples the L1 `leds` command and prints
-only changed output. It uses a fast poll interval for boot diagnostics and backs
-off when the L1 stops responding. `wait --power-up --follow` and
+only changed output. After each changed response it immediately polls again to
+catch fast-moving boot diagnostics, then returns to the steady poll interval
+once the output repeats; it backs off when the L1 stops responding. Known Fuel
+virtual LED values that old L1 firmware reports as unknown are decoded from the
+SGI Fuel Diagnostic Reference Manual. `wait --power-up --follow` and
 `reset --force --follow` enter the same LED-follow mode after the power-up or
 reset command path.
 

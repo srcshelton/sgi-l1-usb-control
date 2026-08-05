@@ -1,3 +1,15 @@
+sgi-l1-usb-control (0.1.48) unstable; urgency=medium
+
+  * Updated components since 0.1.47: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Document wait/reset --follow in sgil1ctl --help.
+  * Decode documented SGI Fuel virtual LED states when old L1 firmware reports
+    them as unknown, including 0x55 as "Global master in PROM".
+  * Make leds --follow poll again immediately after changed LED output, then
+    return to the steady poll interval once output repeats.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 05 Aug 2026 21:30:53 +0100
+
 sgi-l1-usb-control (0.1.47) unstable; urgency=medium
 
   * Updated components since 0.1.46: user-space sgil1ctl only; kernel module

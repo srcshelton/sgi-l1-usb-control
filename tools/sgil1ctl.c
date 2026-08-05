@@ -134,6 +134,7 @@ static int l1_text_command_status(const struct options *opts, const char *cmd,
 static char *l1_text_command(const struct options *opts, const char *cmd,
 			     bool allow_time_setting);
 static void print_text_block(const char *text);
+static void print_l1_command_text_block(const char *l1cmd, const char *text);
 static int do_power_up_confirmed(const struct options *opts,
 				 bool allow_destructive);
 static int do_power_down_confirmed(const struct options *opts,
@@ -163,13 +164,15 @@ static void usage(FILE *out, bool full)
 				"                        date options: --set-time,\n"
 				"                        --timezone TZ (default: host timezone with --set-time),\n"
 				"                        --drift-seconds SEC (default 60)\n"
-			"  wait [OPTIONS]        wait for an L1 USB device, then run status checks\n"
+			"  wait [-w|--follow] [OPTIONS]\n"
+				"                        wait for an L1 USB device, then run status checks\n"
 				"                        wait options: --background,\n"
 				"                        --wait-timeout SEC (default: none), --set-time,\n"
 				"                        --timezone TZ (default: host timezone with --set-time),\n"
 				"                        --drift-seconds SEC (default 60),\n"
 				"                        --power-up, --power-down, --reset,\n"
-				"                        --follow, --keepalive SEC (default 0), --force\n"
+				"                        -w|--follow after --power-up or --reset,\n"
+				"                        --keepalive SEC (default 0), --force\n"
 			"  version|usb|env       send read-only L1 text commands over USB\n"
 			"  log [-w|--follow]     print the L1 log, optionally following new lines\n"
 				"                        log options: --poll-interval MS,\n"
@@ -177,7 +180,8 @@ static void usage(FILE *out, bool full)
 			"  leds [-w|--follow]    print L1 front-panel LEDs, optionally following changes\n"
 			"  power [check|vrm]     send read-only L1 power status commands over USB\n"
 		"  power up|down         send power commands; requires --force\n"
-		"  reset                 send L1 reset command; requires --force\n"
+			"  reset --force [-w|--follow]\n"
+				"                        send L1 reset command, optionally following LEDs\n"
 			"  l1cmd <command> [...] send a live-help-listed L1 text command over USB\n"
 			"                        add --force to send a command not listed by help\n");
 
@@ -1855,7 +1859,7 @@ static int do_l1_command(const struct options *opts, const char *l1cmd,
 		return ret;
 
 	if (!opts->debug)
-		print_text_block(text);
+		print_l1_command_text_block(l1cmd, text);
 	free(text);
 	return 0;
 }
@@ -2320,13 +2324,13 @@ static int do_l1_pass_through_command(const struct options *opts,
 							    command_word);
 		}
 		if (!suppress_failure_text && !opts->debug)
-			print_text_block(text);
+			print_l1_command_text_block(lookup_cmd, text);
 		if (suppress_failure_text) {
 			printf("Help for '%s':\n", l1cmd);
 			print_text_block(command_help);
 		}
 	} else if (!opts->debug) {
-		print_text_block(text);
+		print_l1_command_text_block(lookup_cmd, text);
 	}
 	free(command_help);
 	free(text);
@@ -3106,6 +3110,291 @@ static void print_text_block(const char *text)
 		printf("(no output)\n");
 	if (!text || !*text || text[strlen(text) - 1] != '\n')
 		putchar('\n');
+}
+
+struct fuel_led_status {
+	uint8_t code;
+	const char *description;
+};
+
+struct text_builder {
+	char *buf;
+	size_t len;
+	size_t cap;
+};
+
+/* SGI Fuel Diagnostic Reference Manual, Table 3-6. */
+static const struct fuel_led_status fuel_led_statuses[] = {
+	{ 0x00, "In slave loop; 0x00/0x45=okay; solid; 0x00=possible hang (Power-on discovery; no failing component)" },
+	{ 0x01, "Initialize the processor, FPRs, and COP0 registers (Power-on discovery; no failing component)" },
+	{ 0x02, "Test processor COP1 registers (Power-on discovery; no failing component)" },
+	{ 0x03, "Switch to mapped mode (Power-on discovery; no failing component)" },
+	{ 0x04, "Test processor primary instruction cache (Power-on discovery; no failing component)" },
+	{ 0x05, "Test processor primary data cache (Power-on discovery; no failing component)" },
+	{ 0x06, "Test secondary cache (Power-on discovery; no failing component)" },
+	{ 0x07, "Flush all caches (Power-on discovery; no failing component)" },
+	{ 0x0a, "Invalidate processor primary instruction cache (Power-on discovery; no failing component)" },
+	{ 0x0b, "Invalidate processor primary data cache (Power-on discovery; no failing component)" },
+	{ 0x0c, "Invalidate secondary cache (Power-on discovery; no failing component)" },
+	{ 0x0d, "Successfully jumped to the main() function (Power-on discovery; no failing component)" },
+	{ 0x0e, "About to increase PROM access speed (Power-on discovery; no failing component)" },
+	{ 0x0f, "Increase PROM access speed (Power-on discovery; no failing component)" },
+	{ 0x10, "Not used (Power-on discovery; no failing component)" },
+	{ 0x18, "UART putc timed out (Power-on discovery; no failing component)" },
+	{ 0x1d, "About to initialize selected UART (Power-on discovery; no failing component)" },
+	{ 0x1e, "Done initializing selected UART (Power-on discovery; no failing component)" },
+	{ 0x21, "About to enter POD mode, C portion (Power-on discovery; no failing component)" },
+	{ 0x22, "Just about to enter POD prompt loop (Power-on discovery; no failing component)" },
+	{ 0x23, "About to enter POD mode, assembler portion (Power-on discovery; no failing component)" },
+	{ 0x24, "Performing local arbitration (CPU A/B) (Power-on discovery; no failing component)" },
+	{ 0x28, "About to perform first local barrier (Power-on discovery; no failing component)" },
+	{ 0x2a, "About to configure Dex mode stack and data (Power-on discovery; no failing component)" },
+	{ 0x2b, "Reached main() (Power-on discovery; no failing component)" },
+	{ 0x31, "In entry because of nonmaskable interrupt (NMI) (Power-on discovery; no failing component)" },
+	{ 0x35, "About to initialize hub real-time counter (Power-on discovery; no failing component)" },
+	{ 0x36, "Done initializing hub real-time counter (Power-on discovery; no failing component)" },
+	{ 0x38, "First local barrier succeeded (Power-on discovery; no failing component)" },
+	{ 0x3c, "About to jump to UALIAS space (Power-on discovery; no failing component)" },
+	{ 0x3d, "Jumped to UALIAS space (Power-on discovery; no failing component)" },
+	{ 0x3e, "About to jump to cached space (Power-on discovery; no failing component)" },
+	{ 0x3f, "Jumped to cached space (Power-on discovery; no failing component)" },
+	{ 0x40, "About to test stack area of memory (Power-on discovery; no failing component)" },
+	{ 0x41, "Done testing stack area of memory (Power-on discovery; no failing component)" },
+	{ 0x45, "Slave loop; 0x00/0x45=okay; solid; 0x45=possible hang (Power-on discovery; no failing component)" },
+	{ 0x46, "Received launch interrupt (Power-on discovery; no failing component)" },
+	{ 0x47, "Calling launched function (Power-on discovery; no failing component)" },
+	{ 0x48, "Launched function returned (Power-on discovery; no failing component)" },
+	{ 0x49, "Not used (Power-on discovery; no failing component)" },
+	{ 0x4a, "About to initialize hub MD and SIMM controls (Power-on discovery; no failing component)" },
+	{ 0x4b, "About to probe and configure memory size (Power-on discovery; no failing component)" },
+	{ 0x4f, "About to discover hub I/O (Power-on discovery; no failing component)" },
+	{ 0x51, "About to write router configuration information into KLCONFIG (Power-on discovery; no failing component)" },
+	{ 0x52, "About to initialize I/O section of hub (Power-on discovery; no failing component)" },
+	{ 0x53, "About to probe I/O section for console (Power-on discovery; no failing component)" },
+	{ 0x54, "Console probing completed (Power-on discovery; no failing component)" },
+	{ 0x55, "Global master in PROM (Power-on discovery; no failing component)" },
+	{ 0x56, "Done initializing I/O section of hub (Power-on discovery; no failing component)" },
+	{ 0x57, "Reset error state saved (Power-on discovery; no failing component)" },
+	{ 0x58, "Hub error registers cleared (Power-on discovery; no failing component)" },
+	{ 0x59, "Hub error checking enabled (Power-on discovery; no failing component)" },
+	{ 0x5a, "Done discovering hub I/O (Power-on discovery; no failing component)" },
+	{ 0x5b, "About to initialize NMI handler area (Power-on discovery; no failing component)" },
+	{ 0x5c, "About to test hub interrupts (Power-on discovery; no failing component)" },
+	{ 0x5d, "About to perform early reset of hub I/O section (Power-on discovery; no failing component)" },
+	{ 0x5e, "CPU came out of reset (Power-on discovery; no failing component)" },
+	{ 0x5f, "Going to reset I2C (Power-on discovery; no failing component)" },
+	{ 0x60, "Finished resetting I2C (Power-on discovery; no failing component)" },
+	{ 0x70, "Running BIST on bank 0 (Power-on discovery; no failing component)" },
+	{ 0x71, "Running BIST on bank 1 (Power-on discovery; no failing component)" },
+	{ 0x72, "Running BIST on bank 2 (Power-on discovery; no failing component)" },
+	{ 0x73, "Running BIST on bank 3 (Power-on discovery; no failing component)" },
+	{ 0x74, "Running BIST on bank 4 (Power-on discovery; no failing component)" },
+	{ 0x75, "Running BIST on bank 5 (Power-on discovery; no failing component)" },
+	{ 0x76, "Running BIST on bank 6 (Power-on discovery; no failing component)" },
+	{ 0x77, "Running BIST on bank 7 (Power-on discovery; no failing component)" },
+	{ 0x81, "CP1 failed (Processor; failing component: PIMM)" },
+	{ 0x82, "Restart master unable to load IO7 PROM (Processor; failing component: PIMM)" },
+	{ 0x83, "Primary instruction cache test failed (Primary instruction cache; failing component: PIMM)" },
+	{ 0x84, "Primary data cache test failed (Primary data cache; failing component: PIMM)" },
+	{ 0x85, "Secondary cache test failed (Secondary instruction cache; failing component: PIMM)" },
+	{ 0x86, "CPU was disabled (failing component: PIMM)" },
+	{ 0x87, "Real-time counter failure (failing component: PIMM)" },
+	{ 0x8f, "OS requested LEDs (no failing component)" },
+	{ 0x91, "Hub local test failed (Hub; failing component: IP34 motherboard)" },
+	{ 0x93, "Some node not premium memory (Hub; failing component: IP34 motherboard)" },
+	{ 0x97, "Main() returned (Hub; failing component: IP34 motherboard)" },
+	{ 0x98, "No local memory / memory configuration test failed (Hub/Memory; failing component: IP34 motherboard or DIMM)" },
+	{ 0x99, "I2C cannot happen error (Hub; failing component: IP34 motherboard)" },
+	{ 0x9a, "CPU disabled by environment variable (Hub; failing component: IP34 motherboard)" },
+	{ 0x9b, "Memory download failure (Hub; failing component: IP34 motherboard)" },
+	{ 0x9c, "Cannot set core debug register (Hub; failing component: IP34 motherboard)" },
+	{ 0x9e, "Hub KLCONFIG failed (Hub; failing component: IP34 motherboard)" },
+	{ 0x9f, "Router KLCONFIG failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xa0, "Hub I/O init failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xa1, "Node KLCONFIG failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xa4, "Hub chip failed l/abist (Hub; failing component: IP34 motherboard)" },
+	{ 0xa6, "Waiting for reset to go (Hub; failing component: IP34 motherboard)" },
+	{ 0xa7, "LLP failed after reset (Hub; failing component: IP34 motherboard)" },
+	{ 0xa8, "LLP never up after reset (Hub; failing component: IP34 motherboard)" },
+	{ 0xa9, "No good local memory / memory configuration test failed (Hub/Memory; failing component: IP34 motherboard or DIMM)" },
+	{ 0xab, "Network discovery failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xac, "NASID calculation failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xad, "Route calculation failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xae, "Route distribution failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xaf, "NASID distribution failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xb0, "Master assigned no NASID (Hub; failing component: IP34 motherboard)" },
+	{ 0xb1, "NASID arbitration failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xb4, "Error copying mode bits (Hub; failing component: IP34 motherboard)" },
+	{ 0xb5, "Error calculating backplane frequency (Hub; failing component: IP34 motherboard)" },
+};
+
+static const struct fuel_led_status *fuel_led_status_for_code(unsigned int code)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(fuel_led_statuses); i++)
+		if (fuel_led_statuses[i].code == code)
+			return &fuel_led_statuses[i];
+	return NULL;
+}
+
+static int text_builder_append(struct text_builder *builder, const char *text,
+			       size_t len)
+{
+	char *new_buf;
+	size_t needed = builder->len + len + 1;
+	size_t new_cap;
+
+	if (needed < builder->len)
+		return -1;
+	if (needed > builder->cap) {
+		new_cap = builder->cap ? builder->cap : 256;
+		while (new_cap < needed) {
+			if (new_cap > SIZE_MAX / 2)
+				return -1;
+			new_cap *= 2;
+		}
+		new_buf = realloc(builder->buf, new_cap);
+		if (!new_buf) {
+			perror("realloc");
+			return -1;
+		}
+		builder->buf = new_buf;
+		builder->cap = new_cap;
+	}
+
+	memcpy(builder->buf + builder->len, text, len);
+	builder->len += len;
+	builder->buf[builder->len] = '\0';
+	return 0;
+}
+
+static bool leds_line_contains_unknown_status(const char *line, size_t len)
+{
+	static const char needle[] = "unknown LED status";
+	size_t needle_len = sizeof(needle) - 1;
+	size_t i;
+
+	if (len < needle_len)
+		return false;
+	for (i = 0; i <= len - needle_len; i++)
+		if (!strncasecmp(line + i, needle, needle_len))
+			return true;
+	return false;
+}
+
+static int hex_digit_value(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+static bool leds_line_find_code(const char *line, size_t len,
+				const char **code_start, const char **code_end,
+				unsigned int *code)
+{
+	size_t i;
+
+	for (i = 0; i + 2 < len; i++) {
+		unsigned int value = 0;
+		size_t digits = 0;
+
+		if (line[i] != '0' || (line[i + 1] != 'x' && line[i + 1] != 'X'))
+			continue;
+		while (i + 2 + digits < len && digits < 2) {
+			int digit = hex_digit_value(line[i + 2 + digits]);
+
+			if (digit < 0)
+				break;
+			value = (value << 4) | (unsigned int)digit;
+			digits++;
+		}
+		if (!digits)
+			continue;
+		*code_start = line + i;
+		*code_end = line + i + 2 + digits;
+		*code = value;
+		return true;
+	}
+
+	return false;
+}
+
+static int text_builder_append_decoded_leds_line(struct text_builder *builder,
+						 const char *line, size_t len)
+{
+	const struct fuel_led_status *status;
+	const char *code_start;
+	const char *code_end;
+	unsigned int code;
+	char decoded[512];
+	int decoded_len;
+
+	if (!leds_line_contains_unknown_status(line, len) ||
+	    !leds_line_find_code(line, len, &code_start, &code_end, &code)) {
+		return text_builder_append(builder, line, len);
+	}
+
+	status = fuel_led_status_for_code(code);
+	if (!status)
+		return text_builder_append(builder, line, len);
+
+	if (text_builder_append(builder, line, (size_t)(code_start - line)))
+		return -1;
+
+	decoded_len = snprintf(decoded, sizeof(decoded), "0x%02X: %s", code,
+			       status->description);
+	if (decoded_len < 0 || decoded_len >= (int)sizeof(decoded))
+		return -1;
+	return text_builder_append(builder, decoded, (size_t)decoded_len);
+}
+
+static char *decode_leds_text(const char *text)
+{
+	struct text_builder builder = { 0 };
+	const char *line = text ? text : "";
+
+	while (*line) {
+		const char *next = strchr(line, '\n');
+		size_t len = next ? (size_t)(next - line) : strlen(line);
+
+		if (text_builder_append_decoded_leds_line(&builder, line, len)) {
+			free(builder.buf);
+			return NULL;
+		}
+		if (!next)
+			break;
+		if (text_builder_append(&builder, "\n", 1)) {
+			free(builder.buf);
+			return NULL;
+		}
+		line = next + 1;
+	}
+
+	if (!builder.buf && text_builder_append(&builder, "", 0))
+		return NULL;
+	return builder.buf;
+}
+
+static void print_leds_text_block(const char *text)
+{
+	char *decoded = decode_leds_text(text);
+
+	print_text_block(decoded ? decoded : text);
+	free(decoded);
+}
+
+static void print_l1_command_text_block(const char *l1cmd, const char *text)
+{
+	if (streq_ci(l1cmd, "leds"))
+		print_leds_text_block(text);
+	else
+		print_text_block(text);
 }
 
 static int parse_l1_time(const char *text, time_t *when)
@@ -4049,6 +4338,8 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms)
 
 	for (;;) {
 		char *text = NULL;
+		char *decoded = NULL;
+		bool changed;
 		int ret;
 
 		if (!prepared) {
@@ -4082,7 +4373,14 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms)
 		}
 
 		backoff_ms = poll_interval_ms;
-		if (!previous || strcmp(previous, text)) {
+		decoded = decode_leds_text(text);
+		if (decoded) {
+			free(text);
+			text = decoded;
+			decoded = NULL;
+		}
+		changed = !previous || strcmp(previous, text);
+		if (changed) {
 			print_text_block(text);
 			fflush(stdout);
 			free(previous);
@@ -4090,7 +4388,7 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms)
 			text = NULL;
 		}
 		free(text);
-		sleep_milliseconds(poll_interval_ms);
+		sleep_milliseconds(changed ? 0 : poll_interval_ms);
 	}
 
 	return 0;

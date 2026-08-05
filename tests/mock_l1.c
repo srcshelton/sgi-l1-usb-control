@@ -381,11 +381,17 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "leds")) {
 		if (getenv("SGIL1_MOCK_LEDS_FOLLOW")) {
 			if (mock_leds_call_count++ == 0)
-				return "LEDs: power-off standby\n";
+				return "CPU  A: 0x55: unknown LED status.\n";
 			if (mock_leds_call_count == 2)
-				return "LEDs: power-on diagnostics\n";
-			return "LEDs: power-on diagnostics\n";
+				return "CPU  A: 0x70: unknown LED status.\n";
+			return "CPU  A: 0x70: unknown LED status.\n";
 		}
+		if (getenv("SGIL1_MOCK_LEDS_UNKNOWN"))
+			return "CPU  A: 0x55: unknown LED status.\n"
+			       "CPU  B: 0x81: unknown LED status.\n"
+			       "CPU  C: 0xB5: unknown LED status.\n"
+			       "CPU  D: 0x0: unknown LED status.\n"
+			       "CPU  E: 0xff: Console poll found data for reading\n";
 		return "LEDs: power-off standby\n";
 	}
 	if (!strcmp(cmd, "serial") || !strcmp(cmd, "serial all"))

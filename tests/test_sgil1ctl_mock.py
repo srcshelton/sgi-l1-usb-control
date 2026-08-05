@@ -136,6 +136,16 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("data device: /dev/sgi-l1/l1-0", proc.stdout)
         self.assertIn("bus=2 dev=10 level=2 path=1.1", proc.stdout)
 
+    def test_help_documents_follow_modes(self):
+        proc = self.run_ctl(["--help"])
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("wait [-w|--follow] [OPTIONS]", proc.stdout)
+        self.assertIn("-w|--follow after --power-up or --reset", proc.stdout)
+        self.assertIn("reset --force [-w|--follow]", proc.stdout)
+        self.assertIn("log [-w|--follow]", proc.stdout)
+        self.assertIn("leds [-w|--follow]", proc.stdout)
+
     def test_version_uses_mock_irouter_transport_without_debug_noise(self):
         proc, log = self.run_with_log(["version"])
 
@@ -181,10 +191,33 @@ class Sgil1CtlMockTests(unittest.TestCase):
             seconds=0.4,
         )
 
-        self.assertIn("LEDs: power-off standby", stdout)
-        self.assertIn("LEDs: power-on diagnostics", stdout)
-        self.assertEqual(stdout.count("LEDs: power-on diagnostics"), 1, stdout)
+        self.assertIn("0x55: Global master in PROM", stdout)
+        self.assertIn("0x70: Running BIST on bank 0", stdout)
+        self.assertEqual(stdout.count("Running BIST on bank 0"), 1, stdout)
+        self.assertNotIn("unknown LED status", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
+
+    def test_leds_decodes_documented_unknown_statuses(self):
+        proc = self.run_ctl(["leds"], {"SGIL1_MOCK_LEDS_UNKNOWN": "1"})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("0x55: Global master in PROM", proc.stdout)
+        self.assertIn("0x81: CP1 failed", proc.stdout)
+        self.assertIn("0xB5: Error calculating backplane frequency", proc.stdout)
+        self.assertIn("0x00: In slave loop", proc.stdout)
+        self.assertIn("0xff: Console poll found data for reading", proc.stdout)
+        self.assertNotIn("unknown LED status", proc.stdout)
+
+    def test_l1cmd_leds_decodes_documented_unknown_statuses(self):
+        proc = self.run_ctl(
+            ["l1cmd", "leds"],
+            {"SGIL1_MOCK_LEDS_UNKNOWN": "1"},
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("0x55: Global master in PROM", proc.stdout)
+        self.assertIn("0x81: CP1 failed", proc.stdout)
+        self.assertNotIn("unknown LED status", proc.stdout)
 
     def test_reset_follow_starts_leds_follow(self):
         stdout, stderr, _returncode = self.run_follow_for(
@@ -194,8 +227,8 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
 
         self.assertIn("reset issued", stdout)
-        self.assertIn("LEDs: power-off standby", stdout)
-        self.assertIn("LEDs: power-on diagnostics", stdout)
+        self.assertIn("0x55: Global master in PROM", stdout)
+        self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
 
     def test_wait_follow_requires_power_up_or_reset(self):
@@ -212,8 +245,8 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
 
         self.assertIn("Power-up: workstation appears off; issuing power up", stdout)
-        self.assertIn("LEDs: power-off standby", stdout)
-        self.assertIn("LEDs: power-on diagnostics", stdout)
+        self.assertIn("0x55: Global master in PROM", stdout)
+        self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
 
     def test_auto_device_scans_nonzero_data_nodes(self):
