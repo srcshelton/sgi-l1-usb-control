@@ -82,6 +82,42 @@ class Sgil1CtlMockTests(unittest.TestCase):
             timeout=10,
         )
 
+    def run_follow_for(self, args, extra_env=None, seconds=0.7):
+        env = os.environ.copy()
+        env.update(
+            {
+                "LD_PRELOAD": str(MOCK),
+                "SGIL1_MOCK": "1",
+                "TZ": "Europe/London",
+            }
+        )
+        if extra_env:
+            env.update(extra_env)
+
+        cmd = [
+            str(BIN),
+            "--device",
+            "/dev/sgi-l1/l1-0",
+            "--status-device",
+            "/dev/sgi-l1/status",
+            "--timeout",
+            "10",
+        ] + args
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            return proc.communicate(timeout=seconds) + (proc.returncode,)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=5)
+            return stdout, stderr, proc.returncode
+
     def run_with_log(self, args, extra_env=None):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "mock.log"
@@ -107,6 +143,78 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("L1 1.24.11", proc.stdout)
         self.assertNotIn("sent L1 command", proc.stdout)
         self.assertIn("CMD version", log)
+
+    def test_log_follow_prints_new_lines_and_repeat_summary(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["log", "--follow", "--poll-interval", "100"],
+            {"SGIL1_MOCK_LOG_FOLLOW": "1"},
+        )
+
+        self.assertIn("05/27/2026 12:38:00 L1 booted", stdout)
+        self.assertEqual(stdout.count("L1 booted"), 1, stdout)
+        self.assertIn("05/27/2026 12:38:01 USB ready", stdout)
+        self.assertIn("05/27/2026 12:38:02 fan stable", stdout)
+        self.assertIn("message repeated 2 times: fan stable", stdout)
+        self.assertIn("05/27/2026 12:38:05 voltage nominal", stdout)
+        self.assertNotIn("advanced without overlap", stderr)
+
+    def test_stale_single_character_response_is_ignored(self):
+        proc = self.run_ctl(["log"], {"SGIL1_MOCK_STALE_BEFORE_RESPONSE": "1"})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "05/27/2026 12:38:00 L1 booted\n")
+
+    def test_debug_dumps_drained_stale_frames(self):
+        proc = self.run_ctl(
+            ["--debug", "--no-discover", "log"],
+            {"SGIL1_MOCK_STALE_ON_OPEN": "1"},
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("drained stale IRouter frame", proc.stdout)
+        self.assertIn("arg0 text:\nstale drain", proc.stdout)
+
+    def test_leds_follow_prints_changes_without_repeats(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["leds", "--follow", "--poll-interval", "50"],
+            {"SGIL1_MOCK_LEDS_FOLLOW": "1"},
+            seconds=0.4,
+        )
+
+        self.assertIn("LEDs: power-off standby", stdout)
+        self.assertIn("LEDs: power-on diagnostics", stdout)
+        self.assertEqual(stdout.count("LEDs: power-on diagnostics"), 1, stdout)
+        self.assertNotIn("LEDs follow: leds command failed", stderr)
+
+    def test_reset_follow_starts_leds_follow(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["reset", "--force", "--follow"],
+            {"SGIL1_MOCK_LEDS_FOLLOW": "1"},
+            seconds=0.5,
+        )
+
+        self.assertIn("reset issued", stdout)
+        self.assertIn("LEDs: power-off standby", stdout)
+        self.assertIn("LEDs: power-on diagnostics", stdout)
+        self.assertNotIn("LEDs follow: leds command failed", stderr)
+
+    def test_wait_follow_requires_power_up_or_reset(self):
+        proc = self.run_ctl(["wait", "--follow"])
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("wait --follow requires --power-up or --reset", proc.stderr)
+
+    def test_wait_power_up_follow_starts_leds_follow(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["wait", "--power-up", "--force", "--follow"],
+            {"SGIL1_MOCK_POWER": "off", "SGIL1_MOCK_LEDS_FOLLOW": "1"},
+            seconds=2.2,
+        )
+
+        self.assertIn("Power-up: workstation appears off; issuing power up", stdout)
+        self.assertIn("LEDs: power-off standby", stdout)
+        self.assertIn("LEDs: power-on diagnostics", stdout)
+        self.assertNotIn("LEDs follow: leds command failed", stderr)
 
     def test_auto_device_scans_nonzero_data_nodes(self):
         proc = self.run_ctl_auto_data(

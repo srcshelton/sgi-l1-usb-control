@@ -178,7 +178,23 @@ Run non-destructive status checks:
 sgil1ctl status
 sgil1ctl date
 sgil1ctl log
+sgil1ctl log --follow
+sgil1ctl leds --follow
 ```
+
+`sgil1ctl log --follow` polls the L1 log buffer, prints only newly observed
+lines after the initial snapshot, and summarizes repeated messages using a
+five-line recent-message memory. The USB transport exposed by this driver does
+not provide a known log-change notification stream, so entries can still be
+missed if the L1 log buffer wraps completely between polls. Use
+`sgil1ctl log --follow --poll-interval MS` to tune the steady-state poll
+interval.
+
+`sgil1ctl leds --follow` repeatedly samples the L1 `leds` command and prints
+only changed output. It uses a fast poll interval for boot diagnostics and backs
+off when the L1 stops responding. `wait --power-up --follow` and
+`reset --force --follow` enter the same LED-follow mode after the power-up or
+reset command path.
 
 Set the L1 clock from the host when drift exceeds the default threshold:
 

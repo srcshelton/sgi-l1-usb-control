@@ -41,6 +41,9 @@
 	(SGIL1_IR_HEADER_LEN + (2U * SGIL1_IR_ARG_LEN) + \
 	 SGIL1_L1_MAX_COMMAND_TEXT + 1U)
 #define SGIL1_IR_MAX_FRAMES 32U
+#define SGIL1_DRAIN_MAX_FRAMES 256U
+#define SGIL1_RESPONSE_SCAN_MAX_FRAMES 256U
+#define SGIL1_STALE_RESPONSE_WARN_FRAMES 4U
 #define SGIL1_PIPE_RECORD_LEN 128U
 #define SGIL1_PIPE_HEADER_LEN 9U
 #define SGIL1_PIPE_PAYLOAD_MAX 0x76U
@@ -61,6 +64,11 @@
 #define SGIL1_LOCK_PATH "/var/lock/sgil1ctl.lock"
 #define SGIL1_LOCK_FALLBACK_PATH "/tmp/sgil1ctl.lock"
 #define SGIL1_DRAIN_QUIET_MS 200
+#define SGIL1_LOG_DEFAULT_POLL_MS 1000
+#define SGIL1_LOG_BURST_POLL_MS 200
+#define SGIL1_LOG_REPEAT_HISTORY 5
+#define SGIL1_LEDS_FOLLOW_POLL_MS 100
+#define SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS 2000
 
 static int sgil1_lock_fd = -1;
 
@@ -104,9 +112,21 @@ struct wait_options {
 	bool power_down;
 	bool reset;
 	bool force;
+	bool follow;
 	bool background;
 	int wait_timeout_seconds;
 	int keepalive_seconds;
+};
+
+struct log_options {
+	bool follow;
+	bool repeat_summary;
+	int poll_interval_ms;
+};
+
+struct leds_options {
+	bool follow;
+	int poll_interval_ms;
 };
 
 static int l1_text_command_status(const struct options *opts, const char *cmd,
@@ -149,9 +169,13 @@ static void usage(FILE *out, bool full)
 				"                        --timezone TZ (default: host timezone with --set-time),\n"
 				"                        --drift-seconds SEC (default 60),\n"
 				"                        --power-up, --power-down, --reset,\n"
-				"                        --keepalive SEC (default 0), --force\n"
-		"  version|usb|env|log   send read-only L1 text commands over USB\n"
-		"  power [check|vrm]     send read-only L1 power status commands over USB\n"
+				"                        --follow, --keepalive SEC (default 0), --force\n"
+			"  version|usb|env       send read-only L1 text commands over USB\n"
+			"  log [-w|--follow]     print the L1 log, optionally following new lines\n"
+				"                        log options: --poll-interval MS,\n"
+				"                        --no-repeat-summary\n"
+			"  leds [-w|--follow]    print L1 front-panel LEDs, optionally following changes\n"
+			"  power [check|vrm]     send read-only L1 power status commands over USB\n"
 		"  power up|down         send power commands; requires --force\n"
 		"  reset                 send L1 reset command; requires --force\n"
 			"  l1cmd <command> [...] send a live-help-listed L1 text command over USB\n"
@@ -477,6 +501,7 @@ static bool l1_command_is_read_only(const char *cmd)
 	       streq_ci(cmd, "hlp") || startswith_ci(cmd, "hlp ") ||
 	       streq_ci(cmd, "usb") || streq_ci(cmd, "env") ||
 	       streq_ci(cmd, "env check") || streq_ci(cmd, "fan") ||
+	       streq_ci(cmd, "leds") ||
 	       streq_ci(cmd, "date") || streq_ci(cmd, "date tz") ||
 	       streq_ci(cmd, "serial") || streq_ci(cmd, "serial all") ||
 	       streq_ci(cmd, "log") ||
@@ -626,6 +651,26 @@ static int build_l1_discovery_frame(uint16_t seq, uint8_t *buf, size_t cap,
 
 	*out_len = frame_len;
 	return 0;
+}
+
+static uint16_t next_l1_command_seq(void)
+{
+	static unsigned int next_seq;
+	uint16_t seq;
+
+	if (!next_seq) {
+		next_seq = ((unsigned int)getpid() ^ (unsigned int)time(NULL)) %
+			   0x7fU;
+		if (!next_seq)
+			next_seq = 1;
+	}
+
+	seq = (uint16_t)next_seq;
+	next_seq++;
+	if (next_seq > 0x7fU)
+		next_seq = 1;
+
+	return seq;
 }
 
 static int write_all(int fd, const uint8_t *buf, size_t len)
@@ -1210,6 +1255,28 @@ static int collect_ir_text_frame(struct ir_text_assembly *assembly,
 	return 0;
 }
 
+static bool irouter_frame_matches_command_response(const uint8_t *buf,
+						   size_t len,
+						   uint32_t request_src,
+						   uint32_t request_dest,
+						   uint16_t request_seq)
+{
+	if (len < SGIL1_IR_HEADER_LEN)
+		return false;
+	if (get_be16(buf) > len)
+		return false;
+	if (buf[2] != 2)
+		return false;
+	if (get_be32(buf + 8) != request_src)
+		return false;
+	if (get_be32(buf + 12) != request_dest)
+		return false;
+	if (buf[4] != (request_seq & 0xff))
+		return false;
+
+	return true;
+}
+
 static int read_raw_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 				  size_t cap, size_t *out_len)
 {
@@ -1253,21 +1320,26 @@ static int read_raw_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 	}
 }
 
-static unsigned int drain_raw_irouter_frames_fd(int fd, int quiet_ms)
+static unsigned int drain_raw_irouter_frames_fd(int fd, int quiet_ms,
+						bool verbose)
 {
 	uint8_t buf[SGIL1_IO_SIZE];
 	unsigned int drained;
 
-	for (drained = 0; drained < SGIL1_IR_MAX_FRAMES; drained++) {
+	for (drained = 0; drained < SGIL1_DRAIN_MAX_FRAMES; drained++) {
 		size_t len = 0;
 		int ret = read_raw_irouter_frame(fd, quiet_ms, buf, sizeof(buf),
 						 &len);
 
 		if (ret <= 0)
 			break;
+		if (verbose) {
+			printf("drained stale IRouter frame (%zu bytes):\n", len);
+			print_irouter_frame(buf, len);
+		}
 	}
 
-	if (drained == SGIL1_IR_MAX_FRAMES)
+	if (drained == SGIL1_DRAIN_MAX_FRAMES)
 		fprintf(stderr,
 			"warning: stopped draining after %u stale IRouter frames\n",
 			drained);
@@ -1290,7 +1362,7 @@ static int discover_l1_command_dest_fd(const struct options *opts, int fd,
 		return 1;
 	}
 
-	drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS);
+	drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS, verbose);
 
 	for (i = 0; i < ARRAY_SIZE(seqs); i++) {
 		unsigned int frame;
@@ -1458,21 +1530,27 @@ static int read_pipe_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 	}
 }
 
-static unsigned int drain_pipe_irouter_frames_fd(int fd, int quiet_ms)
+static unsigned int drain_pipe_irouter_frames_fd(int fd, int quiet_ms,
+						 bool verbose)
 {
 	uint8_t buf[SGIL1_IO_SIZE];
 	unsigned int drained;
 
-	for (drained = 0; drained < SGIL1_IR_MAX_FRAMES; drained++) {
+	for (drained = 0; drained < SGIL1_DRAIN_MAX_FRAMES; drained++) {
 		size_t len = 0;
 		int ret = read_pipe_irouter_frame(fd, quiet_ms, buf, sizeof(buf),
 						  &len);
 
 		if (ret <= 0)
 			break;
+		if (verbose) {
+			printf("drained stale SGI pipe IRouter frame (%zu bytes):\n",
+			       len);
+			print_irouter_frame(buf, len);
+		}
 	}
 
-	if (drained == SGIL1_IR_MAX_FRAMES)
+	if (drained == SGIL1_DRAIN_MAX_FRAMES)
 		fprintf(stderr,
 			"warning: stopped draining after %u stale SGI pipe frames\n",
 			drained);
@@ -1530,9 +1608,12 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 	size_t rx_len = 0;
 	size_t pipe_records = 0;
 	unsigned int expected_frames = 1;
-	unsigned int frame;
+	unsigned int accepted_frames = 0;
+	unsigned int scanned_frames;
+	unsigned int stale_frames = 0;
 	struct ir_text_assembly assembly = { 0 };
 	uint32_t dest_addr = opts->dest_addr;
+	uint16_t seq = next_l1_command_seq();
 	int fd;
 	int ret = 1;
 	bool read_only = l1_command_is_read_only(l1cmd);
@@ -1568,9 +1649,11 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		return 1;
 
 	if (opts->pipe_records)
-		drain_pipe_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS);
+		drain_pipe_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
+					     opts->debug);
 	else
-		drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS);
+		drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
+					    opts->debug);
 
 	if (!opts->pipe_records && !opts->no_discover && !opts->dest_overridden) {
 		int discover_ret;
@@ -1581,10 +1664,11 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 			ret = discover_ret;
 			goto out;
 		}
-		drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS);
+		drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
+					    opts->debug);
 	}
 
-	if (build_l1_command_frame(l1cmd, 0, dest_addr, opts->src_addr,
+	if (build_l1_command_frame(l1cmd, seq, dest_addr, opts->src_addr,
 				   opts->ir_class, opts->authority, opts->pdata,
 				   tx, sizeof(tx), &tx_len))
 		goto out;
@@ -1596,9 +1680,9 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		}
 
 		if (verbose)
-			printf("sent L1 command '%s' in %zu-byte IRouter frame (%zu SGI pipe record%s, dest=0x%08x src=0x%08x class=%u auth=%u pdata=%u)\n",
+			printf("sent L1 command '%s' in %zu-byte IRouter frame (%zu SGI pipe record%s, seq=0x%02x dest=0x%08x src=0x%08x class=%u auth=%u pdata=%u)\n",
 			       l1cmd, tx_len, pipe_records,
-			       pipe_records == 1 ? "" : "s", dest_addr,
+			       pipe_records == 1 ? "" : "s", seq & 0xff, dest_addr,
 			       opts->src_addr, opts->ir_class,
 			       opts->authority, opts->pdata);
 	} else {
@@ -1608,13 +1692,14 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		}
 
 		if (verbose)
-			printf("sent L1 command '%s' in %zu-byte raw IRouter frame (dest=0x%08x src=0x%08x class=%u auth=%u pdata=%u)\n",
-			       l1cmd, tx_len, dest_addr, opts->src_addr,
+			printf("sent L1 command '%s' in %zu-byte raw IRouter frame (seq=0x%02x dest=0x%08x src=0x%08x class=%u auth=%u pdata=%u)\n",
+			       l1cmd, tx_len, seq & 0xff, dest_addr, opts->src_addr,
 			       opts->ir_class, opts->authority, opts->pdata);
 	}
 
-	for (frame = 0; frame < SGIL1_IR_MAX_FRAMES; frame++) {
-		int timeout = frame ? 500 : opts->timeout_ms;
+	for (scanned_frames = 0; scanned_frames < SGIL1_RESPONSE_SCAN_MAX_FRAMES;
+	     scanned_frames++) {
+		int timeout = accepted_frames ? 500 : opts->timeout_ms;
 
 		if (opts->pipe_records)
 			ret = read_pipe_irouter_frame(fd, timeout, rx,
@@ -1628,24 +1713,46 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 			goto out;
 		}
 		if (ret == 0) {
-			if (!frame) {
+			if (!accepted_frames) {
 				if (response_timeout_is_pending)
 					fprintf(stderr,
 						"timed out waiting for immediate response; checking command result\n");
 				else
 					fprintf(stderr,
 						"timed out waiting for response\n");
+			} else {
+				fprintf(stderr,
+					"timed out waiting for remaining response frames\n");
 			}
 			if (!response_timeout_is_pending)
 				recover_l1_pipes_fd(fd, "L1 response timeout");
-			ret = frame ? 0 : SGIL1_L1CMD_RESPONSE_TIMEOUT;
+			ret = accepted_frames ? 1 : SGIL1_L1CMD_RESPONSE_TIMEOUT;
 			goto out;
 		}
 
 		if (verbose)
 			printf("read %zu-byte IRouter frame\n", rx_len);
 
-		if (!frame && rx_len >= 6) {
+		if (!irouter_frame_matches_command_response(rx, rx_len,
+							    opts->src_addr,
+							    dest_addr,
+							    seq)) {
+			stale_frames++;
+			if (verbose) {
+				uint32_t rx_dest = rx_len >= 16 ?
+						   get_be32(rx + 8) : 0;
+				uint32_t rx_src = rx_len >= 16 ?
+						  get_be32(rx + 12) : 0;
+
+				fprintf(stderr,
+					"ignoring stale IRouter frame seq=0x%02x dest=0x%08x src=0x%08x len=%zu while waiting for command seq=0x%02x\n",
+					rx_len >= 5 ? rx[4] : 0, rx_dest,
+					rx_src, rx_len, seq & 0xff);
+			}
+			continue;
+		}
+
+		if (!accepted_frames && rx_len >= 6) {
 			expected_frames = rx[5] & 0x7f;
 			if (!expected_frames)
 				expected_frames = 1;
@@ -1654,12 +1761,18 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		if (verbose)
 			print_irouter_frame(rx, rx_len);
 
-		if (collect_ir_text_frame(&assembly, rx, rx_len, frame == 0)) {
+		if (collect_ir_text_frame(&assembly, rx, rx_len,
+					  accepted_frames == 0)) {
 			ret = 1;
 			goto out;
 		}
+		accepted_frames++;
 
-		if (frame + 1 >= expected_frames) {
+		if (accepted_frames >= expected_frames) {
+			if (stale_frames >= SGIL1_STALE_RESPONSE_WARN_FRAMES)
+				fprintf(stderr,
+					"warning: ignored %u stale IRouter frames before matching '%s' response\n",
+					stale_frames, l1cmd);
 			if (assembly.buf) {
 				if (assembly.got == assembly.expected) {
 					if (out_text) {
@@ -1718,8 +1831,10 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		}
 	}
 
-	fprintf(stderr, "stopped after %u response frames\n",
-		SGIL1_IR_MAX_FRAMES);
+	fprintf(stderr,
+		"stopped after scanning %u response frames without a matching '%s' response\n",
+		SGIL1_RESPONSE_SCAN_MAX_FRAMES, l1cmd);
+	recover_l1_pipes_fd(fd, "stale IRouter response flood");
 	ret = 1;
 
 out:
@@ -2910,6 +3025,9 @@ static int parse_wait_args(int argc, char **argv, int start,
 			wait->power_down = true;
 		} else if (!strcmp(argv[i], "--reset")) {
 			wait->reset = true;
+		} else if (!strcmp(argv[i], "-w") ||
+			   !strcmp(argv[i], "--follow")) {
+			wait->follow = true;
 		} else if (is_force_option(argv[i])) {
 			wait->force = true;
 		} else if (!strcmp(argv[i], "--background") ||
@@ -2953,6 +3071,11 @@ static int parse_wait_args(int argc, char **argv, int start,
 	}
 	if (wait->status.set_time && !wait->status.timezone)
 		set_status_host_timezone(&wait->status);
+	if (wait->follow && (!wait->power_up && !wait->reset)) {
+		fprintf(stderr,
+			"wait --follow requires --power-up or --reset\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -3511,6 +3634,533 @@ static void sleep_milliseconds(int milliseconds)
 		usleep((useconds_t)milliseconds * 1000);
 }
 
+struct log_line_list {
+	char **lines;
+	size_t count;
+};
+
+struct log_repeat_state {
+	char *history[SGIL1_LOG_REPEAT_HISTORY];
+	size_t history_count;
+	size_t history_next;
+	char *pending_key;
+	unsigned int pending_count;
+};
+
+static void free_log_line_list(struct log_line_list *list)
+{
+	size_t i;
+
+	for (i = 0; i < list->count; i++)
+		free(list->lines[i]);
+	free(list->lines);
+	memset(list, 0, sizeof(*list));
+}
+
+static int append_log_line(struct log_line_list *list, const char *start,
+			   size_t len)
+{
+	char **next;
+	char *line;
+
+	while (len && start[len - 1] == '\r')
+		len--;
+	if (!len)
+		return 0;
+	if (list->count == SIZE_MAX / sizeof(*list->lines)) {
+		fprintf(stderr, "too many log lines\n");
+		return -1;
+	}
+
+	line = malloc(len + 1);
+	if (!line) {
+		perror("malloc");
+		return -1;
+	}
+	memcpy(line, start, len);
+	line[len] = '\0';
+
+	next = realloc(list->lines, (list->count + 1) * sizeof(*list->lines));
+	if (!next) {
+		perror("realloc");
+		free(line);
+		return -1;
+	}
+
+	list->lines = next;
+	list->lines[list->count++] = line;
+	return 0;
+}
+
+static int split_log_lines(const char *text, struct log_line_list *list)
+{
+	const char *start = text;
+	const char *p = text;
+
+	memset(list, 0, sizeof(*list));
+	while (*p) {
+		if (*p == '\n') {
+			if (append_log_line(list, start, (size_t)(p - start))) {
+				free_log_line_list(list);
+				return -1;
+			}
+			start = p + 1;
+		}
+		p++;
+	}
+
+	if (p != start && append_log_line(list, start, (size_t)(p - start))) {
+		free_log_line_list(list);
+		return -1;
+	}
+
+	return 0;
+}
+
+static bool log_lines_match_suffix_prefix(const struct log_line_list *previous,
+					  const struct log_line_list *current,
+					  size_t overlap)
+{
+	size_t previous_start = previous->count - overlap;
+	size_t i;
+
+	for (i = 0; i < overlap; i++) {
+		if (strcmp(previous->lines[previous_start + i],
+			   current->lines[i]))
+			return false;
+	}
+
+	return true;
+}
+
+static size_t log_line_overlap(const struct log_line_list *previous,
+			       const struct log_line_list *current)
+{
+	size_t max = previous->count < current->count ?
+		     previous->count : current->count;
+	size_t overlap;
+
+	for (overlap = max; overlap > 0; overlap--) {
+		if (log_lines_match_suffix_prefix(previous, current, overlap))
+			return overlap;
+	}
+
+	return 0;
+}
+
+static bool l1_log_timestamp_prefix(const char *line, const char **message)
+{
+	unsigned int month;
+	unsigned int day;
+	unsigned int year;
+	unsigned int hour;
+	unsigned int minute;
+	unsigned int second;
+	int used = 0;
+	const char *p;
+	const char *q;
+	size_t token_len;
+
+	if (sscanf(line, "%u/%u/%u %u:%u:%u%n", &month, &day, &year,
+		   &hour, &minute, &second, &used) != 6)
+		return false;
+	if (!used || month < 1 || month > 12 || day < 1 || day > 31 ||
+	    hour > 23 || minute > 59 || second > 60)
+		return false;
+
+	p = line + used;
+	while (isspace((unsigned char)*p))
+		p++;
+
+	q = p;
+	while (*q && isupper((unsigned char)*q))
+		q++;
+	token_len = (size_t)(q - p);
+	if (token_len >= 2 && token_len <= 8 &&
+	    isspace((unsigned char)*q)) {
+		p = q;
+		while (isspace((unsigned char)*p))
+			p++;
+	}
+
+	*message = *p ? p : line;
+	return true;
+}
+
+static char *log_repeat_key_for_line(const char *line)
+{
+	const char *message = line;
+
+	l1_log_timestamp_prefix(line, &message);
+	return strdup(message);
+}
+
+static bool log_repeat_history_contains(const struct log_repeat_state *state,
+					const char *key)
+{
+	size_t i;
+
+	for (i = 0; i < state->history_count; i++) {
+		if (!strcmp(state->history[i], key))
+			return true;
+	}
+
+	return false;
+}
+
+static void log_repeat_history_add(struct log_repeat_state *state, char *key)
+{
+	size_t index;
+
+	if (state->history_count < SGIL1_LOG_REPEAT_HISTORY) {
+		state->history[state->history_count++] = key;
+		return;
+	}
+
+	index = state->history_next;
+	free(state->history[index]);
+	state->history[index] = key;
+	state->history_next = (state->history_next + 1) %
+			      SGIL1_LOG_REPEAT_HISTORY;
+}
+
+static void flush_log_repeat_summary(struct log_repeat_state *state)
+{
+	if (!state->pending_count)
+		return;
+
+	printf("message repeated %u time%s: %s\n", state->pending_count,
+	       state->pending_count == 1 ? "" : "s", state->pending_key);
+	free(state->pending_key);
+	state->pending_key = NULL;
+	state->pending_count = 0;
+}
+
+static void free_log_repeat_state(struct log_repeat_state *state)
+{
+	size_t i;
+
+	flush_log_repeat_summary(state);
+	for (i = 0; i < state->history_count; i++)
+		free(state->history[i]);
+	free(state->pending_key);
+	memset(state, 0, sizeof(*state));
+}
+
+static int print_follow_log_line(struct log_repeat_state *repeat,
+				 const char *line, bool repeat_summary)
+{
+	char *key;
+
+	if (!repeat_summary) {
+		puts(line);
+		return 0;
+	}
+
+	key = log_repeat_key_for_line(line);
+	if (!key) {
+		perror("strdup");
+		return -1;
+	}
+
+	if (log_repeat_history_contains(repeat, key)) {
+		if (repeat->pending_key && strcmp(repeat->pending_key, key)) {
+			flush_log_repeat_summary(repeat);
+		} else if (!repeat->pending_key) {
+			repeat->pending_key = key;
+			key = NULL;
+		}
+		repeat->pending_count++;
+		free(key);
+		return 0;
+	}
+
+	flush_log_repeat_summary(repeat);
+	puts(line);
+	log_repeat_history_add(repeat, key);
+	return 0;
+}
+
+static int print_follow_log_lines(struct log_repeat_state *repeat,
+				  const struct log_line_list *lines,
+				  size_t start, bool repeat_summary)
+{
+	size_t i;
+
+	for (i = start; i < lines->count; i++) {
+		if (print_follow_log_line(repeat, lines->lines[i],
+					  repeat_summary))
+			return -1;
+	}
+	flush_log_repeat_summary(repeat);
+	fflush(stdout);
+	return 0;
+}
+
+static int parse_log_args(int argc, char **argv, int start,
+			  struct log_options *log)
+{
+	int i;
+
+	memset(log, 0, sizeof(*log));
+	log->repeat_summary = true;
+	log->poll_interval_ms = SGIL1_LOG_DEFAULT_POLL_MS;
+
+	for (i = start; i < argc; i++) {
+		if (!strcmp(argv[i], "-w") || !strcmp(argv[i], "--follow")) {
+			log->follow = true;
+		} else if (!strcmp(argv[i], "--poll-interval")) {
+			if (++i >= argc) {
+				fprintf(stderr, "--poll-interval needs milliseconds\n");
+				return -1;
+			}
+			if (parse_int_arg(argv[i], 100, INT_MAX,
+					  &log->poll_interval_ms)) {
+				fprintf(stderr,
+					"invalid --poll-interval value; minimum is 100 ms\n");
+				return -1;
+			}
+		} else if (!strcmp(argv[i], "--no-repeat-summary")) {
+			log->repeat_summary = false;
+		} else {
+			fprintf(stderr, "unknown argument for log: %s\n", argv[i]);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int do_log_follow(const struct options *opts,
+			 const struct log_options *log)
+{
+	struct options cmd_opts;
+	struct log_line_list previous = { 0 };
+	struct log_repeat_state repeat = { 0 };
+	bool have_previous = false;
+	bool burst_poll = false;
+	int ret = 1;
+
+	if (prepare_command_options(opts, &cmd_opts))
+		return 1;
+
+	for (;;) {
+		struct log_line_list current;
+		char *text = NULL;
+		size_t start = 0;
+		size_t new_lines;
+		int command_ret;
+
+		command_ret = l1_text_command_status(&cmd_opts, "log", false,
+						     &text);
+		if (command_ret) {
+			ret = command_ret;
+			free(text);
+			goto out;
+		}
+		if (split_log_lines(text, &current)) {
+			free(text);
+			goto out;
+		}
+		free(text);
+
+		if (have_previous) {
+			start = log_line_overlap(&previous, &current);
+			if (!start && previous.count && current.count)
+				fprintf(stderr,
+					"warning: L1 log buffer advanced without overlap; entries may have been missed\n");
+		}
+
+		new_lines = current.count - start;
+		if (new_lines &&
+		    print_follow_log_lines(&repeat, &current, start,
+					   log->repeat_summary)) {
+			free_log_line_list(&current);
+			goto out;
+		}
+
+		free_log_line_list(&previous);
+		previous = current;
+		have_previous = true;
+		burst_poll = new_lines > 0;
+		sleep_milliseconds(burst_poll ? SGIL1_LOG_BURST_POLL_MS :
+				   log->poll_interval_ms);
+	}
+
+out:
+	free_log_line_list(&previous);
+	free_log_repeat_state(&repeat);
+	return ret;
+}
+
+static int do_log_command(const struct options *opts, int argc, char **argv,
+			  int command_index)
+{
+	struct log_options log;
+
+	if (parse_log_args(argc, argv, command_index + 1, &log))
+		return 2;
+	if (log.follow)
+		return do_log_follow(opts, &log);
+
+	return do_l1_command(opts, "log", false);
+}
+
+static int parse_leds_args(int argc, char **argv, int start,
+			   struct leds_options *leds)
+{
+	int i;
+
+	memset(leds, 0, sizeof(*leds));
+	leds->poll_interval_ms = SGIL1_LEDS_FOLLOW_POLL_MS;
+
+	for (i = start; i < argc; i++) {
+		if (!strcmp(argv[i], "-w") || !strcmp(argv[i], "--follow")) {
+			leds->follow = true;
+		} else if (!strcmp(argv[i], "--poll-interval")) {
+			if (++i >= argc) {
+				fprintf(stderr, "--poll-interval needs milliseconds\n");
+				return -1;
+			}
+			if (parse_int_arg(argv[i], 50, INT_MAX,
+					  &leds->poll_interval_ms)) {
+				fprintf(stderr,
+					"invalid --poll-interval value; minimum is 50 ms\n");
+				return -1;
+			}
+		} else {
+			fprintf(stderr, "unknown argument for leds: %s\n", argv[i]);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int do_leds_follow(const struct options *opts, int poll_interval_ms)
+{
+	struct options cmd_opts = *opts;
+	char *previous = NULL;
+	bool prepared = false;
+	int backoff_ms = poll_interval_ms;
+
+	if (backoff_ms < SGIL1_LEDS_FOLLOW_POLL_MS)
+		backoff_ms = SGIL1_LEDS_FOLLOW_POLL_MS;
+
+	for (;;) {
+		char *text = NULL;
+		int ret;
+
+		if (!prepared) {
+			if (prepare_command_options(opts, &cmd_opts)) {
+				fprintf(stderr,
+					"LEDs follow: could not prepare L1 command route; backing off %d ms\n",
+					backoff_ms);
+				sleep_milliseconds(backoff_ms);
+				backoff_ms *= 2;
+				if (backoff_ms > SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS)
+					backoff_ms =
+						SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS;
+				continue;
+			}
+			prepared = true;
+		}
+
+		ret = run_l1_command_core(&cmd_opts, "leds", false, false, false,
+					  false, opts->debug, &text);
+		if (ret) {
+			free(text);
+			prepared = false;
+			fprintf(stderr,
+				"LEDs follow: leds command failed; backing off %d ms\n",
+				backoff_ms);
+			sleep_milliseconds(backoff_ms);
+			backoff_ms *= 2;
+			if (backoff_ms > SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS)
+				backoff_ms = SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS;
+			continue;
+		}
+
+		backoff_ms = poll_interval_ms;
+		if (!previous || strcmp(previous, text)) {
+			print_text_block(text);
+			fflush(stdout);
+			free(previous);
+			previous = text;
+			text = NULL;
+		}
+		free(text);
+		sleep_milliseconds(poll_interval_ms);
+	}
+
+	return 0;
+}
+
+static int do_leds_command(const struct options *opts, int argc, char **argv,
+			   int command_index)
+{
+	struct leds_options leds;
+
+	if (parse_leds_args(argc, argv, command_index + 1, &leds))
+		return 2;
+	if (leds.follow)
+		return do_leds_follow(opts, leds.poll_interval_ms);
+
+	return do_l1_command(opts, "leds", false);
+}
+
+static int parse_force_follow_args(int argc, char **argv, int command_index,
+				   bool *force, bool *follow)
+{
+	int i;
+
+	for (i = command_index + 1; i < argc; i++) {
+		if (is_force_option(argv[i])) {
+			*force = true;
+		} else if (!strcmp(argv[i], "-w") ||
+			   !strcmp(argv[i], "--follow")) {
+			*follow = true;
+		} else {
+			fprintf(stderr, "unknown argument for %s: %s\n",
+				argv[command_index], argv[i]);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int do_reset_command(const struct options *opts, int argc, char **argv,
+			    int command_index)
+{
+	char *text = NULL;
+	bool force = opts->force;
+	bool follow = false;
+	int ret;
+
+	if (parse_force_follow_args(argc, argv, command_index, &force, &follow))
+		return 2;
+	if (!force) {
+		fprintf(stderr,
+			"refusing L1 command 'reset': add --force to confirm workstation power/reset action\n");
+		return 2;
+	}
+
+	ret = run_l1_command_core(opts, "reset", true, false, false, true,
+				  opts->debug, &text);
+	if (ret == SGIL1_L1CMD_RESPONSE_TIMEOUT) {
+		printf("Reset: command sent; response timed out, which can happen if USB drops during reset\n");
+		ret = 0;
+	} else if (!ret && !opts->debug) {
+		print_text_block(text);
+	}
+	free(text);
+	if (ret || !follow)
+		return ret;
+
+	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS);
+}
+
 static int power_confirm_timeout_ms(const struct options *opts)
 {
 	if (opts->timeout_ms < 0)
@@ -3782,15 +4432,22 @@ static int do_wait(const struct options *opts, const struct wait_options *wait)
 			return ret;
 		}
 
-		if (wait->power_up || wait->power_down || wait->reset) {
-			ret = do_wait_power_action(opts, wait);
-			if (ret) {
+			if (wait->power_up || wait->power_down || wait->reset) {
+				ret = do_wait_power_action(opts, wait);
+				if (ret) {
+					release_sgil1_lock();
+					return ret;
+				}
+			}
+
+			if (wait->follow) {
+				ret = do_leds_follow(opts,
+						     SGIL1_LEDS_FOLLOW_POLL_MS);
 				release_sgil1_lock();
 				return ret;
 			}
-		}
 
-		release_sgil1_lock();
+			release_sgil1_lock();
 
 		if (wait->keepalive_seconds <= 0)
 			return 0;
@@ -4029,7 +4686,9 @@ int main(int argc, char **argv)
 	if (!strcmp(cmd, "env"))
 		return do_l1_command(&opts, "env", false);
 	if (!strcmp(cmd, "log"))
-		return do_l1_command(&opts, "log", false);
+		return do_log_command(&opts, argc, argv, command_index);
+	if (!strcmp(cmd, "leds"))
+		return do_leds_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "power"))
 		return do_power_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "command") || !strcmp(cmd, "l1cmd") ||
@@ -4054,11 +4713,7 @@ int main(int argc, char **argv)
 		return do_power_down_confirmed(&opts, force);
 	}
 	if (!strcmp(cmd, "reset")) {
-		bool force = opts.force;
-
-		if (trailing_force_only(argc, argv, command_index, &force))
-			return 2;
-		return do_l1_command(&opts, "reset", force);
+		return do_reset_command(&opts, argc, argv, command_index);
 	}
 
 	fprintf(stderr,

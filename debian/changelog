@@ -1,3 +1,16 @@
+sgi-l1-usb-control (0.1.47) unstable; urgency=medium
+
+  * Updated components since 0.1.46: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Add sgil1ctl log --follow/-w for live L1 log monitoring with repeated
+    message summaries.
+  * Harden L1 command response matching against stale IRouter frames and dump
+    drained stale frames when --debug is enabled.
+  * Add sgil1ctl leds --follow/-w, plus wait/reset --follow LED diagnostic
+    modes with response-failure backoff.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 05 Aug 2026 19:00:38 +0100
+
 sgi-l1-usb-control (0.1.46) unstable; urgency=medium
 
   * Add opt-in legacy SGI L2/L3 status ioctl and reset-pipes compatibility

@@ -60,6 +60,8 @@ static bool mock_power_on = true;
 static bool mock_power_down_confirm;
 static bool mock_power_up_timeout;
 static int mock_power_down_count;
+static int mock_log_call_count;
+static int mock_leds_call_count;
 static long mock_max_write;
 
 static int (*real_open_fn)(const char *pathname, int flags, ...);
@@ -161,6 +163,9 @@ static struct mock_fd *fd_entry(int fd)
 	return &mock_fds[index];
 }
 
+static int enqueue_text_response(struct mock_fd *m, const char *text,
+				 uint32_t dest, uint32_t src, uint8_t seq);
+
 static bool is_data_path(const char *path)
 {
 	const char *index = getenv("SGIL1_MOCK_DATA_INDEX");
@@ -211,8 +216,15 @@ static int alloc_mock_fd(enum mock_fd_type type)
 
 static int open_mock_path(const char *pathname)
 {
-	if (is_data_path(pathname))
-		return alloc_mock_fd(MOCK_FD_DATA);
+	if (is_data_path(pathname)) {
+		int fd = alloc_mock_fd(MOCK_FD_DATA);
+
+		if (fd >= 0 && getenv("SGIL1_MOCK_STALE_ON_OPEN"))
+			enqueue_text_response(fd_entry(fd), "stale drain\n",
+					      IR_DEFAULT_DEST, IR_DISCOVERY_SRC,
+					      0);
+		return fd;
+	}
 	if (is_status_path(pathname))
 		return alloc_mock_fd(MOCK_FD_STATUS);
 	if (is_lock_path(pathname))
@@ -306,11 +318,34 @@ static int enqueue_discovery_response(struct mock_fd *m)
 	return enqueue_frame(m, frame, sizeof(frame));
 }
 
+static const char *mock_log_response(void)
+{
+	if (!getenv("SGIL1_MOCK_LOG_FOLLOW"))
+		return "05/27/2026 12:38:00 L1 booted\n";
+
+	if (mock_log_call_count++ == 0)
+		return "05/27/2026 12:38:00 L1 booted\n"
+		       "05/27/2026 12:38:01 USB ready\n";
+	if (mock_log_call_count == 2)
+		return "05/27/2026 12:38:00 L1 booted\n"
+		       "05/27/2026 12:38:01 USB ready\n"
+		       "05/27/2026 12:38:02 fan stable\n"
+		       "05/27/2026 12:38:03 fan stable\n"
+		       "05/27/2026 12:38:04 fan stable\n";
+
+	return "05/27/2026 12:38:00 L1 booted\n"
+	       "05/27/2026 12:38:01 USB ready\n"
+	       "05/27/2026 12:38:02 fan stable\n"
+	       "05/27/2026 12:38:03 fan stable\n"
+	       "05/27/2026 12:38:04 fan stable\n"
+	       "05/27/2026 12:38:05 voltage nominal\n";
+}
+
 static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
 		return "Commands are:\n"
-		       "*                  version|ver usb env date serial log power|pwr reset flash fan\n"
+		       "*                  version|ver usb env date serial log leds power|pwr reset flash fan\n"
 		       "                   help|hlp\n\n";
 	if (!strcmp(cmd, "help flash"))
 		return "flash default reset\n"
@@ -343,6 +378,16 @@ static const char *known_response_for_command(const char *cmd)
 		       "NODE 0            Enabled   Disabled   Disabled   70C/158F   44C/111F\n";
 	if (!strcmp(cmd, "fan"))
 		return "fan(s) are on.\nfan 0 EXHAUST  rpm 1298\n";
+	if (!strcmp(cmd, "leds")) {
+		if (getenv("SGIL1_MOCK_LEDS_FOLLOW")) {
+			if (mock_leds_call_count++ == 0)
+				return "LEDs: power-off standby\n";
+			if (mock_leds_call_count == 2)
+				return "LEDs: power-on diagnostics\n";
+			return "LEDs: power-on diagnostics\n";
+		}
+		return "LEDs: power-off standby\n";
+	}
 	if (!strcmp(cmd, "serial") || !strcmp(cmd, "serial all"))
 		return "BSN: NCJ502    SSN: 08:00:69:10:6C:E3    Time: 05/27/2026 12:38:03 BST\n"
 		       "Public Key data in EEPROM is invalid\n";
@@ -365,7 +410,7 @@ static const char *known_response_for_command(const char *cmd)
 		       "--------------  ----- ---------  ------- -----\n"
 		       "           12V     on   11.687V      N/A\n";
 	if (!strcmp(cmd, "log"))
-		return "05/27/2026 12:38:00 L1 booted\n";
+		return mock_log_response();
 	if (!strcmp(cmd, "reset"))
 		return "reset issued\n";
 
@@ -467,6 +512,12 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 		}
 	} else {
 		response = known_response_for_command(cmd);
+	}
+
+	if (getenv("SGIL1_MOCK_STALE_BEFORE_RESPONSE") &&
+	    enqueue_text_response(m, "s\n", src, dest ? dest : IR_DEFAULT_DEST, 0)) {
+		free(raw_cmd);
+		return -1;
 	}
 
 	if (enqueue_text_response(m, response, src, dest ? dest : IR_DEFAULT_DEST,
