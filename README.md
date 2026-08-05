@@ -37,7 +37,9 @@ focuses on the operations needed for single-system maintenance:
 - set the L1 clock from the host;
 - wait for a newly bound L1 USB device, optionally setting time and powering
   on;
-- issue `power up`, `power down`, and `reset` with explicit `--force`;
+- issue workstation `power up`, `power down`, and `power reset` with explicit
+  `--force`;
+- reset the L1 controller with `reset --force`;
 - pass through live help-listed L1 commands with `sgil1ctl l1cmd ...`.
 
 Power and reset commands are deliberately guarded. Users who can open the L1
@@ -195,9 +197,10 @@ only changed output. After each changed response it immediately polls again to
 catch fast-moving boot diagnostics, then returns to the steady poll interval
 once the output repeats; it backs off when the L1 stops responding. Known Fuel
 virtual LED values that old L1 firmware reports as unknown are decoded from the
-SGI Fuel Diagnostic Reference Manual. `wait --power-up --follow` and
-`reset --force --follow` enter the same LED-follow mode after the power-up or
-reset command path.
+SGI Fuel Diagnostic Reference Manual. `power up --force --follow`,
+`power reset --force --follow`, `wait --power-up --follow`,
+`wait --reset --follow`, and `reset --force --follow` enter the same LED-follow
+mode after the corresponding command path.
 
 Set the L1 clock from the host when drift exceeds the default threshold:
 
@@ -208,10 +211,14 @@ sgil1ctl date --set-time
 Power control requires `--force`:
 
 ```sh
-sgil1ctl power up --force
+sgil1ctl power up --force --follow
 sgil1ctl power down --force
+sgil1ctl power reset --force --follow
 sgil1ctl reset --force
 ```
+
+`power reset` sends the L1 `softreset`/`softrst` host-reset command. The
+top-level `reset` command resets the L1 controller itself.
 
 Wait for an L1 USB device to bind and then set time and power on if the system
 appears off:

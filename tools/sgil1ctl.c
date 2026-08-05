@@ -139,6 +139,10 @@ static int do_power_up_confirmed(const struct options *opts,
 				 bool allow_destructive);
 static int do_power_down_confirmed(const struct options *opts,
 				   bool allow_destructive);
+static int do_host_softreset_confirmed(const struct options *opts,
+				       const char *l1cmd, bool allow_destructive,
+				       bool follow);
+static int do_leds_follow(const struct options *opts, int poll_interval_ms);
 static const char *find_existing_data_device(const struct options *opts);
 
 static void usage(FILE *out, bool full)
@@ -179,9 +183,10 @@ static void usage(FILE *out, bool full)
 				"                        --no-repeat-summary\n"
 			"  leds [-w|--follow]    print L1 front-panel LEDs, optionally following changes\n"
 			"  power [check|vrm]     send read-only L1 power status commands over USB\n"
-		"  power up|down         send power commands; requires --force\n"
-			"  reset --force [-w|--follow]\n"
-				"                        send L1 reset command, optionally following LEDs\n"
+		"  power up [-w|--follow]|down|reset\n"
+					"                        send workstation power commands; requires --force\n"
+				"  reset --force [-w|--follow]\n"
+					"                        send L1 controller reset command, optionally following LEDs\n"
 			"  l1cmd <command> [...] send a live-help-listed L1 text command over USB\n"
 			"                        add --force to send a command not listed by help\n");
 
@@ -559,12 +564,25 @@ static bool l1_command_sets_time(const char *cmd)
 	return startswith_ci(cmd, "date ") && !streq_ci(cmd, "date tz");
 }
 
+static bool l1_command_matches_prefix(const char *cmd, const char *prefix)
+{
+	size_t len = strlen(prefix);
+
+	return startswith_ci(cmd, prefix) &&
+	       (cmd[len] == '\0' || isspace((unsigned char)cmd[len]));
+}
+
 static bool l1_command_is_destructive(const char *cmd)
 {
-	return streq_ci(cmd, "power up") || streq_ci(cmd, "pwr up") ||
-	       streq_ci(cmd, "pwr u") || streq_ci(cmd, "power down") ||
-	       streq_ci(cmd, "pwr down") || streq_ci(cmd, "pwr d") ||
-	       streq_ci(cmd, "reset");
+	return l1_command_matches_prefix(cmd, "power up") ||
+	       l1_command_matches_prefix(cmd, "pwr up") ||
+	       l1_command_matches_prefix(cmd, "pwr u") ||
+	       l1_command_matches_prefix(cmd, "power down") ||
+	       l1_command_matches_prefix(cmd, "pwr down") ||
+	       l1_command_matches_prefix(cmd, "pwr d") ||
+	       l1_command_matches_prefix(cmd, "reset") ||
+	       l1_command_matches_prefix(cmd, "softreset") ||
+	       l1_command_matches_prefix(cmd, "softrst");
 }
 
 static int validate_l1_command_text_len(const char *cmd)
@@ -2272,6 +2290,14 @@ static int do_l1_pass_through_command(const struct options *opts,
 	command_word = first_l1_command_word(lookup_cmd);
 	parent_only = l1_command_is_parent_only(lookup_cmd, command_word);
 
+	if (!force && l1_command_is_destructive(lookup_cmd)) {
+		fprintf(stderr,
+			"refusing L1 command '%s': add --force to confirm workstation power/reset action\n",
+			l1cmd);
+		free(command_word);
+		return 2;
+	}
+
 	if (!force && !streq_ci(l1cmd, "help")) {
 		help_ret = l1_text_command_status(opts, "help", false,
 						  &help_text);
@@ -2413,6 +2439,12 @@ static int do_build_l1cmd_args(const struct options *opts, int argc, char **argv
 static int do_power_command(const struct options *opts, int argc, char **argv,
 			    int command_index)
 {
+	const char *action;
+	bool force = opts->force;
+	bool follow = false;
+	int i;
+	int ret;
+
 	if (command_index + 1 == argc)
 		return do_l1_command(opts, "power", false);
 	if (command_index + 2 == argc && streq_ci(argv[command_index + 1],
@@ -2421,29 +2453,51 @@ static int do_power_command(const struct options *opts, int argc, char **argv,
 	if (command_index + 2 == argc && streq_ci(argv[command_index + 1],
 						  "vrm"))
 		return do_l1_command(opts, "power vrm", false);
-	if (command_index + 2 <= argc &&
-	    (streq_ci(argv[command_index + 1], "up") ||
-	     streq_ci(argv[command_index + 1], "down"))) {
-		bool force = opts->force;
-		int i;
 
+	if (command_index + 2 > argc)
+		goto unknown;
+
+	action = argv[command_index + 1];
+	if (streq_ci(action, "up") || streq_ci(action, "down") ||
+	    streq_ci(action, "reset") || streq_ci(action, "softreset") ||
+	    streq_ci(action, "softrst")) {
 		for (i = command_index + 2; i < argc; i++) {
 			if (is_force_option(argv[i])) {
 				force = true;
+			} else if (!strcmp(argv[i], "-w") ||
+				   !strcmp(argv[i], "--follow")) {
+				follow = true;
 			} else {
 				fprintf(stderr, "unknown argument for power %s: %s\n",
-					argv[command_index + 1], argv[i]);
+					action, argv[i]);
 				return 2;
 			}
 		}
 
-		if (streq_ci(argv[command_index + 1], "up"))
-			return do_power_up_confirmed(opts, force);
-		return do_power_down_confirmed(opts, force);
+		if (streq_ci(action, "up")) {
+			ret = do_power_up_confirmed(opts, force);
+			if (ret || !follow)
+				return ret;
+			return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS);
+		}
+		if (streq_ci(action, "down")) {
+			if (follow) {
+				fprintf(stderr,
+					"power down --follow is not supported; use --follow with power up or power reset\n");
+				return 2;
+			}
+			return do_power_down_confirmed(opts, force);
+		}
+
+		return do_host_softreset_confirmed(opts,
+						   streq_ci(action, "softrst") ?
+						   "softrst" : "softreset",
+						   force, follow);
 	}
 
+unknown:
 	fprintf(stderr,
-		"unknown power subcommand; use 'power check', 'power vrm', 'power up', 'power down', or 'l1cmd power ...'\n");
+		"unknown power subcommand; use 'power check', 'power vrm', 'power up', 'power down', 'power reset', or 'l1cmd power ...'\n");
 	return 2;
 }
 
@@ -4576,6 +4630,34 @@ out:
 	return ret;
 }
 
+static int do_host_softreset_confirmed(const struct options *opts,
+				       const char *l1cmd, bool allow_destructive,
+				       bool follow)
+{
+	char *text = NULL;
+	int ret;
+
+	if (!allow_destructive) {
+		fprintf(stderr,
+			"power reset requires --force because it resets/restarts the workstation\n");
+		return 2;
+	}
+
+	ret = run_l1_command_core(opts, l1cmd, true, false, false, true,
+				  opts->debug, &text);
+	if (ret == SGIL1_L1CMD_RESPONSE_TIMEOUT) {
+		printf("Power-reset: command sent; response timed out, which can happen if USB drops during host reset\n");
+		ret = 0;
+	} else if (!ret && !opts->debug) {
+		print_text_block(text);
+	}
+	free(text);
+	if (ret || !follow)
+		return ret;
+
+	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS);
+}
+
 static int reset_pipes_after_bind(const struct options *opts)
 {
 	int fd;
@@ -4630,17 +4712,8 @@ static int maybe_power_up_from_wait(const struct options *opts)
 
 static int do_reset_for_wait(const struct options *opts)
 {
-	int ret;
-
-	printf("\nReset: issuing L1 reset command\n");
-	ret = run_l1_command_core(opts, "reset", true, false, false, true,
-				  opts->debug, NULL);
-	if (ret == SGIL1_L1CMD_RESPONSE_TIMEOUT) {
-		printf("Reset: command sent; response timed out, which can happen if USB drops during reset\n");
-		return 0;
-	}
-
-	return ret;
+	printf("\nPower-reset: issuing host soft reset from wait mode\n");
+	return do_host_softreset_confirmed(opts, "softreset", true, false);
 }
 
 static int do_wait_power_action(const struct options *opts,
@@ -4998,10 +5071,16 @@ int main(int argc, char **argv)
 
 	if (!strcmp(cmd, "power-up")) {
 		bool force = opts.force;
+		bool follow = false;
+		int ret;
 
-		if (trailing_force_only(argc, argv, command_index, &force))
+		if (parse_force_follow_args(argc, argv, command_index, &force,
+					    &follow))
 			return 2;
-		return do_power_up_confirmed(&opts, force);
+		ret = do_power_up_confirmed(&opts, force);
+		if (ret || !follow)
+			return ret;
+		return do_leds_follow(&opts, SGIL1_LEDS_FOLLOW_POLL_MS);
 	}
 	if (!strcmp(cmd, "power-down")) {
 		bool force = opts.force;

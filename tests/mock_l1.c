@@ -345,7 +345,7 @@ static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
 		return "Commands are:\n"
-		       "*                  version|ver usb env date serial log leds power|pwr reset flash fan\n"
+		       "*                  version|ver usb env date serial log leds power|pwr reset softreset|softrst flash fan\n"
 		       "                   help|hlp\n\n";
 	if (!strcmp(cmd, "help flash"))
 		return "flash default reset\n"
@@ -419,6 +419,8 @@ static const char *known_response_for_command(const char *cmd)
 		return mock_log_response();
 	if (!strcmp(cmd, "reset"))
 		return "reset issued\n";
+	if (!strcmp(cmd, "softreset") || !strcmp(cmd, "softrst"))
+		return "soft reset issued\n";
 
 	return "ERROR: command not found.\n";
 }

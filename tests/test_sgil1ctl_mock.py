@@ -143,6 +143,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("wait [-w|--follow] [OPTIONS]", proc.stdout)
         self.assertIn("-w|--follow after --power-up or --reset", proc.stdout)
         self.assertIn("reset --force [-w|--follow]", proc.stdout)
+        self.assertIn("power up [-w|--follow]|down|reset", proc.stdout)
         self.assertIn("log [-w|--follow]", proc.stdout)
         self.assertIn("leds [-w|--follow]", proc.stdout)
 
@@ -249,6 +250,15 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
 
+    def test_wait_reset_sends_host_softreset(self):
+        proc, log = self.run_with_log(["wait", "--reset", "--force"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Power-reset: issuing host soft reset", proc.stdout)
+        self.assertIn("soft reset issued", proc.stdout)
+        self.assertIn("CMD softreset", log)
+        self.assertNotIn("CMD reset\n", log)
+
     def test_auto_device_scans_nonzero_data_nodes(self):
         proc = self.run_ctl_auto_data(
             ["version"],
@@ -300,6 +310,18 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("CMD power up", log)
         self.assertIn("CMD power check", log)
 
+    def test_power_up_follow_starts_leds_follow(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["power", "up", "--force", "--follow"],
+            {"SGIL1_MOCK_POWER": "off", "SGIL1_MOCK_LEDS_FOLLOW": "1"},
+            seconds=0.5,
+        )
+
+        self.assertIn("confirmed workstation appears on", stdout)
+        self.assertIn("0x55: Global master in PROM", stdout)
+        self.assertIn("0x70: Running BIST on bank 0", stdout)
+        self.assertNotIn("LEDs follow: leds command failed", stderr)
+
     def test_power_down_confirmation_prompt_triggers_second_command(self):
         proc, log = self.run_with_log(
             ["power", "down", "--force"],
@@ -310,6 +332,48 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("requested a second power down command", proc.stdout)
         self.assertEqual(log.count("CMD power down"), 2, log)
         self.assertIn("confirmed workstation appears off", proc.stdout)
+
+    def test_power_reset_requires_force_and_sends_softreset(self):
+        denied = self.run_ctl(["power", "reset"])
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("requires --force", denied.stderr)
+
+        proc, log = self.run_with_log(["power", "reset", "--force"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("soft reset issued", proc.stdout)
+        self.assertIn("CMD softreset", log)
+
+    def test_power_reset_follow_starts_leds_follow(self):
+        stdout, stderr, _returncode = self.run_follow_for(
+            ["power", "reset", "--force", "--follow"],
+            {"SGIL1_MOCK_LEDS_FOLLOW": "1"},
+            seconds=0.5,
+        )
+
+        self.assertIn("soft reset issued", stdout)
+        self.assertIn("0x55: Global master in PROM", stdout)
+        self.assertIn("0x70: Running BIST on bank 0", stdout)
+        self.assertNotIn("LEDs follow: leds command failed", stderr)
+
+    def test_power_softreset_aliases_are_accepted(self):
+        proc, log = self.run_with_log(["power", "softrst", "--force"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("soft reset issued", proc.stdout)
+        self.assertIn("CMD softrst", log)
+
+    def test_l1cmd_destructive_commands_require_force(self):
+        denied = self.run_ctl(["l1cmd", "softreset"])
+
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("add --force", denied.stderr)
+
+        proc, log = self.run_with_log(["l1cmd", "softreset", "--force"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("soft reset issued", proc.stdout)
+        self.assertIn("CMD softreset", log)
 
     def test_l1cmd_parent_help_replaces_namespace_error(self):
         proc = self.run_ctl(["l1cmd", "flash"])
