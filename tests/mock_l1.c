@@ -63,6 +63,7 @@ static int mock_power_down_count;
 static int mock_log_call_count;
 static int mock_leds_call_count;
 static long mock_max_write;
+static char mock_debug_response_buf[64];
 
 static int (*real_open_fn)(const char *pathname, int flags, ...);
 static int (*real_open64_fn)(const char *pathname, int flags, ...);
@@ -341,12 +342,61 @@ static const char *mock_log_response(void)
 	       "05/27/2026 12:38:05 voltage nominal\n";
 }
 
+static const char *mock_debug_response(const char *value_text)
+{
+	char *end = NULL;
+	unsigned long value = 0;
+
+	if (!value_text)
+		value_text = getenv("SGIL1_MOCK_DEBUG_SWITCHES");
+	if (!value_text)
+		value_text = "0x0000";
+
+	errno = 0;
+	value = strtoul(value_text, &end, 0);
+	if (errno || end == value_text)
+		value = 0;
+
+	snprintf(mock_debug_response_buf, sizeof(mock_debug_response_buf),
+		 "debug switches set to 0x%04lx\n", value & 0xffffUL);
+	return mock_debug_response_buf;
+}
+
 static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
 		return "Commands are:\n"
-		       "*                  version|ver usb env date serial log leds power|pwr reset softreset|softrst flash fan\n"
+		       "*                  version|ver usb env date serial log leds debug l1dbg power|pwr reset softreset|softrst flash fan\n"
 		       "                   help|hlp\n\n";
+	if (!strcmp(cmd, "hlp l1dbg") || !strcmp(cmd, "help l1dbg"))
+		return "l1dbg \n"
+		       "        get L1 debugging settings\n"
+		       "l1dbg junkbus|jb|bedrock <exp> \n"
+		       "        select L1 junkbus debugging (mask)\n"
+		       "l1dbg junkbus|jb|bedrock <exp> <exp> \n"
+		       "        select L1 junkbus debugging (slab & mask)\n"
+		       "l1dbg irtr on|off \n"
+		       "        turn L1 irouter debugging on/off\n"
+		       "l1dbg env <exp> \n"
+		       "        turn L1 environmental debugging on (1=pwr,2=fan,4=tmp,8=setup)\n"
+		       "l1dbg env off \n"
+		       "        turn L1 environmental debugging off\n"
+		       "l1dbg port on|off \n"
+		       "        turn L1 port interrupt debugging on/off\n"
+		       "l1dbg i2c on|off \n"
+		       "        turn L1 i2c interrupt debugging on/off\n"
+		       "l1dbg margin|mgn on|off \n"
+		       "        turn L1 voltage margin debugging on/off\n"
+		       "l1dbg console on|off \n"
+		       "        enable/disable console tracking messages\n"
+		       "l1dbg mempanic on|off \n"
+		       "        enable/disable L1 PANIC on malloc failures\n"
+		       "l1dbg pppdump on|off \n"
+		       "        enable/disable data dump on junkbus PPP errors\n"
+		       "l1dbg promreq|req on|off \n"
+		       "        turn PROM request debugging on/off\n"
+		       "l1dbg qsusp <exp> <exp> \n"
+		       "        set queue suspend time for req/rsp and evt\n";
 	if (!strcmp(cmd, "help flash"))
 		return "flash default reset\n"
 		       "        determines default image at boot-time\n"
@@ -394,6 +444,21 @@ static const char *known_response_for_command(const char *cmd)
 			       "CPU  E: 0xff: Console poll found data for reading\n";
 		return "LEDs: power-off standby\n";
 	}
+	if (!strcmp(cmd, "debug"))
+		return mock_debug_response(NULL);
+	if (!strncmp(cmd, "debug ", 6))
+		return mock_debug_response(cmd + 6);
+	if (!strcmp(cmd, "l1dbg"))
+		return "L1 irouter debugging is off\n"
+		       "L1 junkbus debugging is slab 0, mask 0x0\n"
+		       "L1 environmental debugging is off\n"
+		       "L1 port interrupt debugging is off\n"
+		       "L1 i2c interrupt debugging is off\n"
+		       "L1 voltage margin debugging is off\n"
+		       "L1 PROM request debugging is off\n"
+		       "L1 irouter req/rsp suspend is 300, event suspend is 50\n"
+		       "L1 data dump on PPP error is off\n"
+		       "L1 malloc failure PANICs are disabled\n";
 	if (!strcmp(cmd, "serial") || !strcmp(cmd, "serial all"))
 		return "BSN: NCJ502    SSN: 08:00:69:10:6C:E3    Time: 05/27/2026 12:38:03 BST\n"
 		       "Public Key data in EEPROM is invalid\n";

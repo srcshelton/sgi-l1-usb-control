@@ -37,14 +37,13 @@ focuses on the operations needed for single-system maintenance:
 - set the L1 clock from the host;
 - wait for a newly bound L1 USB device, optionally setting time and powering
   on;
-- issue workstation `power up`, `power down`, and `power reset` with explicit
-  `--force`;
+- issue workstation `power up`, plus guarded `power down` and `power reset`;
 - reset the L1 controller with `reset --force`;
 - pass through live help-listed L1 commands with `sgil1ctl l1cmd ...`.
 
-Power and reset commands are deliberately guarded. Users who can open the L1
-device can power-cycle attached hardware, so packaged installs restrict device
-nodes to group `sgil1` with mode `0660`.
+Power-off and reset commands are deliberately guarded. Users who can open the
+L1 device can power-cycle attached hardware, so packaged installs restrict
+device nodes to group `sgil1` with mode `0660`.
 
 ## Device Nodes
 
@@ -182,6 +181,7 @@ sgil1ctl date
 sgil1ctl log
 sgil1ctl log --follow
 sgil1ctl leds --follow
+sgil1ctl debug
 ```
 
 `sgil1ctl log --follow` polls the L1 log buffer, prints only newly observed
@@ -197,10 +197,22 @@ only changed output. After each changed response it immediately polls again to
 catch fast-moving boot diagnostics, then returns to the steady poll interval
 once the output repeats; it backs off when the L1 stops responding. Known Fuel
 virtual LED values that old L1 firmware reports as unknown are decoded from the
-SGI Fuel Diagnostic Reference Manual. `power up --force --follow`,
+SGI Fuel Diagnostic Reference Manual. `power up --follow`,
 `power reset --force --follow`, `wait --power-up --follow`,
 `wait --reset --follow`, and `reset --force --follow` enter the same LED-follow
 mode after the corresponding command path.
+
+`sgil1ctl debug` shows the SGI virtual debug switch value from the L1 `debug`
+command, decodes the documented bitfields, and then prints the current `l1dbg`
+settings. Use `sgil1ctl debug --list-switches` or `sgil1ctl debug --list` to
+list wrapper switch names, values, and boot-stop choices.
+Use `sgil1ctl debug --enable FEATURE... --force`,
+`sgil1ctl debug --disable FEATURE... --force`, or
+`sgil1ctl debug --set SWITCHES --force` to update only the virtual debug
+switches. Expert `l1dbg` subcommands remain available through
+`sgil1ctl l1cmd ...`. `--boot-stop POINT` sets the documented PROM boot-stop
+bits in the virtual debug switches; clear them with
+`sgil1ctl debug --boot-stop none --force`.
 
 Set the L1 clock from the host when drift exceeds the default threshold:
 
@@ -208,14 +220,21 @@ Set the L1 clock from the host when drift exceeds the default threshold:
 sgil1ctl date --set-time
 ```
 
-Power control requires `--force`:
+Power-on is available directly, while power-off and reset actions require
+`--force`:
 
 ```sh
-sgil1ctl power up --force --follow
+sgil1ctl power up --follow
 sgil1ctl power down --force
 sgil1ctl power reset --force --follow
 sgil1ctl reset --force
 ```
+
+`power up --follow` and `wait --power-up --follow` enter LED-follow mode as
+soon as the power-up command has been sent, before waiting for `power check`
+confirmation. They continue following LEDs and print
+`Power-up: confirmed workstation appears on` once a later `power check`
+succeeds. Plain `power up` still waits for confirmation before returning.
 
 `power reset` sends the L1 `softreset`/`softrst` host-reset command. The
 top-level `reset` command resets the L1 controller itself.
@@ -242,8 +261,9 @@ sgil1ctl l1cmd flash status
 sgil1ctl l1cmd '*' version
 ```
 
-Use `sgil1ctl --help` for the normal command set and `sgil1ctl --help-all` for
-developer and protocol-inspection options.
+Use `sgil1ctl --help` for the normal command set, `sgil1ctl COMMAND --help` for
+command-specific options, and `sgil1ctl --help-all` for developer and
+protocol-inspection options.
 
 ## Legacy SGI L2/L3 Tools
 

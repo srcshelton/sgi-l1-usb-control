@@ -1,3 +1,23 @@
+sgi-l1-usb-control (0.1.50) unstable; urgency=medium
+
+  * Updated components since 0.1.49: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Add command-specific sgil1ctl COMMAND --help output for option-bearing
+    commands and low-level helpers.
+  * Allow sgil1ctl power up without --force while continuing to accept --force
+    for compatibility.
+  * Add sgil1ctl debug to decode documented virtual debug switches, show l1dbg
+    state, and guarded update helpers for named virtual debug switch fields.
+  * Rename the documented debug switch listing option to --list-switches,
+    with --list as a short alias.
+  * Remove the undocumented debug --list-features alias.
+  * Enter LED-follow immediately after power up --follow and
+    wait --power-up --follow, then report power-check confirmation once it
+    succeeds during follow.
+  * Accept logs as a hidden compatibility alias for log.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 06 Aug 2026 10:59:12 +0100
+
 sgi-l1-usb-control (0.1.49) unstable; urgency=medium
 
   * Updated components since 0.1.48: user-space sgil1ctl only; kernel module
