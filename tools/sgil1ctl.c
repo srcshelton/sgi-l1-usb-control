@@ -68,7 +68,8 @@
 #define SGIL1_LOG_BURST_POLL_MS 200
 #define SGIL1_LOG_REPEAT_HISTORY 5
 #define SGIL1_LEDS_FOLLOW_POLL_MS 100
-#define SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS 2000
+#define SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS 500
+#define SGIL1_LEDS_FOLLOW_CONFIRM_BUFFER_SECONDS 5
 
 static int sgil1_lock_fd = -1;
 
@@ -96,6 +97,7 @@ struct options {
 	bool pipe_records;
 	bool no_discover;
 	bool dest_overridden;
+	bool dest_auto_discovered;
 	bool debug;
 };
 
@@ -143,6 +145,12 @@ struct debug_options {
 	uint32_t boot_stop_value;
 };
 
+enum leds_follow_power_confirm {
+	LEDS_FOLLOW_CONFIRM_NONE,
+	LEDS_FOLLOW_CONFIRM_POWER_ON,
+	LEDS_FOLLOW_CONFIRM_POWER_OFF,
+};
+
 static int l1_text_command_status(const struct options *opts, const char *cmd,
 				  bool allow_time_setting, char **text);
 static char *l1_text_command(const struct options *opts, const char *cmd,
@@ -153,13 +161,15 @@ static int do_debug_command(const struct options *opts, int argc, char **argv,
 			    int command_index);
 static int do_power_up_confirmed(const struct options *opts, bool confirm);
 static int do_power_down_confirmed(const struct options *opts,
-				   bool allow_destructive);
+				   bool force_second_signal, bool confirm);
 static int do_host_softreset_confirmed(const struct options *opts,
 				       const char *l1cmd, bool allow_destructive,
 				       bool follow);
 static int do_leds_follow(const struct options *opts, int poll_interval_ms,
-			  bool confirm_power_on);
+			  enum leds_follow_power_confirm confirm_power);
 static const char *find_existing_data_device(const struct options *opts);
+static int prepare_command_options(const struct options *opts,
+				   struct options *cmd_opts);
 
 static bool is_help_option(const char *arg)
 {
@@ -173,7 +183,8 @@ static void usage(FILE *out, bool full)
 		"\n"
 			"Global options:\n"
 			"  --device PATH         data device path (default: auto)\n"
-			"                        auto scans /dev/sgi-l1/l1-*, /dev/sgil1_*, /dev/usb/sgil1_*\n"
+			"                        auto scans /dev/sgi-l1/l1-*,\n"
+			"                        /dev/sgil1_*, and /dev/usb/sgil1_*\n"
 			"  --status-device PATH  status device path (default: auto)\n"
 			"                        auto tries /dev/sgi-l1/status, /dev/sgil1_cs\n"
 			"  --timeout MS          poll timeout for reads (default 3000)\n"
@@ -185,8 +196,9 @@ static void usage(FILE *out, bool full)
 			"                        use 'sgil1ctl COMMAND --help' for command options\n"
 		"\n"
 		"User commands:\n"
-		"  status                print consolidated L1 health/status data\n"
-			"  date [OPTIONS]        show or set the L1 clock\n"
+			"  status                print consolidated L1 health/status data\n"
+			"  date [OPTIONS]        show or set the L1 date/time\n"
+			"  set-date [OPTIONS]    set the L1 date/time from the host\n"
 				"                        date options: --set-time,\n"
 				"                        --timezone TZ (default: host timezone with --set-time),\n"
 				"                        --drift-seconds SEC (default 60)\n"
@@ -197,7 +209,8 @@ static void usage(FILE *out, bool full)
 				"                        --timezone TZ (default: host timezone with --set-time),\n"
 				"                        --drift-seconds SEC (default 60),\n"
 				"                        --power-up, --power-down, --reset,\n"
-				"                        -w|--follow after --power-up or --reset,\n"
+				"                        -w|--follow after --power-up,\n"
+				"                        --power-down, or --reset,\n"
 				"                        --keepalive SEC (default 0), --force\n"
 			"  version|usb|env       send read-only L1 text commands over USB\n"
 			"  log [-w|--follow]     print the L1 log, optionally following new lines\n"
@@ -205,14 +218,16 @@ static void usage(FILE *out, bool full)
 				"                        --no-repeat-summary\n"
 			"  leds [-w|--follow]    print L1 front-panel LEDs, optionally following changes\n"
 			"  debug [OPTIONS]       show/decode L1 debug switches and l1dbg state\n"
-			"  power [check|vrm]     send read-only L1 power status commands over USB\n"
+			"  power [check|vrm]     show L1 power data, state, or VRM data\n"
 			"  power up [-w|--follow]\n"
 			"                        power on workstation; confirms state afterward\n"
-			"  power down --force    power off workstation\n"
+			"  power down [-w|--follow]\n"
+			"                        send one power-down signal; confirms state\n"
 			"  power reset --force [-w|--follow]\n"
 			"                        issue host soft reset; optionally follow LEDs\n"
-				"  reset --force [-w|--follow]\n"
-					"                        send L1 controller reset command, optionally following LEDs\n"
+			"  reset --force [-w|--follow]\n"
+			"                        send L1 controller reset command\n"
+			"                        optionally following LEDs\n"
 			"  l1cmd <command> [...] send a live-help-listed L1 text command over USB\n"
 			"                        add --force to send a command not listed by help\n");
 
@@ -241,15 +256,19 @@ static void usage(FILE *out, bool full)
 		"  reset-write           clear the write endpoint halt\n"
 		"  reset-pipes           clear read and write endpoint halts\n"
 		"  reset-device          issue a USB device reset\n"
-		"  raw-send HEX...       write one raw USB transfer; first two bytes are overwritten by the driver\n"
+			"  raw-send HEX...       write one raw USB transfer; first two\n"
+			"                        bytes are overwritten by the driver\n"
 		"  raw-recv              read one raw USB transfer and print a hexdump\n"
 		"  monitor               print raw USB transfers until interrupted\n"
 		"  build-l1cmd <command> [...]\n"
-		"                        print the IRouter frame for an allowlisted L1 text command\n"
+			"                        print the IRouter frame for an\n"
+			"                        allowlisted L1 text command\n"
 		"\n"
 		"Pass-through notes:\n"
-		"  l1cmd '*' <command>   SGI broadcast-prefix form; quote '*' to avoid shell expansion\n"
-			"                        L1 text commands are limited to 72 bytes on direct USB\n");
+		"  l1cmd '*' <command>   SGI broadcast-prefix form; quote '*'\n"
+		"                        to avoid shell expansion\n"
+		"                        L1 text commands are limited to 72\n"
+		"                        bytes on direct USB\n");
 }
 
 static void command_usage_footer(FILE *out)
@@ -273,25 +292,22 @@ static bool command_usage(FILE *out, const char *cmd)
 		command_usage_footer(out);
 		return true;
 	}
-	if (!strcmp(cmd, "date") || !strcmp(cmd, "clock") ||
+	if (!strcmp(cmd, "date") || !strcmp(cmd, "set-date") ||
+	    !strcmp(cmd, "clock") ||
 	    !strcmp(cmd, "time") || !strcmp(cmd, "set-clock") ||
 	    !strcmp(cmd, "set-time")) {
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] date [OPTIONS]\n"
-			"       sgil1ctl [GLOBAL OPTIONS] set-time [OPTIONS]\n"
+			"       sgil1ctl [GLOBAL OPTIONS] set-date [OPTIONS]\n"
 			"\n"
-			"Show the L1 clock, or set it from the host when requested.\n"
+			"Show the L1 date/time, or set it from the host when requested.\n"
 			"\n"
 			"Options:\n"
-			"  --set-time            set the L1 clock from the host\n"
+			"  --set-time            set the L1 date/time from the host\n"
 			"  --timezone TZ         set L1 timezone before setting time\n"
 			"                        default: host timezone with --set-time\n"
 			"  --drift-seconds SEC   set time only when drift is at least SEC\n"
-			"                        default: 60\n"
-			"  --time-drift SEC      alias for --drift-seconds\n"
-			"\n"
-			"Aliases:\n"
-			"  clock, time, set-clock, set-time\n");
+			"                        default: 60\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -303,23 +319,21 @@ static bool command_usage(FILE *out, const char *cmd)
 			"perform one guarded workstation power action.\n"
 			"\n"
 			"Options:\n"
-			"  --background          wait for the next bind event instead of an existing device\n"
-			"  --defer, --deferred,\n"
-			"  --next-bind           aliases for --background\n"
+			"  --background          wait for the next bind event instead of\n"
+			"                        an existing device\n"
 			"  --wait-timeout SEC    maximum seconds to wait; default: none\n"
 			"  --set-time            set the L1 clock from the host after discovery\n"
 			"  --timezone TZ         set L1 timezone before setting time\n"
 			"                        default: host timezone with --set-time\n"
 			"  --drift-seconds SEC   set time only when drift is at least SEC\n"
 			"                        default: 60\n"
-			"  --time-drift SEC      alias for --drift-seconds\n"
 			"  --power-up            power on if status reports workstation off\n"
 			"  --power-down          power off after status checks\n"
 			"  --reset               issue host soft reset after status checks\n"
-			"  -w, --follow          follow LEDs after --power-up or --reset\n"
+			"  -w, --follow          follow LEDs after --power-up,\n"
+			"                        --power-down, or --reset\n"
 			"  --keepalive SEC       keep waiting after success and re-enter wait mode\n"
 			"                        if the device disappears; default: 0\n"
-			"  --interval SEC        alias for --keepalive\n"
 			"  --force, --yes        confirm power/reset actions\n");
 		command_usage_footer(out);
 		return true;
@@ -351,53 +365,47 @@ static bool command_usage(FILE *out, const char *cmd)
 	}
 	if (!strcmp(cmd, "debug")) {
 		fprintf(out,
-			"Usage: sgil1ctl [GLOBAL OPTIONS] debug [--show]\n"
-			"       sgil1ctl [GLOBAL OPTIONS] debug --set SWITCHES --force\n"
-			"       sgil1ctl [GLOBAL OPTIONS] debug --enable FEATURE... --force\n"
-			"       sgil1ctl [GLOBAL OPTIONS] debug --disable FEATURE... --force\n"
-			"       sgil1ctl [GLOBAL OPTIONS] debug [--test MODE] [--boot-stop POINT] --force\n"
-			"       sgil1ctl [GLOBAL OPTIONS] debug --list-switches\n"
+			"Usage: sgil1ctl [GLOBAL OPTIONS] debug [OPTIONS]\n"
 			"\n"
 			"Show SGI virtual debug switches decoded from the L1 'debug'\n"
 			"command, followed by the current L1 'l1dbg' settings.\n"
 			"Only virtual debug switches are changed by the update options.\n"
 			"\n"
 			"Options:\n"
-			"  --show                show current debug state; default when omitted\n"
+			"  --show                show current debug state; default action\n"
 			"  --set SWITCHES        set the absolute virtual debug switch value\n"
-			"  --enable FEATURE...   set named virtual debug feature flags\n"
-			"  --disable FEATURE...  clear named virtual debug feature flags\n"
+			"  --enable SWITCH...    set named virtual debug switches\n"
+			"  --disable SWITCH...   clear named virtual debug switches\n"
 			"  --test MODE           set diagnostic testing mode\n"
 			"  --boot-stop POINT     set PROM boot stop point bits\n"
 			"                        use POINT 'none' to clear them\n"
 			"  --list-switches       list switch, mode, and boot-stop names\n"
-			"  --list                alias for --list-switches\n"
 			"  --force, --yes        confirm virtual debug switch updates\n");
 		command_usage_footer(out);
 		return true;
 	}
 	if (!strcmp(cmd, "power")) {
 		fprintf(out,
-			"Usage: sgil1ctl [GLOBAL OPTIONS] power [check|vrm]\n"
-			"       sgil1ctl [GLOBAL OPTIONS] power up [-w|--follow]\n"
-			"       sgil1ctl [GLOBAL OPTIONS] power down --force\n"
-			"       sgil1ctl [GLOBAL OPTIONS] power reset --force [-w|--follow]\n"
+			"Usage: sgil1ctl [GLOBAL OPTIONS] power [SUBCOMMAND] [OPTIONS]\n"
 			"\n"
-			"Show power state, power the workstation on/off, or issue a host\n"
-			"soft reset. Use top-level 'reset' for an L1 controller reset.\n"
+			"Show L1 power data, power the workstation on/off, or issue a\n"
+			"host soft reset. Use top-level 'reset' for an L1 controller reset.\n"
 			"\n"
 			"Subcommands:\n"
-			"  check                 show power state; default when omitted\n"
+			"  (none)                show L1 power data\n"
+			"  check                 show whether workstation appears on or off\n"
 			"  vrm                   show VRM power data\n"
-			"  up                    power on; confirms state unless --follow is used\n"
-			"  down                  power off; handles L1 double-confirm prompts\n"
-			"  reset                 issue host soft reset using L1 softreset\n"
-			"  softreset, softrst    aliases for reset\n"
+			"  up                    power on; confirms eventual state\n"
+			"  down                  send one power-down signal; confirms\n"
+			"                        eventual state\n"
+			"  reset|softreset|softrst\n"
+			"                        issue host soft reset using L1 softreset\n"
 			"\n"
 			"Options:\n"
-			"  --force, --yes        confirm power down/reset actions; accepted for power up compatibility\n"
-			"  -w, --follow          follow LEDs after power up or reset\n"
-			"                        power up enters follow before power-check confirmation\n");
+			"  --force, --yes        send second power-down signal; confirm\n"
+			"                        reset actions; accepted for power up\n"
+			"  -w, --follow          follow LEDs after power up, down, or reset\n"
+			"                        up/down buffer LEDs until confirmation\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -415,12 +423,13 @@ static bool command_usage(FILE *out, const char *cmd)
 	}
 	if (!strcmp(cmd, "power-down")) {
 		fprintf(out,
-			"Usage: sgil1ctl [GLOBAL OPTIONS] power-down --force\n"
+			"Usage: sgil1ctl [GLOBAL OPTIONS] power-down [-w|--follow]\n"
 			"\n"
 			"Compatibility alias for 'power down'.\n"
 			"\n"
 			"Options:\n"
-			"  --force, --yes        confirm power action\n");
+			"  --force, --yes        send a second power-down signal\n"
+			"  -w, --follow          follow LEDs after power down\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -2836,6 +2845,9 @@ static int do_power_command(const struct options *opts, int argc, char **argv,
 	if (streq_ci(action, "up") || streq_ci(action, "down") ||
 	    streq_ci(action, "reset") || streq_ci(action, "softreset") ||
 	    streq_ci(action, "softrst")) {
+		struct options follow_opts;
+		const struct options *action_opts = opts;
+
 		for (i = command_index + 2; i < argc; i++) {
 			if (is_force_option(argv[i])) {
 				force = true;
@@ -2849,21 +2861,30 @@ static int do_power_command(const struct options *opts, int argc, char **argv,
 			}
 		}
 
+		if (follow && (streq_ci(action, "up") ||
+			       streq_ci(action, "down"))) {
+			if (prepare_command_options(opts, &follow_opts))
+				return 1;
+			action_opts = &follow_opts;
+		}
+
 		if (streq_ci(action, "up")) {
 			(void)force;
-			ret = do_power_up_confirmed(opts, !follow);
+			ret = do_power_up_confirmed(action_opts, !follow);
 			if (ret || !follow)
 				return ret;
-			return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS,
-					      true);
+			return do_leds_follow(action_opts,
+					      SGIL1_LEDS_FOLLOW_POLL_MS,
+					      LEDS_FOLLOW_CONFIRM_POWER_ON);
 		}
 		if (streq_ci(action, "down")) {
-			if (follow) {
-				fprintf(stderr,
-					"power down --follow is not supported; use --follow with power up or power reset\n");
-				return 2;
-			}
-			return do_power_down_confirmed(opts, force);
+			ret = do_power_down_confirmed(action_opts, force,
+						      !follow);
+			if (ret || !follow)
+				return ret;
+			return do_leds_follow(action_opts,
+					      SGIL1_LEDS_FOLLOW_POLL_MS,
+					      LEDS_FOLLOW_CONFIRM_POWER_OFF);
 		}
 
 		return do_host_softreset_confirmed(opts,
@@ -2876,24 +2897,6 @@ unknown:
 	fprintf(stderr,
 		"unknown power subcommand; use 'power check', 'power vrm', 'power up', 'power down', 'power reset', or 'l1cmd power ...'\n");
 	return 2;
-}
-
-static int trailing_force_only(int argc, char **argv, int command_index,
-			       bool *force)
-{
-	int i;
-
-	for (i = command_index + 1; i < argc; i++) {
-		if (is_force_option(argv[i])) {
-			*force = true;
-		} else {
-			fprintf(stderr, "unknown argument for %s: %s\n",
-				argv[command_index], argv[i]);
-			return -1;
-		}
-	}
-
-	return 0;
 }
 
 static const char *find_existing_data_device(const struct options *opts)
@@ -3506,9 +3509,10 @@ static int parse_wait_args(int argc, char **argv, int start,
 	}
 	if (wait->status.set_time && !wait->status.timezone)
 		set_status_host_timezone(&wait->status);
-	if (wait->follow && (!wait->power_up && !wait->reset)) {
+	if (wait->follow &&
+	    (!wait->power_up && !wait->power_down && !wait->reset)) {
 		fprintf(stderr,
-			"wait --follow requires --power-up or --reset\n");
+			"wait --follow requires --power-up, --power-down, or --reset\n");
 		return -1;
 	}
 
@@ -3716,13 +3720,17 @@ static void print_debug_switch_decode(uint32_t switches)
 		printf("L1 virtual unknown/reserved switches are off\n");
 }
 
-static void print_debug_switch_text_block(const char *text)
+static void print_debug_switch_text_block(const char *text, bool include_raw)
 {
 	uint32_t switches;
 
-	print_text_block(text);
-	if (parse_debug_switches_from_text(text, &switches))
+	if (parse_debug_switches_from_text(text, &switches)) {
+		if (include_raw)
+			print_text_block(text);
 		print_debug_switch_decode(switches);
+	} else {
+		print_text_block(text);
+	}
 }
 
 static int print_debug_report(const struct options *opts, bool fail_on_error)
@@ -3740,7 +3748,7 @@ static int print_debug_report(const struct options *opts, bool fail_on_error)
 		printf("(virtual debug switches unavailable)\n");
 		ret = debug_ret;
 	} else {
-		print_debug_switch_text_block(debug_text);
+		print_debug_switch_text_block(debug_text, false);
 	}
 
 	printf("\n");
@@ -3941,6 +3949,32 @@ static int text_builder_append(struct text_builder *builder, const char *text,
 	return 0;
 }
 
+static int text_builder_append_text_block(struct text_builder *builder,
+					  const char *text)
+{
+	size_t len = text ? strlen(text) : 0;
+
+	if (text_builder_append(builder, text ? text : "", len))
+		return -1;
+	if (!len || text[len - 1] != '\n')
+		return text_builder_append(builder, "\n", 1);
+	return 0;
+}
+
+static void text_builder_flush_and_clear(struct text_builder *builder)
+{
+	if (!builder->len)
+		return;
+
+	printf("%s", builder->buf);
+	if (builder->buf[builder->len - 1] != '\n')
+		putchar('\n');
+	fflush(stdout);
+	builder->len = 0;
+	if (builder->buf)
+		builder->buf[0] = '\0';
+}
+
 static bool leds_line_contains_unknown_status(const char *line, size_t len)
 {
 	static const char needle[] = "unknown LED status";
@@ -4066,7 +4100,7 @@ static void print_l1_command_text_block(const char *l1cmd, const char *text)
 	if (streq_ci(l1cmd, "leds"))
 		print_leds_text_block(text);
 	else if (streq_ci(l1cmd, "debug"))
-		print_debug_switch_text_block(text);
+		print_debug_switch_text_block(text, true);
 	else
 		print_text_block(text);
 }
@@ -4259,6 +4293,7 @@ static int prepare_command_options(const struct options *opts,
 
 	cmd_opts->dest_addr = dest_addr;
 	cmd_opts->dest_overridden = true;
+	cmd_opts->dest_auto_discovered = true;
 	return 0;
 }
 
@@ -4977,8 +5012,8 @@ static bool debug_arg_is_option(const char *arg)
 	return arg[0] == '-';
 }
 
-static int parse_debug_feature_list(int argc, char **argv, int *index,
-				    const char *option, uint32_t *mask)
+static int parse_debug_switch_list(int argc, char **argv, int *index,
+				   const char *option, uint32_t *mask)
 {
 	int i = *index + 1;
 	uint32_t value;
@@ -4988,7 +5023,7 @@ static int parse_debug_feature_list(int argc, char **argv, int *index,
 		if (!debug_lookup_name_value(debug_flag_aliases,
 					     ARRAY_SIZE(debug_flag_aliases),
 					     argv[i], &value)) {
-			fprintf(stderr, "unknown debug feature for %s: %s\n",
+			fprintf(stderr, "unknown debug switch for %s: %s\n",
 				option, argv[i]);
 			return -1;
 		}
@@ -4998,7 +5033,7 @@ static int parse_debug_feature_list(int argc, char **argv, int *index,
 	}
 
 	if (!found) {
-		fprintf(stderr, "%s needs at least one feature name\n", option);
+		fprintf(stderr, "%s needs at least one switch name\n", option);
 		return -1;
 	}
 
@@ -5037,15 +5072,15 @@ static int parse_debug_args(int argc, char **argv, int start,
 			debug->have_set = true;
 			debug->update = true;
 		} else if (!strcmp(argv[i], "--enable")) {
-			if (parse_debug_feature_list(argc, argv, &i,
-						     "--enable",
-						     &debug->enable_mask))
+			if (parse_debug_switch_list(argc, argv, &i,
+						    "--enable",
+						    &debug->enable_mask))
 				return -1;
 			debug->update = true;
 		} else if (!strcmp(argv[i], "--disable")) {
-			if (parse_debug_feature_list(argc, argv, &i,
-						     "--disable",
-						     &debug->disable_mask))
+			if (parse_debug_switch_list(argc, argv, &i,
+						    "--disable",
+						    &debug->disable_mask))
 				return -1;
 			debug->update = true;
 		} else if (!strcmp(argv[i], "--test")) {
@@ -5139,7 +5174,7 @@ static int write_debug_switches(const struct options *opts, uint32_t switches)
 	}
 
 	if (!opts->debug)
-		print_debug_switch_text_block(text);
+		print_debug_switch_text_block(text, false);
 	free(text);
 
 	if (!opts->debug) {
@@ -5235,14 +5270,43 @@ static int parse_leds_args(int argc, char **argv, int start,
 	return 0;
 }
 
-static void maybe_confirm_power_on_during_leds_follow(const struct options *opts,
-						      bool *confirmed,
-						      time_t *next_attempt)
+static int next_leds_follow_backoff_ms(int current)
+{
+	int next = current + (current / 2);
+
+	if (next <= current)
+		next = current + 1;
+	if (next > SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS)
+		next = SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS;
+	return next;
+}
+
+static bool leds_follow_confirm_wants_on(enum leds_follow_power_confirm confirm)
+{
+	return confirm == LEDS_FOLLOW_CONFIRM_POWER_ON;
+}
+
+static const char *leds_follow_confirm_action(
+	enum leds_follow_power_confirm confirm)
+{
+	return confirm == LEDS_FOLLOW_CONFIRM_POWER_OFF ? "down" : "up";
+}
+
+static const char *leds_follow_confirm_state(
+	enum leds_follow_power_confirm confirm)
+{
+	return confirm == LEDS_FOLLOW_CONFIRM_POWER_OFF ? "off" : "on";
+}
+
+static void maybe_confirm_power_during_leds_follow(const struct options *opts,
+						   enum leds_follow_power_confirm confirm,
+						   bool *confirmed,
+						   time_t *next_attempt)
 {
 	char *power_check;
 	time_t now;
 
-	if (!confirmed || *confirmed)
+	if (confirm == LEDS_FOLLOW_CONFIRM_NONE || !confirmed || *confirmed)
 		return;
 
 	now = time(NULL);
@@ -5251,8 +5315,14 @@ static void maybe_confirm_power_on_during_leds_follow(const struct options *opts
 
 	power_check = l1_text_command(opts, "power check", false);
 	if (power_check) {
-		if (power_text_says_on(power_check)) {
-			printf("Power-up: confirmed workstation appears on\n");
+		bool wants_on = leds_follow_confirm_wants_on(confirm);
+		bool matched = wants_on ? power_text_says_on(power_check) :
+					  power_text_says_off(power_check);
+
+		if (matched) {
+			printf("\nPower-%s: confirmed workstation appears %s\n\n",
+			       leds_follow_confirm_action(confirm),
+			       leds_follow_confirm_state(confirm));
 			fflush(stdout);
 			*confirmed = true;
 		}
@@ -5266,17 +5336,27 @@ static void maybe_confirm_power_on_during_leds_follow(const struct options *opts
 }
 
 static int do_leds_follow(const struct options *opts, int poll_interval_ms,
-			  bool confirm_power_on)
+			  enum leds_follow_power_confirm confirm_power)
 {
+	struct options route_opts = *opts;
 	struct options cmd_opts = *opts;
+	struct text_builder pending = { 0 };
 	char *previous = NULL;
 	bool prepared = false;
-	bool power_on_confirmed = !confirm_power_on;
+	bool power_confirmed = confirm_power == LEDS_FOLLOW_CONFIRM_NONE;
+	bool buffer_leds = confirm_power != LEDS_FOLLOW_CONFIRM_NONE;
 	time_t next_power_confirm_attempt = 0;
+	time_t buffer_deadline = 0;
 	int backoff_ms = poll_interval_ms;
 
 	if (backoff_ms < SGIL1_LEDS_FOLLOW_POLL_MS)
 		backoff_ms = SGIL1_LEDS_FOLLOW_POLL_MS;
+	if (buffer_leds) {
+		time_t now = time(NULL);
+
+		buffer_deadline = now == (time_t)-1 ? 0 :
+				  now + SGIL1_LEDS_FOLLOW_CONFIRM_BUFFER_SECONDS;
+	}
 
 	for (;;) {
 		char *text = NULL;
@@ -5285,15 +5365,13 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 		int ret;
 
 		if (!prepared) {
-			if (prepare_command_options(opts, &cmd_opts)) {
+			if (prepare_command_options(&route_opts, &cmd_opts)) {
 				fprintf(stderr,
 					"LEDs follow: could not prepare L1 command route; backing off %d ms\n",
 					backoff_ms);
 				sleep_milliseconds(backoff_ms);
-				backoff_ms *= 2;
-				if (backoff_ms > SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS)
-					backoff_ms =
-						SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS;
+				backoff_ms =
+					next_leds_follow_backoff_ms(backoff_ms);
 				continue;
 			}
 			prepared = true;
@@ -5304,13 +5382,15 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 		if (ret) {
 			free(text);
 			prepared = false;
+			if (route_opts.dest_auto_discovered) {
+				route_opts.dest_overridden = false;
+				route_opts.dest_auto_discovered = false;
+			}
 			fprintf(stderr,
 				"LEDs follow: leds command failed; backing off %d ms\n",
 				backoff_ms);
 			sleep_milliseconds(backoff_ms);
-			backoff_ms *= 2;
-			if (backoff_ms > SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS)
-				backoff_ms = SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS;
+			backoff_ms = next_leds_follow_backoff_ms(backoff_ms);
 			continue;
 		}
 
@@ -5322,17 +5402,40 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 			decoded = NULL;
 		}
 		changed = !previous || strcmp(previous, text);
+		maybe_confirm_power_during_leds_follow(&cmd_opts,
+						       confirm_power,
+						       &power_confirmed,
+						       &next_power_confirm_attempt);
+		if (power_confirmed && buffer_leds) {
+			text_builder_flush_and_clear(&pending);
+			buffer_leds = false;
+		}
+		if (!power_confirmed && buffer_leds && buffer_deadline) {
+			time_t now = time(NULL);
+
+			if (now != (time_t)-1 && now >= buffer_deadline) {
+				text_builder_flush_and_clear(&pending);
+				buffer_leds = false;
+			}
+		}
 		if (changed) {
-			print_text_block(text);
-			fflush(stdout);
+			if (buffer_leds) {
+				if (text_builder_append_text_block(&pending,
+								   text)) {
+					free(text);
+					free(previous);
+					free(pending.buf);
+					return 1;
+				}
+			} else {
+				print_text_block(text);
+				fflush(stdout);
+			}
 			free(previous);
 			previous = text;
 			text = NULL;
 		}
 		free(text);
-		maybe_confirm_power_on_during_leds_follow(&cmd_opts,
-							  &power_on_confirmed,
-							  &next_power_confirm_attempt);
 		sleep_milliseconds(changed ? 0 : poll_interval_ms);
 	}
 
@@ -5347,7 +5450,8 @@ static int do_leds_command(const struct options *opts, int argc, char **argv,
 	if (parse_leds_args(argc, argv, command_index + 1, &leds))
 		return 2;
 	if (leds.follow)
-		return do_leds_follow(opts, leds.poll_interval_ms, false);
+		return do_leds_follow(opts, leds.poll_interval_ms,
+				      LEDS_FOLLOW_CONFIRM_NONE);
 
 	return do_l1_command(opts, "leds", false);
 }
@@ -5401,7 +5505,8 @@ static int do_reset_command(const struct options *opts, int argc, char **argv,
 	if (ret || !follow)
 		return ret;
 
-	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS, false);
+	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS,
+			      LEDS_FOLLOW_CONFIRM_NONE);
 }
 
 static int power_confirm_timeout_ms(const struct options *opts)
@@ -5498,24 +5603,38 @@ static int do_power_up_confirmed(const struct options *opts, bool confirm)
 }
 
 static int do_power_down_confirmed(const struct options *opts,
-				   bool allow_destructive)
+				   bool force_second_signal, bool confirm)
 {
 	char *response = NULL;
+	bool requested_second;
 	int ret;
 
-	ret = run_l1_command_core(opts, "power down", allow_destructive, false,
+	ret = run_l1_command_core(opts, "power down", true, false,
 				  false, false, opts->debug, &response);
 	if (ret)
 		goto out;
 
-	if (power_down_text_requests_second_command(response)) {
-		printf("Power-down: L1 requested a second power down command; issuing it\n");
+	requested_second = power_down_text_requests_second_command(response);
+	if (requested_second && !force_second_signal) {
+		printf("Power-down: L1 requested second signal; use --force to send it\n");
+	}
+	if (force_second_signal) {
+		if (requested_second)
+			printf("Power-down: L1 requested second signal; issuing it\n");
+		else
+			printf("Power-down: --force set; issuing second power-down signal\n");
 		free(response);
 		response = NULL;
-		ret = run_l1_command_core(opts, "power down", allow_destructive,
+		ret = run_l1_command_core(opts, "power down", true,
 					  false, false, false, opts->debug, NULL);
 		if (ret)
 			goto out;
+	}
+
+	if (!confirm) {
+		printf("Power-down: entering LED follow before power-state confirmation\n");
+		ret = 0;
+		goto out;
 	}
 
 	ret = wait_for_power_off(opts, power_confirm_timeout_ms(opts));
@@ -5550,7 +5669,8 @@ static int do_host_softreset_confirmed(const struct options *opts,
 	if (ret || !follow)
 		return ret;
 
-	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS, false);
+	return do_leds_follow(opts, SGIL1_LEDS_FOLLOW_POLL_MS,
+			      LEDS_FOLLOW_CONFIRM_NONE);
 }
 
 static int reset_pipes_after_bind(const struct options *opts)
@@ -5575,16 +5695,23 @@ static int reset_pipes_after_bind(const struct options *opts)
 	return ret;
 }
 
-static int maybe_power_up_from_wait(const struct options *opts, bool follow)
+static int maybe_power_up_from_wait(const struct options *opts, bool follow,
+				    struct options *follow_opts,
+				    bool *follow_opts_valid)
 {
-	struct options cmd_opts;
+	struct options local_opts;
+	struct options *cmd_opts = follow && follow_opts ? follow_opts :
+				   &local_opts;
 	char *power_check;
 	int ret = 0;
 
-	if (prepare_command_options(opts, &cmd_opts))
+	if (follow_opts_valid)
+		*follow_opts_valid = false;
+
+	if (prepare_command_options(opts, cmd_opts))
 		return 1;
 
-	power_check = l1_text_command(&cmd_opts, "power check", false);
+	power_check = l1_text_command(cmd_opts, "power check", false);
 	if (!power_check)
 		return 1;
 
@@ -5594,12 +5721,15 @@ static int maybe_power_up_from_wait(const struct options *opts, bool follow)
 		printf("Power-up: workstation already appears on; no action taken\n");
 	} else if (power_text_says_off(power_check)) {
 		printf("Power-up: workstation appears off; issuing power up\n");
-		ret = do_power_up_confirmed(opts, !follow);
+		ret = do_power_up_confirmed(cmd_opts, !follow);
 	} else {
 		fprintf(stderr,
 			"Power-up: cannot determine power state; no action taken\n");
 		ret = 1;
 	}
+
+	if (!ret && follow && follow_opts && follow_opts_valid)
+		*follow_opts_valid = true;
 
 	free(power_check);
 	return ret;
@@ -5612,13 +5742,31 @@ static int do_reset_for_wait(const struct options *opts)
 }
 
 static int do_wait_power_action(const struct options *opts,
-				const struct wait_options *wait)
+				const struct wait_options *wait,
+				struct options *follow_opts,
+				bool *follow_opts_valid)
 {
 	if (wait->power_up)
-		return maybe_power_up_from_wait(opts, wait->follow);
+		return maybe_power_up_from_wait(opts, wait->follow, follow_opts,
+						follow_opts_valid);
 	if (wait->power_down) {
+		const struct options *action_opts = opts;
+		int ret;
+
+		if (follow_opts_valid)
+			*follow_opts_valid = false;
 		printf("\nPower-down: issuing power down from wait mode\n");
-		return do_power_down_confirmed(opts, true);
+		if (wait->follow && follow_opts) {
+			if (prepare_command_options(opts, follow_opts))
+				return 1;
+			action_opts = follow_opts;
+		}
+		ret = do_power_down_confirmed(action_opts, true, !wait->follow);
+		if (ret)
+			return ret;
+		if (wait->follow && follow_opts && follow_opts_valid)
+			*follow_opts_valid = true;
+		return 0;
 	}
 	if (wait->reset)
 		return do_reset_for_wait(opts);
@@ -5667,6 +5815,8 @@ static int do_wait(const struct options *opts, const struct wait_options *wait)
 		return ret;
 
 	for (;;) {
+		struct options follow_opts;
+		bool follow_opts_valid = false;
 		const char *path;
 
 		ret = wait_for_data_device(opts, wait->wait_timeout_seconds,
@@ -5698,23 +5848,31 @@ static int do_wait(const struct options *opts, const struct wait_options *wait)
 			return ret;
 		}
 
-			if (wait->power_up || wait->power_down || wait->reset) {
-				ret = do_wait_power_action(opts, wait);
-				if (ret) {
-					release_sgil1_lock();
-					return ret;
-				}
-			}
-
-			if (wait->follow) {
-				ret = do_leds_follow(opts,
-						     SGIL1_LEDS_FOLLOW_POLL_MS,
-						     wait->power_up);
+		if (wait->power_up || wait->power_down || wait->reset) {
+			ret = do_wait_power_action(opts, wait, &follow_opts,
+						   &follow_opts_valid);
+			if (ret) {
 				release_sgil1_lock();
 				return ret;
 			}
+		}
 
+		if (wait->follow) {
+			const struct options *led_opts =
+				follow_opts_valid ? &follow_opts : opts;
+
+			ret = do_leds_follow(led_opts,
+					     SGIL1_LEDS_FOLLOW_POLL_MS,
+					     wait->power_up ?
+					     LEDS_FOLLOW_CONFIRM_POWER_ON :
+					     wait->power_down ?
+					     LEDS_FOLLOW_CONFIRM_POWER_OFF :
+					     LEDS_FOLLOW_CONFIRM_NONE);
 			release_sgil1_lock();
+			return ret;
+		}
+
+		release_sgil1_lock();
 
 		if (wait->keepalive_seconds <= 0)
 			return 0;
@@ -5802,6 +5960,7 @@ static int parse_options(int argc, char **argv, struct options *opts,
 				return -1;
 			}
 			opts->dest_overridden = true;
+			opts->dest_auto_discovered = false;
 		} else if (!strcmp(argv[i], "--class")) {
 			uint32_t value;
 
@@ -5918,13 +6077,15 @@ int main(int argc, char **argv)
 		}
 		return do_consolidated_status(&opts, &status);
 	}
-	if (!strcmp(cmd, "date") || !strcmp(cmd, "clock") || !strcmp(cmd, "time") ||
+	if (!strcmp(cmd, "date") || !strcmp(cmd, "set-date") ||
+	    !strcmp(cmd, "clock") || !strcmp(cmd, "time") ||
 	    !strcmp(cmd, "set-clock") || !strcmp(cmd, "set-time")) {
 		struct status_options status;
 
 		if (parse_status_args(argc, argv, command_index + 1, &status))
 			return 2;
-		if (!strcmp(cmd, "set-clock") || !strcmp(cmd, "set-time"))
+		if (!strcmp(cmd, "set-date") || !strcmp(cmd, "set-clock") ||
+		    !strcmp(cmd, "set-time"))
 			status.set_time = true;
 		if (status.set_time && !status.timezone)
 			set_status_host_timezone(&status);
@@ -5978,24 +6139,45 @@ int main(int argc, char **argv)
 	if (!strcmp(cmd, "power-up")) {
 		bool force = opts.force;
 		bool follow = false;
+		struct options follow_opts;
+		const struct options *action_opts = &opts;
 		int ret;
 
 		if (parse_force_follow_args(argc, argv, command_index, &force,
 					    &follow))
 			return 2;
+		if (follow) {
+			if (prepare_command_options(&opts, &follow_opts))
+				return 1;
+			action_opts = &follow_opts;
+		}
 		(void)force;
-		ret = do_power_up_confirmed(&opts, !follow);
+		ret = do_power_up_confirmed(action_opts, !follow);
 		if (ret || !follow)
 			return ret;
-		return do_leds_follow(&opts, SGIL1_LEDS_FOLLOW_POLL_MS,
-				      true);
+		return do_leds_follow(action_opts, SGIL1_LEDS_FOLLOW_POLL_MS,
+				      LEDS_FOLLOW_CONFIRM_POWER_ON);
 	}
 	if (!strcmp(cmd, "power-down")) {
 		bool force = opts.force;
+		bool follow = false;
+		struct options follow_opts;
+		const struct options *action_opts = &opts;
+		int ret;
 
-		if (trailing_force_only(argc, argv, command_index, &force))
+		if (parse_force_follow_args(argc, argv, command_index, &force,
+					    &follow))
 			return 2;
-		return do_power_down_confirmed(&opts, force);
+		if (follow) {
+			if (prepare_command_options(&opts, &follow_opts))
+				return 1;
+			action_opts = &follow_opts;
+		}
+		ret = do_power_down_confirmed(action_opts, force, !follow);
+		if (ret || !follow)
+			return ret;
+		return do_leds_follow(action_opts, SGIL1_LEDS_FOLLOW_POLL_MS,
+				      LEDS_FOLLOW_CONFIRM_POWER_OFF);
 	}
 	if (!strcmp(cmd, "reset")) {
 		return do_reset_command(&opts, argc, argv, command_index);

@@ -37,13 +37,15 @@ focuses on the operations needed for single-system maintenance:
 - set the L1 clock from the host;
 - wait for a newly bound L1 USB device, optionally setting time and powering
   on;
-- issue workstation `power up`, plus guarded `power down` and `power reset`;
+- issue workstation `power up`, `power down`, and guarded `power reset`;
 - reset the L1 controller with `reset --force`;
 - pass through live help-listed L1 commands with `sgil1ctl l1cmd ...`.
 
-Power-off and reset commands are deliberately guarded. Users who can open the
-L1 device can power-cycle attached hardware, so packaged installs restrict
-device nodes to group `sgil1` with mode `0660`.
+Power-down and reset commands are deliberately explicit. High-level
+`power down` sends one power-down signal, `power down --force` sends the second
+signal, and reset commands remain guarded. Users who can open the L1 device can
+power-cycle attached hardware, so packaged installs restrict device nodes to
+group `sgil1` with mode `0660`.
 
 ## Device Nodes
 
@@ -198,16 +200,17 @@ catch fast-moving boot diagnostics, then returns to the steady poll interval
 once the output repeats; it backs off when the L1 stops responding. Known Fuel
 virtual LED values that old L1 firmware reports as unknown are decoded from the
 SGI Fuel Diagnostic Reference Manual. `power up --follow`,
-`power reset --force --follow`, `wait --power-up --follow`,
-`wait --reset --follow`, and `reset --force --follow` enter the same LED-follow
-mode after the corresponding command path.
+`power down --force --follow`, `power reset --force --follow`,
+`wait --power-up --follow`, `wait --power-down --follow`,
+`wait --reset --follow`, and `reset --force --follow` enter the same
+LED-follow mode after the corresponding command path.
 
 `sgil1ctl debug` shows the SGI virtual debug switch value from the L1 `debug`
 command, decodes the documented bitfields, and then prints the current `l1dbg`
-settings. Use `sgil1ctl debug --list-switches` or `sgil1ctl debug --list` to
-list wrapper switch names, values, and boot-stop choices.
-Use `sgil1ctl debug --enable FEATURE... --force`,
-`sgil1ctl debug --disable FEATURE... --force`, or
+settings. Use `sgil1ctl debug --list-switches` to list wrapper switch names,
+values, and boot-stop choices.
+Use `sgil1ctl debug --enable SWITCH... --force`,
+`sgil1ctl debug --disable SWITCH... --force`, or
 `sgil1ctl debug --set SWITCHES --force` to update only the virtual debug
 switches. Expert `l1dbg` subcommands remain available through
 `sgil1ctl l1cmd ...`. `--boot-stop POINT` sets the documented PROM boot-stop
@@ -220,21 +223,23 @@ Set the L1 clock from the host when drift exceeds the default threshold:
 sgil1ctl date --set-time
 ```
 
-Power-on is available directly, while power-off and reset actions require
-`--force`:
+Power-on and a single power-down signal are available directly. Use `--force`
+with `power down` to send the second signal used to cut power from a running
+system. Host and L1 reset actions require `--force`:
 
 ```sh
 sgil1ctl power up --follow
-sgil1ctl power down --force
+sgil1ctl power down --force --follow
 sgil1ctl power reset --force --follow
 sgil1ctl reset --force
 ```
 
-`power up --follow` and `wait --power-up --follow` enter LED-follow mode as
-soon as the power-up command has been sent, before waiting for `power check`
-confirmation. They continue following LEDs and print
-`Power-up: confirmed workstation appears on` once a later `power check`
-succeeds. Plain `power up` still waits for confirmation before returning.
+`power up --follow`, `power down --follow`, and the matching `wait` power
+actions enter LED-follow mode as soon as the L1 command has been sent, before
+waiting for `power check` confirmation. Early LED samples are buffered until
+the confirmation line is printed, or until a short timeout expires, then normal
+LED-follow output continues. Plain `power up` and `power down` still wait for
+confirmation before returning.
 
 `power reset` sends the L1 `softreset`/`softrst` host-reset command. The
 top-level `reset` command resets the L1 controller itself.
@@ -250,7 +255,7 @@ Leave a process armed for the next future USB bind, ignoring any device that is
 already present:
 
 ```sh
-sgil1ctl wait --deferred --set-time --power-up --force
+sgil1ctl wait --background --set-time --power-up --force
 ```
 
 Pass through an L1 command advertised by live `help` output:

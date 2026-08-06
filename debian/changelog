@@ -1,3 +1,24 @@
+sgi-l1-usb-control (0.1.51) unstable; urgency=medium
+
+  * Updated components since 0.1.50: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Suppress the redundant raw L1 debug line in top-level sgil1ctl debug
+    output while retaining the decoded virtual-switch report.
+  * Make debug and power command help shorter and more consistent, using
+    switch terminology and leaving hidden aliases undocumented.
+  * Make set-date the documented date-setting shortcut and hide date/wait
+    option aliases from help while keeping them accepted.
+  * Support power down --follow and wait --power-down --follow LED diagnostics.
+  * Allow high-level power down to send one power-down signal without --force,
+    while --force sends the second SGI power-down signal immediately.
+  * Buffer early power up/down LED-follow samples until power-state
+    confirmation or a short timeout, and reuse discovered command routes where
+    possible during follow hand-off.
+  * Reduce LED-follow recovery backoff so transient USB recovery does not
+    suppress boot diagnostics for multiple seconds.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 06 Aug 2026 13:18:29 +0100
+
 sgi-l1-usb-control (0.1.50) unstable; urgency=medium
 
   * Updated components since 0.1.49: user-space sgil1ctl only; kernel module
