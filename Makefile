@@ -30,6 +30,7 @@ help:
 	@printf '  %-18s %s\n' 'container-podman' 'build the optional SGI L2/L3 image with Podman'
 	@printf '  %-18s %s\n' 'container-apple' 'build the optional SGI L2/L3 image with Apple container on macOS arm64'
 	@printf '%s\n' ''
+	@printf '%s\n' 'Set WITH_TUI=1 to build sgil1ctl with the optional ncurses interface.'
 	@printf '%s\n' 'Container targets expect contrib/l2-l3-container/rootfs or SGI_L3_RPM=/path/to/snxsc_l3-*.rpm.'
 	@printf '%s\n' 'Set SGI_L3_FETCH=1 to fetch the referenced public CD-IST archive before extracting.'
 

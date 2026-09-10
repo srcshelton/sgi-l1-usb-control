@@ -19,6 +19,7 @@ VERSION_SCRIPT = ROOT / "scripts" / "package-version.sh"
 UDEV = ROOT / "udev" / "99-sgi-l1-usb.rules"
 POSTINST = ROOT / "debian" / "sgi-l1-usb-dkms.postinst"
 CONTROL = ROOT / "debian" / "control"
+SGIL1_TUI_INSTALL = ROOT / "debian" / "sgil1ctl-tui.install"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 L2_L3_CONTAINER = ROOT / "contrib" / "l2-l3-container" / "Containerfile"
 L2_L3_CONTAINER_README = ROOT / "contrib" / "l2-l3-container" / "README.md"
@@ -267,6 +268,20 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("getent group sgil1", postinst)
         self.assertIn("Depends: adduser, dkms, udev", control)
 
+    def test_packaging_builds_minimal_and_tui_editions(self):
+        control = CONTROL.read_text()
+        rules = DEBIAN_RULES.read_text()
+        tui_install = SGIL1_TUI_INSTALL.read_text()
+
+        self.assertIn("Build-Depends: debhelper-compat (= 13), libncurses-dev, pkgconf", control)
+        self.assertIn("Package: sgil1ctl\n", control)
+        self.assertIn("Package: sgil1ctl-tui\n", control)
+        self.assertIn("Provides: sgil1ctl (= ${binary:Version})", control)
+        self.assertIn("Conflicts: sgil1ctl", control)
+        self.assertIn('$(MAKE) -C tools CC="$(CC)" WITH_TUI=1', rules)
+        self.assertIn("tools/sgil1ctl-tui", rules)
+        self.assertIn("README.md usr/share/doc/sgil1ctl-tui/", tui_install)
+
     def test_ci_release_gate_backfills_missing_release_assets(self):
         workflow = CI_WORKFLOW.read_text()
 
@@ -275,6 +290,11 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn('"sgi-l1-usb-dkms_${current}_all.deb"', workflow)
         self.assertIn('"sgil1ctl_${current}_amd64.deb"', workflow)
         self.assertIn('"sgil1ctl_${current}_arm64.deb"', workflow)
+        self.assertIn('"sgil1ctl-tui_${current}_amd64.deb"', workflow)
+        self.assertIn('"sgil1ctl-tui_${current}_arm64.deb"', workflow)
+        self.assertIn("name: sgil1ctl-arm64-debs", workflow)
+        self.assertIn("minimal sgil1ctl unexpectedly links ncurses", workflow)
+        self.assertIn("ldd tools/sgil1ctl | grep -Fq libncurses", workflow)
         self.assertIn("[ -z \"$missing_assets\" ]", workflow)
         self.assertIn("Release $tag is missing; publishing current version", workflow)
         self.assertIn("Release $tag is missing expected asset(s)", workflow)

@@ -13,9 +13,17 @@ The suite has two layers:
   endpoint recovery, write-size limiting, and legacy SGI device naming.
 - `test_sgil1ctl_mock.py` runs the real `tools/sgil1ctl` binary against
   `mock_l1.so`, an `LD_PRELOAD` mock of the L1 USB/status devices. The mock
-  emits IRouter responses for discovery, status, date, power, reset, help, and
-  pass-through commands so guarded destructive paths can be tested without a
-  connected workstation.
+  emits IRouter responses for discovery, status, date, power, reset, help,
+  pass-through commands, and combined log/LED monitoring so guarded destructive
+  paths and queue-aware back-off can be tested without a connected workstation.
+
+The default build remains free of ncurses dependencies. To compile-check the
+optional TUI configuration locally:
+
+```sh
+make -C tools clean
+make -C tools WITH_TUI=1
+```
 
 Run the normal suite and then build Debian packages:
 

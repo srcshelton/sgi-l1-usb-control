@@ -10,9 +10,10 @@ L1-equipped SGI systems, including Origin 300x and Onyx 300x configurations,
 subject to the usual differences between L1 firmware revisions and brick types.
 
 > **Raspberry Pi USB compatibility note:** CI publishes a Linux arm64
-> `sgil1ctl` Debian package for arm64 hosts, but that does not imply that every
-> arm64 USB host can enumerate the SGI L1 USB device. Some Raspberry Pi USB host
-> stacks may be incompatible with the SGI L1 controller's USB interface. If
+> `sgil1ctl` and `sgil1ctl-tui` Debian packages for arm64 hosts, but that does
+> not imply that every arm64 USB host can enumerate the SGI L1 USB device. Some
+> Raspberry Pi USB host stacks may be incompatible with the SGI L1 controller's
+> USB interface. If
 > `065e:1234` does not appear reliably in `lsusb` output, try a different
 > type/speed of USB port (if available) or see whether connecting the L1 cable
 > through a powered USB hub makes any difference.
@@ -23,7 +24,7 @@ raw USB bulk transport carrying `IRouter` frames. This repository provides:
 - `sgi_l1_usb`: an out-of-tree Linux kernel module with the legacy `/dev/sgil1*`
   ABI as the compatibility target;
 - `sgil1ctl`: a small user-space tool for status, clock, power, log, and direct
-  L1 command operations;
+  L1 command operations, including a combined log and LED monitor;
 - Debian DKMS packaging and `udev` rules for easier installation;
 - a hardware-free test suite using a mocked L1 transport.
 
@@ -89,11 +90,21 @@ make test
 make deb
 ```
 
-Install the resulting packages:
+Install the driver and either the minimal command-line tool:
 
 ```sh
 sudo apt install ./_build/sgi-l1-usb-dkms_*_all.deb ./_build/sgil1ctl_*_*.deb
 ```
+
+or the edition with the optional ncurses interface:
+
+```sh
+sudo apt install ./_build/sgi-l1-usb-dkms_*_all.deb \
+  ./_build/sgil1ctl-tui_*_*.deb
+```
+
+The two tool packages install the same `sgil1ctl` command and therefore
+replace one another.
 
 Reload `udev` rules, load the module, and reconnect the L1 USB cable if needed:
 
@@ -121,6 +132,19 @@ Build the module and tool:
 make -C module KDIR=/lib/modules/$(uname -r)/build
 make -C tools
 ```
+
+The default tool has no terminal-library dependency. To include the optional
+split-pane monitor, install the wide-character ncurses development files and
+build with:
+
+```sh
+make -C tools WITH_TUI=1
+```
+
+The build uses `pkg-config ncursesw` by default. `NCURSES_CFLAGS` and
+`NCURSES_LIBS` may be supplied explicitly on systems without a suitable
+`pkg-config` file. Debian and CI builds produce alternative `sgil1ctl` and
+`sgil1ctl-tui` packages; the former remains the minimal build.
 
 The module build derives its version from `debian/changelog`. If Debian's
 `dpkg-parsechangelog` tool is unavailable, the build falls back to parsing the
@@ -183,6 +207,7 @@ sgil1ctl date
 sgil1ctl log
 sgil1ctl log --follow
 sgil1ctl leds --follow
+sgil1ctl watch
 sgil1ctl debug
 ```
 
@@ -192,18 +217,57 @@ five-line recent-message memory. The USB transport exposed by this driver does
 not provide a known log-change notification stream, so entries can still be
 missed if the L1 log buffer wraps completely between polls. Use
 `sgil1ctl log --follow --poll-interval MS` to tune the steady-state poll
-interval.
+interval. Newly observed `USB_WQUE Q full` entries increase a bounded pressure
+level and slow polling; `Q full` and `Q avail` remain visible but do not by
+themselves trigger burst polling. Pressure recovers gradually after quiet
+periods.
 
-`sgil1ctl leds --follow` repeatedly samples the L1 `leds` command and prints
-only changed output. After each changed response it immediately polls again to
-catch fast-moving boot diagnostics, then returns to the steady poll interval
-once the output repeats; it backs off when the L1 stops responding. Known Fuel
-virtual LED values that old L1 firmware reports as unknown are decoded from the
-SGI Fuel Diagnostic Reference Manual. `power up --follow`,
+`sgil1ctl leds` prints every populated slot returned by the L1: the current
+front-panel value followed by up to four history values. `leds --follow`
+repeatedly samples that five-slot response and prints only changed output.
+After each changed response it immediately polls again to catch fast-moving
+boot diagnostics, then returns to the steady poll interval once the output
+repeats; it backs off when the L1 stops responding.
+
+LED-only follow cannot observe log queue messages without adding a second
+stream of requests. Its response-failure back-off therefore remains the local
+protection mechanism; use `sgil1ctl watch` when queue-aware log and LED polling
+are both required.
+
+Fuel LED descriptions from the SGI Fuel Diagnostic Reference Manual remain
+authoritative. Entries documented only by the SGI L1/L2 controller guide or
+found in the IP35 PROM and L1 1.48.1 firmware tables are added where the Fuel
+manual has no definition. High-level LED output suppresses the transient
+`0x7f` input-wait and `0xff` console-character-read markers. They remain
+visible in raw `sgil1ctl l1cmd leds` output and IRouter diagnostics under
+`--debug`; the TUI represents either value as recent console input activity.
+
+`power up --follow`,
 `power down --force --follow`, `power reset --force --follow`,
 `wait --power-up --follow`, `wait --power-down --follow`,
 `wait --reset --follow`, and `reset --force --follow` enter the same
 LED-follow mode after the corresponding command path.
+
+`sgil1ctl watch` combines log and LED following under one process so only one
+scheduler owns the L1 USB command path. Changed LED output is sampled at a
+short burst interval, unchanged output backs off to 500 ms, and quiet log
+polling defaults to one second. The scheduler slows both streams when the log
+reports `USB_WQUE Q full`, decays that pressure after quiet periods, alternates
+streams when both are due, and uses a bounded 200-2000 ms transport-failure
+back-off. It retains the discovered command destination and attempts discovery
+again only after repeated transport failures. Queue-state log messages are
+still printed, including any L1-reported loss counters. As with `log --follow`,
+snapshot polling cannot recover entries if the entire L1 log buffer wraps
+between successful requests.
+
+An ncurses-enabled build also accepts `sgil1ctl watch --tui`. Wide terminals
+show the log beside a smaller LED pane; narrow terminals put the LED pane above
+the larger log pane. `Tab` selects a pane, while Up/Down and Page Up/Page Down
+scroll; `End` returns the selected pane to live output, and `q` exits. The TUI
+normally uses the terminal's alternate screen; `--no-alternate-screen` opts
+into drawing on the primary screen. Its in-process log history is bounded to
+4096 lines. A minimal build keeps the `watch` text interface and reports how to
+enable the optional feature when `watch --tui` is requested.
 
 `sgil1ctl debug` shows the SGI virtual debug switch value from the L1 `debug`
 command, decodes the documented bitfields, and then prints the current `l1dbg`
@@ -292,8 +356,8 @@ when testing the prebuilt SGI tools:
   clear-halt sequence used by the SGI daemon when it opens and resets the USB
   transport.
 
-Without these options, the driver keeps the smaller modern ioctl surface and the
-stricter kernel-standard `usb_clear_halt()` reset path.
+Without these options, the driver keeps the smaller modern ioctl surface and
+the stricter kernel-standard `usb_clear_halt()` reset path.
 
 An optional container recipe is provided under `contrib/l2-l3-container/`.
 Supply an extracted `rootfs/`, a local `snxsc_l3-1.62.0-1.i386.rpm`, or an SGI
@@ -327,7 +391,8 @@ make test
 
 The tests build the module with warning and sparse checks, validate driver
 metadata and source invariants, and run `sgil1ctl` against an `LD_PRELOAD`
-mock L1 USB/status transport. To run tests and then build packages:
+mock L1 USB/status transport. CI also compiles the optional TUI configuration.
+To run tests and then build packages:
 
 ```sh
 make test-deb
@@ -343,6 +408,10 @@ harness.
 If the host cannot enumerate the L1 as `065e:1234`, the kernel driver cannot
 bind yet. See [`docs/usb-diagnostics.md`](docs/usb-diagnostics.md) for
 host USB checks.
+
+For a gated end-to-end test from a Raspberry Pi connected to a Fuel, including
+follow timing, TUI, reconnect, and optional power-on checks, see
+[`docs/live-hardware-validation.md`](docs/live-hardware-validation.md).
 
 The L1 is sensitive to large USB transfers, the kernel module keeps the
 original 4096-byte raw transport limit by default but also exposes a

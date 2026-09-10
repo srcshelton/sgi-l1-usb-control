@@ -1,3 +1,30 @@
+sgi-l1-usb-control (0.1.52) unstable; urgency=medium
+
+  * Updated components since 0.1.51: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Reflow sgil1ctl help text to use the available 79-column width more
+    consistently instead of wrapping many descriptions near 60 columns.
+  * Accept L1 command aliases confirmed by command-specific help when adjacent
+    fixed-width columns run together in the top-level L1 command list.
+  * Remove the high-level power vrm shortcut because Fuel L1 firmware returns
+    no VRM data; retain access through the direct l1cmd pass-through.
+  * Complete high-level Fuel LED decoding with additive IP35 PROM and L1
+    1.48.1 firmware definitions while preserving SGI manual descriptions.
+  * Suppress transient PROM input-wait and character-read LED markers from
+    normal text output, retaining them in raw/debug output and as TUI activity.
+  * Add a single-owner, queue-aware watch scheduler for combined L1 log and
+    LED monitoring with fair polling, bounded back-off, and route reuse.
+  * Add an optional ncurses split-pane watch TUI behind WITH_TUI=1 while
+    keeping the default and minimal packaged user-space build dependency-free.
+  * Apply queue-pressure scaling to standalone log follow while leaving LED
+    follow on response-failure back-off unless the combined watch is selected.
+  * Build minimal and ncurses-enabled sgil1ctl Debian artifacts for amd64 and
+    arm64 CI runs and publish both variants with releases.
+  * Document gated live Fuel validation for follow timing, queue feedback,
+    terminal layouts, USB reconnect recovery, and power-on diagnostics.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 10 Sep 2026 18:51:19 +0100
+
 sgi-l1-usb-control (0.1.51) unstable; urgency=medium
 
   * Updated components since 0.1.50: user-space sgil1ctl only; kernel module

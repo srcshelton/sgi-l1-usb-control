@@ -21,6 +21,9 @@ export CC
 
 override_dh_auto_build:
 	$(MAKE) -C tools CC="$(CC)"
+	$(MAKE) -C tools CC="$(CC)" WITH_TUI=1
+	install -m 0755 tools/sgil1ctl tools/sgil1ctl-tui
+	$(MAKE) -C tools CC="$(CC)"
 
 override_dh_auto_clean:
 	$(MAKE) -C tools clean
@@ -31,6 +34,8 @@ override_dh_auto_test:
 
 override_dh_install:
 	dh_install
+	install -D -m 0755 tools/sgil1ctl-tui \
+		debian/sgil1ctl-tui/usr/bin/sgil1ctl
 	install -d $(DKMS_SRC)/include $(DKMS_SRC)/module
 	sed 's/@VERSION@/$(DEB_VERSION)/g' dkms.conf.in > $(DKMS_SRC)/dkms.conf
 	chmod 0644 $(DKMS_SRC)/dkms.conf

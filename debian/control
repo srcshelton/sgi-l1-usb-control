@@ -2,7 +2,7 @@ Source: sgi-l1-usb-control
 Section: kernel
 Priority: optional
 Maintainer: Stuart Shelton <stuart@shelton.me>
-Build-Depends: debhelper-compat (= 13)
+Build-Depends: debhelper-compat (= 13), libncurses-dev, pkgconf
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 
@@ -19,4 +19,16 @@ Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: utility for SGI L1 USB transport diagnostics
  sgil1ctl reads status/configuration from the sgi_l1_usb driver and provides
- raw frame send/receive helpers for protocol discovery.
+ L1 status, power, log, LED, and raw protocol diagnostic commands without a
+ terminal-library dependency.
+
+Package: sgil1ctl-tui
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Provides: sgil1ctl (= ${binary:Version})
+Conflicts: sgil1ctl
+Replaces: sgil1ctl
+Description: utility for SGI L1 USB transport diagnostics with TUI
+ This edition of sgil1ctl includes the optional ncurses split-pane interface
+ for combined L1 log and diagnostic LED monitoring. It otherwise provides the
+ same command-line interface as the minimal sgil1ctl package.
