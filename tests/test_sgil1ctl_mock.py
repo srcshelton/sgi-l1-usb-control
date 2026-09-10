@@ -118,6 +118,20 @@ class Sgil1CtlMockTests(unittest.TestCase):
             stdout, stderr = proc.communicate(timeout=5)
             return stdout, stderr, proc.returncode
 
+    def run_follow_with_log_for(self, args, extra_env=None, seconds=0.7):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "mock.log"
+            env = {"SGIL1_MOCK_LOG": str(log)}
+            if extra_env:
+                env.update(extra_env)
+            stdout, stderr, returncode = self.run_follow_for(args, env, seconds)
+            return (
+                stdout,
+                stderr,
+                returncode,
+                log.read_text() if log.exists() else "",
+            )
+
     def run_with_log(self, args, extra_env=None):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "mock.log"
@@ -141,14 +155,14 @@ class Sgil1CtlMockTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0)
         self.assertIn("wait [-w|--follow] [OPTIONS]", proc.stdout)
-        self.assertIn("-w|--follow after --power-up", proc.stdout)
-        self.assertIn("--power-down, or --reset", proc.stdout)
+        self.assertIn("--power-up, --power-down, --reset, -w|--follow", proc.stdout)
         self.assertIn("reset --force [-w|--follow]", proc.stdout)
         self.assertIn("power up [-w|--follow]", proc.stdout)
         self.assertIn("power down [-w|--follow]", proc.stdout)
         self.assertIn("power reset --force [-w|--follow]", proc.stdout)
         self.assertIn("log [-w|--follow]", proc.stdout)
         self.assertIn("leds [-w|--follow]", proc.stdout)
+        self.assertIn("watch [OPTIONS]", proc.stdout)
         self.assertIn("debug [OPTIONS]", proc.stdout)
         self.assertIn("sgil1ctl COMMAND --help", proc.stdout)
 
@@ -194,6 +208,17 @@ class Sgil1CtlMockTests(unittest.TestCase):
                 ],
             ),
             (
+                ["watch", "--help"],
+                [
+                    "Usage: sgil1ctl [GLOBAL OPTIONS] watch [OPTIONS]",
+                    "--tui",
+                    "--no-alternate-screen",
+                    "--log-interval MS",
+                    "--led-interval MS",
+                    "--no-repeat-summary",
+                ],
+            ),
+            (
                 ["power", "--help"],
                 [
                     "Usage: sgil1ctl [GLOBAL OPTIONS] power [SUBCOMMAND] [OPTIONS]",
@@ -203,7 +228,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
                     "send one power-down signal",
                     "send second power-down signal",
                     "follow LEDs after power up, down, or reset",
-                    "up/down buffer LEDs until confirmation",
+                    "buffer up/down LEDs until confirmation",
                 ],
             ),
             (
@@ -252,6 +277,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
             ["log", "--help"],
             ["logs", "--help"],
             ["leds", "--help"],
+            ["watch", "--help"],
             ["power", "--help"],
             ["power-up", "--help"],
             ["power-down", "--help"],
@@ -391,6 +417,28 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("05/27/2026 12:38:05 voltage nominal", stdout)
         self.assertNotIn("advanced without overlap", stderr)
 
+    def test_log_follow_uses_queue_pressure_without_false_burst_polling(self):
+        proc, log = self.run_with_log(
+            ["log", "--follow", "--poll-interval", "100"],
+            {
+                "SGIL1_MOCK_WATCH": "1",
+                "SGIL1_MOCK_FAIL_AFTER_COMMANDS": "3",
+                "SGIL1_MOCK_LOG_SLEEPS": "1",
+            },
+        )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("USB_WQUE Q full", proc.stdout)
+        self.assertIn("USB_WQUE Q avail", proc.stdout)
+        self.assertIn("voltage nominal", proc.stdout)
+        self.assertIn("queue pressure level 1/4; polling slowed", proc.stderr)
+        sleeps = [
+            int(line.split()[1])
+            for line in log.splitlines()
+            if line.startswith("USLEEP ")
+        ]
+        self.assertEqual(sleeps, [200000, 150000, 300000])
+
     def test_stale_single_character_response_is_ignored(self):
         proc = self.run_ctl(["log"], {"SGIL1_MOCK_STALE_BEFORE_RESPONSE": "1"})
 
@@ -428,19 +476,121 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("0x81: CP1 failed", proc.stdout)
         self.assertIn("0xB5: Error calculating backplane frequency", proc.stdout)
         self.assertIn("0x00: In slave loop", proc.stdout)
-        self.assertIn("0xff: Console poll found data for reading", proc.stdout)
+        self.assertNotIn("0xff", proc.stdout.lower())
         self.assertNotIn("unknown LED status", proc.stdout)
 
-    def test_l1cmd_leds_decodes_documented_unknown_statuses(self):
+    def test_leds_adds_firmware_mappings_and_suppresses_console_activity(self):
+        proc = self.run_ctl(["leds"], {"SGIL1_MOCK_LEDS_EXTENDED": "1"})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CPU  A: 0xFE: raw PROM value (no L1 mapping)", proc.stdout)
+        self.assertIn("0x10: Unused (PLED_INITDCACHE)", proc.stdout)
+        self.assertIn("0x49: Unused (PLED_UARTBASE)", proc.stdout)
+        self.assertIn("0xB1: NASID/module ID arbitration failure", proc.stdout)
+        self.assertIn("0x3D: Jumped to UALIAS space", proc.stdout)
+        self.assertIn("0x3E: About to jump to cached space", proc.stdout)
+        self.assertIn("0x55: Global master in PROM", proc.stdout)
+        self.assertIn("0x89: FLED_XTLBMISS: XTLB miss exception.", proc.stdout)
+        self.assertIn("0x09: PLED_CKHUBCONFIG", proc.stdout)
+        self.assertNotIn("0x7f", proc.stdout.lower())
+        self.assertNotIn("0xff", proc.stdout.lower())
+        self.assertNotIn("unknown LED status", proc.stdout)
+
+    def test_leds_debug_preserves_raw_activity_and_reports_mapping_sources(self):
+        proc = self.run_ctl(
+            ["--debug", "leds"],
+            {"SGIL1_MOCK_LEDS_EXTENDED": "1"},
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("0xff: Console poll found data for reading", proc.stdout)
+        self.assertIn("LED mapping 0x7F source: IP35 PROM input-wait", proc.stdout)
+        self.assertIn(
+            "LED mapping 0x09 source: SGI L1/L2 Controller Software",
+            proc.stdout,
+        )
+        self.assertIn(
+            "LED mapping 0x10 source: SGI Fuel manual and L1 1.48.1 firmware",
+            proc.stdout,
+        )
+        self.assertIn(
+            "LED mapping 0x55 source: SGI Fuel Diagnostic Reference Manual",
+            proc.stdout,
+        )
+        self.assertIn("LED mapping 0x89 source: L1 1.48.1 firmware", proc.stdout)
+        self.assertIn(
+            "LED mapping 0xFE source: IP35 PROM; L1 1.48.1 has no description",
+            proc.stdout,
+        )
+
+    def test_watch_serializes_logs_and_leds_and_uses_queue_feedback(self):
+        stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
+            [
+                "watch",
+                "--log-interval",
+                "100",
+                "--led-interval",
+                "100",
+            ],
+            {"SGIL1_MOCK_WATCH": "1"},
+            seconds=0.8,
+        )
+
+        self.assertIn("[led] CPU  A: 0x55: Global master in PROM", stdout)
+        self.assertIn("[led] CPU  A: 0x70: Running BIST on bank 0", stdout)
+        self.assertIn("[log] 05/27/2026 12:38:00 L1 booted", stdout)
+        self.assertIn("USB_WQUE Q full", stdout)
+        self.assertIn("voltage nominal", stdout)
+        self.assertNotIn("0x7f", stdout.lower())
+        self.assertNotIn("0xff", stdout.lower())
+        self.assertIn("queue pressure level 1", stderr)
+        self.assertIn("CMD leds", commands)
+        self.assertIn("CMD log", commands)
+
+    def test_watch_tui_reports_when_optional_build_is_disabled(self):
+        proc = self.run_ctl(["watch", "--tui"])
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("built without optional ncurses TUI support", proc.stderr)
+
+    def test_watch_rejects_no_alternate_screen_without_tui(self):
+        proc = self.run_ctl(["watch", "--no-alternate-screen"])
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--no-alternate-screen requires --tui", proc.stderr)
+
+    def test_watch_uses_bounded_incremental_transport_backoff(self):
+        stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
+            [
+                "watch",
+                "--log-interval",
+                "100",
+                "--led-interval",
+                "100",
+            ],
+            {
+                "SGIL1_MOCK_WATCH": "1",
+                "SGIL1_MOCK_FAIL_COMMANDS": "2",
+            },
+            seconds=0.9,
+        )
+
+        self.assertIn("retrying transport in 200 ms", stderr)
+        self.assertIn("retrying transport in 300 ms", stderr)
+        self.assertIn("L1 transport recovered", stderr)
+        self.assertIn("[led] CPU  A: 0x55: Global master in PROM", stdout)
+        self.assertGreaterEqual(commands.count("CMD leds"), 3)
+
+    def test_l1cmd_leds_preserves_firmware_output(self):
         proc = self.run_ctl(
             ["l1cmd", "leds"],
             {"SGIL1_MOCK_LEDS_UNKNOWN": "1"},
         )
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("0x55: Global master in PROM", proc.stdout)
-        self.assertIn("0x81: CP1 failed", proc.stdout)
-        self.assertNotIn("unknown LED status", proc.stdout)
+        self.assertIn("0x55: unknown LED status", proc.stdout)
+        self.assertIn("0x81: unknown LED status", proc.stdout)
+        self.assertIn("0xff: Console poll found data for reading", proc.stdout)
 
     def test_reset_follow_starts_leds_follow(self):
         stdout, stderr, _returncode = self.run_follow_for(
@@ -690,6 +840,19 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("soft reset issued", proc.stdout)
         self.assertIn("CMD softrst", log)
 
+    def test_power_vrm_is_available_only_through_l1cmd(self):
+        denied, denied_log = self.run_with_log(["power", "vrm"])
+
+        self.assertEqual(denied.returncode, 2)
+        self.assertIn("unknown power subcommand", denied.stderr)
+        self.assertNotIn("CMD power vrm", denied_log)
+
+        proc, log = self.run_with_log(["l1cmd", "power", "vrm"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "(no output)\n\n")
+        self.assertIn("CMD power vrm", log)
+
     def test_l1cmd_destructive_commands_require_force(self):
         denied = self.run_ctl(["l1cmd", "softreset"])
 
@@ -716,6 +879,29 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("ERROR: command not found.", proc.stdout)
         self.assertNotIn("Help for 'date help':", proc.stdout)
+
+    def test_l1cmd_accepts_commands_from_detailed_help_when_columns_run_together(self):
+        cases = [
+            ("bedrock", "L1 <-> system protocol is PPP"),
+            ("brick", "rack: 001, slot: 01"),
+        ]
+
+        for command, expected in cases:
+            with self.subTest(command=command):
+                proc, log = self.run_with_log(["l1cmd", command])
+
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(expected, proc.stdout)
+                self.assertIn(f"CMD help {command}", log)
+                self.assertIn(f"CMD {command}", log)
+
+    def test_l1cmd_detailed_help_fallback_still_refuses_unknown_command(self):
+        proc, log = self.run_with_log(["l1cmd", "notacommand"])
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not advertised by live L1 help", proc.stderr)
+        self.assertIn("CMD help notacommand", log)
+        self.assertNotIn("CMD notacommand", log)
 
     def test_broadcast_prefix_validation_and_success_path(self):
         bare = self.run_ctl(["l1cmd", "*"])

@@ -62,6 +62,8 @@ static bool mock_power_up_timeout;
 static int mock_power_down_count;
 static int mock_log_call_count;
 static int mock_leds_call_count;
+static int mock_command_failure_count;
+static int mock_command_count;
 static long mock_max_write;
 static char mock_debug_response_buf[64];
 
@@ -321,6 +323,18 @@ static int enqueue_discovery_response(struct mock_fd *m)
 
 static const char *mock_log_response(void)
 {
+	if (getenv("SGIL1_MOCK_WATCH")) {
+		if (mock_log_call_count++ == 0)
+			return "05/27/2026 12:38:00 L1 booted\n";
+		if (mock_log_call_count == 2)
+			return "05/27/2026 12:38:00 L1 booted\n"
+			       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n";
+		return "05/27/2026 12:38:00 L1 booted\n"
+		       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n"
+		       "05/27/2026 12:38:02 USB_WQUE Q avail - lost: 0/0/20 repl: 0 (BROAD)\n"
+		       "05/27/2026 12:38:03 voltage nominal\n";
+	}
+
 	if (!getenv("SGIL1_MOCK_LOG_FOLLOW"))
 		return "05/27/2026 12:38:00 L1 booted\n";
 
@@ -366,8 +380,18 @@ static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
 		return "Commands are:\n"
-		       "*                  version|ver usb env date serial log leds debug l1dbg power|pwr reset softreset|softrst flash fan\n"
+		       "*                  syscom|junkbus|jb|bedrockbrick "
+		       "version|ver usb env date serial log leds debug "
+		       "l1dbg power|pwr reset softreset|softrst flash fan\n"
 		       "                   help|hlp\n\n";
+	if (!strcmp(cmd, "help bedrock"))
+		return "syscom|junkbus|jb|bedrock \n"
+		       "        get L1<->system protocol\n";
+	if (!strcmp(cmd, "help brick"))
+		return "brick \n"
+		       "        get brick information\n"
+		       "brick type <str> \n"
+		       "        set brick type\n";
 	if (!strcmp(cmd, "hlp l1dbg") || !strcmp(cmd, "help l1dbg"))
 		return "l1dbg \n"
 		       "        get L1 debugging settings\n"
@@ -412,6 +436,12 @@ static const char *known_response_for_command(const char *cmd)
 		return "ERROR: command not found.\n";
 	if (!strcmp(cmd, "version") || !strcmp(cmd, "ver"))
 		return "L1 1.24.11 (Image B), Built 10/29/2003 00:05:26    [Fuel/PE 1MB image]\n";
+	if (!strcmp(cmd, "bedrock"))
+		return "L1 <-> system protocol is PPP\n"
+		       "system event subchannel 23\n";
+	if (!strcmp(cmd, "brick"))
+		return "rack: 001, slot: 01, partition: none, type: A "
+		       "[2MB flash], serial:NCJ502, source: EEPROM\n";
 	if (!strcmp(cmd, "usb"))
 		return "\nDevice: 0  Disconnects: 0  Bus Resets:  2\n\n"
 		       "Endpoint State    Status    Stalls Errors Timeouts\n"
@@ -429,6 +459,13 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "fan"))
 		return "fan(s) are on.\nfan 0 EXHAUST  rpm 1298\n";
 	if (!strcmp(cmd, "leds")) {
+		if (getenv("SGIL1_MOCK_WATCH")) {
+			if (mock_leds_call_count++ == 0)
+				return "CPU  A: 0xff: Console poll found data for reading\n"
+				       "        0x7f: unknown LED status.\n"
+				       "        0x55: unknown LED status.\n";
+			return "CPU  A: 0x70: unknown LED status.\n";
+		}
 		if (getenv("SGIL1_MOCK_LEDS_FOLLOW")) {
 			if (mock_leds_call_count++ == 0)
 				return "CPU  A: 0x55: unknown LED status.\n";
@@ -436,6 +473,18 @@ static const char *known_response_for_command(const char *cmd)
 				return "CPU  A: 0x70: unknown LED status.\n";
 			return "CPU  A: 0x70: unknown LED status.\n";
 		}
+		if (getenv("SGIL1_MOCK_LEDS_EXTENDED"))
+			return "CPU  A: 0xff: Console poll found data for reading\n"
+			       "        0x7f: unknown LED status.\n"
+			       "        0xfe: (no description available)\n"
+			       "        0x10: unknown LED status.\n"
+			       "        0x49: unknown LED status.\n"
+			       "CPU  B: 0xb1: unknown LED status.\n"
+			       "        0x3d: unknown LED status.\n"
+			       "        0x3e: unknown LED status.\n"
+			       "        0x55: unknown LED status.\n"
+			       "CPU  C: 0x89: unknown LED status.\n"
+			       "        0x09: unknown LED status.\n";
 		if (getenv("SGIL1_MOCK_LEDS_UNKNOWN"))
 			return "CPU  A: 0x55: unknown LED status.\n"
 			       "CPU  B: 0x81: unknown LED status.\n"
@@ -477,9 +526,7 @@ static const char *known_response_for_command(const char *cmd)
 		return mock_power_on ? "power appears on\n" :
 				       "power appears off\n";
 	if (!strcmp(cmd, "power vrm") || !strcmp(cmd, "pwr vrm"))
-		return "Supply          State Voltage    Margin  Value\n"
-		       "--------------  ----- ---------  ------- -----\n"
-		       "           12V     on   11.687V      N/A\n";
+		return "";
 	if (!strcmp(cmd, "log"))
 		return mock_log_response();
 	if (!strcmp(cmd, "reset"))
@@ -566,6 +613,25 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 		return (ssize_t)count;
 	cmd = strip_broadcast_prefix(raw_cmd);
 	log_command("CMD", cmd);
+	if (getenv("SGIL1_MOCK_FAIL_AFTER_COMMANDS")) {
+		long successful = strtol(getenv("SGIL1_MOCK_FAIL_AFTER_COMMANDS"),
+					 NULL, 0);
+
+		if (mock_command_count++ >= successful) {
+			free(raw_cmd);
+			errno = EPIPE;
+			return -1;
+		}
+	}
+	if (getenv("SGIL1_MOCK_FAIL_COMMANDS")) {
+		long failures = strtol(getenv("SGIL1_MOCK_FAIL_COMMANDS"), NULL,
+				       0);
+
+		if (mock_command_failure_count++ < failures) {
+			free(raw_cmd);
+			return (ssize_t)count;
+		}
+	}
 
 	if (!strcmp(cmd, "power up") || !strcmp(cmd, "pwr up") ||
 	    !strcmp(cmd, "pwr u")) {
@@ -883,7 +949,13 @@ int flock(int fd, int operation)
 
 int usleep(useconds_t usec)
 {
+	char duration[64];
+
 	init_real_symbols();
+	if (getenv("SGIL1_MOCK_LOG_SLEEPS")) {
+		snprintf(duration, sizeof(duration), "%u", (unsigned int)usec);
+		log_command("USLEEP", duration);
+	}
 	if (getenv("SGIL1_MOCK_NO_SLEEP"))
 		return 0;
 	return real_usleep_fn(usec);

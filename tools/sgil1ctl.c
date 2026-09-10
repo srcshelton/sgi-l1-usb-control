@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,6 +20,14 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef SGIL1_WITH_TUI
+#include <curses.h>
+#include <term.h>
+#ifdef lines
+#undef lines
+#endif
+#endif
 
 #include "sgi_l1_ioctl.h"
 
@@ -70,6 +79,13 @@
 #define SGIL1_LEDS_FOLLOW_POLL_MS 100
 #define SGIL1_LEDS_FOLLOW_BACKOFF_MAX_MS 500
 #define SGIL1_LEDS_FOLLOW_CONFIRM_BUFFER_SECONDS 5
+#define SGIL1_WATCH_LOG_MIN_MS 100
+#define SGIL1_WATCH_LED_MIN_MS 100
+#define SGIL1_WATCH_LED_IDLE_MAX_MS 500
+#define SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS 200
+#define SGIL1_WATCH_FAILURE_BACKOFF_MAX_MS 2000
+#define SGIL1_QUEUE_PRESSURE_MAX 4
+#define SGIL1_QUEUE_PRESSURE_DECAY_MS 10000
 
 static int sgil1_lock_fd = -1;
 
@@ -98,6 +114,7 @@ struct options {
 	bool no_discover;
 	bool dest_overridden;
 	bool dest_auto_discovered;
+	bool skip_command_drain;
 	bool debug;
 };
 
@@ -129,6 +146,14 @@ struct log_options {
 struct leds_options {
 	bool follow;
 	int poll_interval_ms;
+};
+
+struct watch_options {
+	bool tui;
+	bool alternate_screen;
+	bool repeat_summary;
+	int log_interval_ms;
+	int led_interval_ms;
 };
 
 struct debug_options {
@@ -167,9 +192,16 @@ static int do_host_softreset_confirmed(const struct options *opts,
 				       bool follow);
 static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 			  enum leds_follow_power_confirm confirm_power);
+static int do_watch_command(const struct options *opts, int argc, char **argv,
+			    int command_index);
 static const char *find_existing_data_device(const struct options *opts);
 static int prepare_command_options(const struct options *opts,
 				   struct options *cmd_opts);
+static uint64_t monotonic_milliseconds(void);
+static uint64_t milliseconds_after(uint64_t now, int delay);
+static int queue_pressure_scaled_delay(int delay, unsigned int pressure);
+static bool log_line_is_queue_full(const char *line);
+static bool log_line_is_queue_feedback(const char *line);
 
 static bool is_help_option(const char *arg)
 {
@@ -199,26 +231,22 @@ static void usage(FILE *out, bool full)
 			"  status                print consolidated L1 health/status data\n"
 			"  date [OPTIONS]        show or set the L1 date/time\n"
 			"  set-date [OPTIONS]    set the L1 date/time from the host\n"
-				"                        date options: --set-time,\n"
-				"                        --timezone TZ (default: host timezone with --set-time),\n"
+				"                        date options: --set-time, --timezone TZ,\n"
 				"                        --drift-seconds SEC (default 60)\n"
 			"  wait [-w|--follow] [OPTIONS]\n"
 				"                        wait for an L1 USB device, then run status checks\n"
-				"                        wait options: --background,\n"
-				"                        --wait-timeout SEC (default: none), --set-time,\n"
-				"                        --timezone TZ (default: host timezone with --set-time),\n"
-				"                        --drift-seconds SEC (default 60),\n"
-				"                        --power-up, --power-down, --reset,\n"
-				"                        -w|--follow after --power-up,\n"
-				"                        --power-down, or --reset,\n"
+				"                        wait options: --background, --wait-timeout SEC,\n"
+				"                        --set-time, --timezone TZ, --drift-seconds SEC,\n"
+				"                        --power-up, --power-down, --reset, -w|--follow,\n"
 				"                        --keepalive SEC (default 0), --force\n"
 			"  version|usb|env       send read-only L1 text commands over USB\n"
 			"  log [-w|--follow]     print the L1 log, optionally following new lines\n"
 				"                        log options: --poll-interval MS,\n"
 				"                        --no-repeat-summary\n"
 			"  leds [-w|--follow]    print L1 front-panel LEDs, optionally following changes\n"
+			"  watch [OPTIONS]       follow L1 logs and LEDs through one USB scheduler\n"
 			"  debug [OPTIONS]       show/decode L1 debug switches and l1dbg state\n"
-			"  power [check|vrm]     show L1 power data, state, or VRM data\n"
+			"  power [check]         show L1 power data or state\n"
 			"  power up [-w|--follow]\n"
 			"                        power on workstation; confirms state afterward\n"
 			"  power down [-w|--follow]\n"
@@ -226,8 +254,7 @@ static void usage(FILE *out, bool full)
 			"  power reset --force [-w|--follow]\n"
 			"                        issue host soft reset; optionally follow LEDs\n"
 			"  reset --force [-w|--follow]\n"
-			"                        send L1 controller reset command\n"
-			"                        optionally following LEDs\n"
+			"                        send L1 controller reset; follow LEDs if requested\n"
 			"  l1cmd <command> [...] send a live-help-listed L1 text command over USB\n"
 			"                        add --force to send a command not listed by help\n");
 
@@ -256,19 +283,17 @@ static void usage(FILE *out, bool full)
 		"  reset-write           clear the write endpoint halt\n"
 		"  reset-pipes           clear read and write endpoint halts\n"
 		"  reset-device          issue a USB device reset\n"
-			"  raw-send HEX...       write one raw USB transfer; first two\n"
-			"                        bytes are overwritten by the driver\n"
+		"  raw-send HEX...       write raw USB transfer; first two bytes\n"
+		"                        are overwritten by the driver\n"
 		"  raw-recv              read one raw USB transfer and print a hexdump\n"
 		"  monitor               print raw USB transfers until interrupted\n"
 		"  build-l1cmd <command> [...]\n"
-			"                        print the IRouter frame for an\n"
-			"                        allowlisted L1 text command\n"
+		"                        print IRouter frame for an allowlisted L1 text command\n"
 		"\n"
 		"Pass-through notes:\n"
 		"  l1cmd '*' <command>   SGI broadcast-prefix form; quote '*'\n"
 		"                        to avoid shell expansion\n"
-		"                        L1 text commands are limited to 72\n"
-		"                        bytes on direct USB\n");
+		"                        L1 text commands are limited to 72 bytes on direct USB\n");
 }
 
 static void command_usage_footer(FILE *out)
@@ -315,12 +340,11 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] wait [OPTIONS]\n"
 			"\n"
-			"Wait for an L1 USB device, run status checks, and optionally\n"
-			"perform one guarded workstation power action.\n"
+			"Wait for L1 USB, run status checks, and optionally perform a guarded\n"
+			"power action.\n"
 			"\n"
 			"Options:\n"
-			"  --background          wait for the next bind event instead of\n"
-			"                        an existing device\n"
+			"  --background          wait for next bind event, ignoring existing device\n"
 			"  --wait-timeout SEC    maximum seconds to wait; default: none\n"
 			"  --set-time            set the L1 clock from the host after discovery\n"
 			"  --timezone TZ         set L1 timezone before setting time\n"
@@ -330,10 +354,9 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  --power-up            power on if status reports workstation off\n"
 			"  --power-down          power off after status checks\n"
 			"  --reset               issue host soft reset after status checks\n"
-			"  -w, --follow          follow LEDs after --power-up,\n"
-			"                        --power-down, or --reset\n"
-			"  --keepalive SEC       keep waiting after success and re-enter wait mode\n"
-			"                        if the device disappears; default: 0\n"
+			"  -w, --follow          follow LEDs after selected power action\n"
+			"  --keepalive SEC       keep waiting after success; re-enter wait\n"
+			"                        mode if device disappears; default: 0\n"
 			"  --force, --yes        confirm power/reset actions\n");
 		command_usage_footer(out);
 		return true;
@@ -363,13 +386,30 @@ static bool command_usage(FILE *out, const char *cmd)
 		command_usage_footer(out);
 		return true;
 	}
+	if (!strcmp(cmd, "watch")) {
+		fprintf(out,
+			"Usage: sgil1ctl [GLOBAL OPTIONS] watch [OPTIONS]\n"
+			"\n"
+			"Follow L1 logs and decoded LED states through one queue-aware USB\n"
+			"scheduler. Text output is used unless the optional TUI is selected.\n"
+			"\n"
+			"Options:\n"
+			"  --tui                 use the optional ncurses split-pane interface\n"
+			"  --no-alternate-screen keep the TUI on the terminal's primary screen\n"
+			"  --log-interval MS     quiet log polling interval; minimum 100,\n"
+			"                        default 1000\n"
+			"  --led-interval MS     active LED polling interval; minimum 100,\n"
+			"                        default 100\n"
+			"  --no-repeat-summary   print repeated log messages individually\n");
+		command_usage_footer(out);
+		return true;
+	}
 	if (!strcmp(cmd, "debug")) {
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] debug [OPTIONS]\n"
 			"\n"
-			"Show SGI virtual debug switches decoded from the L1 'debug'\n"
-			"command, followed by the current L1 'l1dbg' settings.\n"
-			"Only virtual debug switches are changed by the update options.\n"
+			"Show SGI virtual debug switches decoded from L1 'debug', then show the\n"
+			"current L1 'l1dbg' settings. Only update options change virtual debug switches.\n"
 			"\n"
 			"Options:\n"
 			"  --show                show current debug state; default action\n"
@@ -388,24 +428,21 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] power [SUBCOMMAND] [OPTIONS]\n"
 			"\n"
-			"Show L1 power data, power the workstation on/off, or issue a\n"
-			"host soft reset. Use top-level 'reset' for an L1 controller reset.\n"
+			"Show L1 power data, power the workstation on/off, or issue a host\n"
+			"soft reset. Use top-level 'reset' for an L1 controller reset.\n"
 			"\n"
 			"Subcommands:\n"
 			"  (none)                show L1 power data\n"
 			"  check                 show whether workstation appears on or off\n"
-			"  vrm                   show VRM power data\n"
 			"  up                    power on; confirms eventual state\n"
-			"  down                  send one power-down signal; confirms\n"
-			"                        eventual state\n"
-			"  reset|softreset|softrst\n"
-			"                        issue host soft reset using L1 softreset\n"
+			"  down                  send one power-down signal; confirms eventual state\n"
+			"  reset|softreset|softrst  issue host soft reset using L1 softreset\n"
 			"\n"
 			"Options:\n"
-			"  --force, --yes        send second power-down signal; confirm\n"
-			"                        reset actions; accepted for power up\n"
+			"  --force, --yes        send second power-down signal; confirm reset\n"
+			"                        actions; accepted for power up\n"
 			"  -w, --follow          follow LEDs after power up, down, or reset\n"
-			"                        up/down buffer LEDs until confirmation\n");
+			"                        buffer up/down LEDs until confirmation\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -437,8 +474,7 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] reset --force [-w|--follow]\n"
 			"\n"
-			"Send the L1 controller reset command. For host reboot, use\n"
-			"'power reset --force' instead.\n"
+			"Send the L1 controller reset; use 'power reset --force' for host reboot.\n"
 			"\n"
 			"Options:\n"
 			"  --force, --yes        confirm L1 controller reset\n"
@@ -899,8 +935,7 @@ static bool l1_command_is_read_only(const char *cmd)
 	       streq_ci(cmd, "serial") || streq_ci(cmd, "serial all") ||
 	       streq_ci(cmd, "log") ||
 	       streq_ci(cmd, "power") || streq_ci(cmd, "pwr") ||
-	       streq_ci(cmd, "power check") || streq_ci(cmd, "pwr check") ||
-	       streq_ci(cmd, "power vrm") || streq_ci(cmd, "pwr vrm");
+	       streq_ci(cmd, "power check") || streq_ci(cmd, "pwr check");
 }
 
 static bool startswith_ci(const char *text, const char *prefix)
@@ -2054,12 +2089,14 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 	if (fd < 0)
 		return 1;
 
-	if (opts->pipe_records)
-		drain_pipe_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
-					     opts->debug);
-	else
-		drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
-					    opts->debug);
+	if (!opts->skip_command_drain) {
+		if (opts->pipe_records)
+			drain_pipe_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
+						     opts->debug);
+		else
+			drain_raw_irouter_frames_fd(fd, SGIL1_DRAIN_QUIET_MS,
+						    opts->debug);
+	}
 
 	if (!opts->pipe_records && !opts->no_discover && !opts->dest_overridden) {
 		int discover_ret;
@@ -2705,21 +2742,28 @@ static int do_l1_pass_through_command(const struct options *opts,
 			free(command_word);
 			return 1;
 		}
-		if (!l1_help_advertises_command(help_text, l1cmd)) {
+		if (!l1_help_advertises_command(help_text, l1cmd))
+			command_help = l1_help_for_command(opts, l1cmd);
+		if (!l1_help_advertises_command(help_text, l1cmd) &&
+		    !(l1_help_text_is_valid(command_help) &&
+		      l1_help_advertises_command(command_help, l1cmd))) {
 			fprintf(stderr,
 				"refusing L1 command '%s': not advertised by live L1 help; add --force to send anyway\n",
 				l1cmd);
 			free(help_text);
+			free(command_help);
 			free(command_word);
 			return 2;
 		}
 		advertised_by_help = true;
 		free(help_text);
+		help_text = NULL;
 	}
 
 	ret = run_l1_command_core(opts, l1cmd, true, true, true, false,
 				  opts->debug, &text);
 	if (ret) {
+		free(command_help);
 		free(command_word);
 		return ret;
 	}
@@ -2728,7 +2772,8 @@ static int do_l1_pass_through_command(const struct options *opts,
 	if (l1_failed) {
 		if (advertised_by_help && parent_only &&
 		    l1_text_is_command_not_found(text)) {
-			command_help = l1_help_for_command(opts, l1cmd);
+			if (!command_help)
+				command_help = l1_help_for_command(opts, l1cmd);
 			suppress_failure_text =
 				l1_help_lists_child_command(command_help,
 							    command_word);
@@ -2834,9 +2879,6 @@ static int do_power_command(const struct options *opts, int argc, char **argv,
 	if (command_index + 2 == argc && streq_ci(argv[command_index + 1],
 						  "check"))
 		return do_l1_command(opts, "power check", false);
-	if (command_index + 2 == argc && streq_ci(argv[command_index + 1],
-						  "vrm"))
-		return do_l1_command(opts, "power vrm", false);
 
 	if (command_index + 2 > argc)
 		goto unknown;
@@ -2895,7 +2937,7 @@ static int do_power_command(const struct options *opts, int argc, char **argv,
 
 unknown:
 	fprintf(stderr,
-		"unknown power subcommand; use 'power check', 'power vrm', 'power up', 'power down', 'power reset', or 'l1cmd power ...'\n");
+		"unknown power subcommand; use 'power check', 'power up', 'power down', 'power reset', or 'l1cmd power ...'\n");
 	return 2;
 }
 
@@ -3819,7 +3861,7 @@ static const struct fuel_led_status fuel_led_statuses[] = {
 	{ 0x0d, "Successfully jumped to the main() function (Power-on discovery; no failing component)" },
 	{ 0x0e, "About to increase PROM access speed (Power-on discovery; no failing component)" },
 	{ 0x0f, "Increase PROM access speed (Power-on discovery; no failing component)" },
-	{ 0x10, "Not used (Power-on discovery; no failing component)" },
+	{ 0x10, "Unused (PLED_INITDCACHE)" },
 	{ 0x18, "UART putc timed out (Power-on discovery; no failing component)" },
 	{ 0x1d, "About to initialize selected UART (Power-on discovery; no failing component)" },
 	{ 0x1e, "Done initializing selected UART (Power-on discovery; no failing component)" },
@@ -3844,7 +3886,7 @@ static const struct fuel_led_status fuel_led_statuses[] = {
 	{ 0x46, "Received launch interrupt (Power-on discovery; no failing component)" },
 	{ 0x47, "Calling launched function (Power-on discovery; no failing component)" },
 	{ 0x48, "Launched function returned (Power-on discovery; no failing component)" },
-	{ 0x49, "Not used (Power-on discovery; no failing component)" },
+	{ 0x49, "Unused (PLED_UARTBASE)" },
 	{ 0x4a, "About to initialize hub MD and SIMM controls (Power-on discovery; no failing component)" },
 	{ 0x4b, "About to probe and configure memory size (Power-on discovery; no failing component)" },
 	{ 0x4f, "About to discover hub I/O (Power-on discovery; no failing component)" },
@@ -3903,9 +3945,77 @@ static const struct fuel_led_status fuel_led_statuses[] = {
 	{ 0xae, "Route distribution failed (Hub; failing component: IP34 motherboard)" },
 	{ 0xaf, "NASID distribution failed (Hub; failing component: IP34 motherboard)" },
 	{ 0xb0, "Master assigned no NASID (Hub; failing component: IP34 motherboard)" },
-	{ 0xb1, "NASID arbitration failed (Hub; failing component: IP34 motherboard)" },
+	{ 0xb1, "NASID/module ID arbitration failure" },
 	{ 0xb4, "Error copying mode bits (Hub; failing component: IP34 motherboard)" },
 	{ 0xb5, "Error calculating backplane frequency (Hub; failing component: IP34 motherboard)" },
+};
+
+/* SGI L1 and L2 Controller Software User's Guide, Table 3-6. */
+static const struct fuel_led_status controller_led_statuses[] = {
+	{ 0x08, "PLED_CHUBLOCAL" },
+	{ 0x09, "PLED_CKHUBCONFIG" },
+};
+
+/* Additive mappings recovered from the IP35 PROM and L1 1.48.1 tables. */
+static const struct fuel_led_status l1_1_48_1_led_statuses[] = {
+	{ 0x11, "PLED_INITICACHE" },
+	{ 0x12, "PLED_INITCOP0" },
+	{ 0x13, "PLED_FLUSHTLB" },
+	{ 0x14, "PLED_CLEARTAGS" },
+	{ 0x15, "PLED_CCLFAILED_INITUART" },
+	{ 0x16, "PLED_HUBINIT" },
+	{ 0x17, "PLED_HUBCFAILED_INITUART" },
+	{ 0x19, "PLED_HUBINITDONE" },
+	{ 0x1a, "PLED_ELSCPROBE" },
+	{ 0x1b, "PLED_JUNKPROBE" },
+	{ 0x1c, "PLED_DONEPROBE" },
+	{ 0x1f, "PLED_CKHUBCHIP" },
+	{ 0x20, "PLED_PODMAIN" },
+	{ 0x25, "PLED_SCINIT" },
+	{ 0x26, "PLED_BMARB" },
+	{ 0x27, "PLED_BMASTER" },
+	{ 0x29, "PLED_CKPDCACHE1" },
+	{ 0x2c, "PLED_LOADPROM" },
+	{ 0x2d, "PLED_CKSCACHE1" },
+	{ 0x2e, "PLED_CKBT" },
+	{ 0x2f, "PLED_INSLAVE" },
+	{ 0x30, "PLED_PROMJUMP" },
+	{ 0x32, "PLED_INV_IDCACHES" },
+	{ 0x33, "PLED_INV_SCACHE" },
+	{ 0x34, "PLED_WRCONFIG" },
+	{ 0x37, "PLED_LOCK" },
+	{ 0x39, "PLED_LOCKOK" },
+	{ 0x3a, "PLED_FPROMINIT" },
+	{ 0x3b, "PLED_FPROMINITDONE" },
+	{ 0x42, "PLED_SLAVEINT" },
+	{ 0x43, "PLED_SLAVECALL" },
+	{ 0x44, "PLED_SLAVEREND" },
+	{ 0x4c, "PLED_I2CINIT" },
+	{ 0x4d, "PLED_I2CDONE" },
+	{ 0x4e, "PLED_CONFIG_INIT" },
+	{ 0x50, "PLED_HUB_CONFIG" },
+	{ 0x80, "POD Mode (0x80/0xBC=okay, solid 0x80=possibly hung polling UART)" },
+	{ 0x88, "FLED_ECC" },
+	{ 0x89, "FLED_XTLBMISS: XTLB miss exception." },
+	{ 0x8a, "FLED_UTLBMISS: UTLB miss exception." },
+	{ 0x8b, "FLED_KTLBMISS: KTLB miss exception." },
+	{ 0x8c, "FLED_GENERAL: General exception." },
+	{ 0x8d, "FLED_NOTIMPL: Exception not implemented." },
+	{ 0x8e, "FLED_CACHE: Cache error exception." },
+	{ 0x90, "FLED_HUBINITS: Hub inits failed." },
+	{ 0x92, "FLED_HUBCONFIG: Hub config failed." },
+	{ 0x94, "FLED_UNUSED1: NMI re-POD requested." },
+	{ 0x95, "FLED_HUBUART: Hub UART init failed." },
+	{ 0x96, "FLED_HUBCCS: Hub cross-CPU inits failed." },
+	{ 0x9d, "FLED_IODISCOVER: IO discovery failed." },
+	{ 0xa2, "FLED_RTRCHIP: RTR chip failed diagnostics." },
+	{ 0xa3, "FLED_LINKDEAD: LLP link failed diagnostics." },
+	{ 0xa5, "FLED_RTRBIST: RTR chip failed l/abist." },
+	{ 0xb2, "FLED_MIXED_SN00: SN0 mixed with SN00??" },
+	{ 0xb3, "FLED_ERRPART: Error partition configuration." },
+	{ 0xbc, "POD Mode (0x80/0xBC=okay, solid 0xBC=possibly hung polling UART)" },
+	{ 0xfe, "raw PROM value (no L1 mapping)" },
+	{ 0xff, "Console poll found data for reading" },
 };
 
 static const struct fuel_led_status *fuel_led_status_for_code(unsigned int code)
@@ -3915,7 +4025,41 @@ static const struct fuel_led_status *fuel_led_status_for_code(unsigned int code)
 	for (i = 0; i < ARRAY_SIZE(fuel_led_statuses); i++)
 		if (fuel_led_statuses[i].code == code)
 			return &fuel_led_statuses[i];
+	for (i = 0; i < ARRAY_SIZE(controller_led_statuses); i++)
+		if (controller_led_statuses[i].code == code)
+			return &controller_led_statuses[i];
+	for (i = 0; i < ARRAY_SIZE(l1_1_48_1_led_statuses); i++)
+		if (l1_1_48_1_led_statuses[i].code == code)
+			return &l1_1_48_1_led_statuses[i];
 	return NULL;
+}
+
+static const char *fuel_led_status_source_name(unsigned int code)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(controller_led_statuses); i++)
+		if (controller_led_statuses[i].code == code)
+			return "SGI L1/L2 Controller Software User's Guide";
+	for (i = 0; i < ARRAY_SIZE(l1_1_48_1_led_statuses); i++) {
+		if (l1_1_48_1_led_statuses[i].code != code)
+			continue;
+		if (code == 0xfe)
+			return "IP35 PROM; L1 1.48.1 has no description";
+		if (code == 0xff)
+			return "IP35 PROM and L1 1.48.1 firmware";
+		return "L1 1.48.1 firmware";
+	}
+	if (code == 0x10 || code == 0x3d || code == 0x3e || code == 0x49 ||
+	    code == 0xb1)
+		return "SGI Fuel manual and L1 1.48.1 firmware";
+	return "SGI Fuel Diagnostic Reference Manual";
+}
+
+static bool fuel_led_status_replaces_firmware_text(unsigned int code)
+{
+	return code == 0x10 || code == 0x3d || code == 0x3e || code == 0x49 ||
+	       code == 0xb1 || code == 0xfe;
 }
 
 static int text_builder_append(struct text_builder *builder, const char *text,
@@ -3989,6 +4133,11 @@ static bool leds_line_contains_unknown_status(const char *line, size_t len)
 	return false;
 }
 
+static bool leds_code_is_console_activity(unsigned int code)
+{
+	return code == 0x7f || code == 0xff;
+}
+
 static int hex_digit_value(char c)
 {
 	if (c >= '0' && c <= '9')
@@ -4031,8 +4180,19 @@ static bool leds_line_find_code(const char *line, size_t len,
 	return false;
 }
 
+static bool leds_line_has_cpu_prefix(const char *line, const char *code_start)
+{
+	const char *p = line;
+
+	while (p < code_start && isspace((unsigned char)*p))
+		p++;
+	return code_start - p >= 3 && !strncasecmp(p, "CPU", 3);
+}
+
 static int text_builder_append_decoded_leds_line(struct text_builder *builder,
-						 const char *line, size_t len)
+						 const char *line, size_t len,
+						 const char *prefix,
+						 size_t prefix_len)
 {
 	const struct fuel_led_status *status;
 	const char *code_start;
@@ -4041,17 +4201,22 @@ static int text_builder_append_decoded_leds_line(struct text_builder *builder,
 	char decoded[512];
 	int decoded_len;
 
-	if (!leds_line_contains_unknown_status(line, len) ||
-	    !leds_line_find_code(line, len, &code_start, &code_end, &code)) {
+	if (!leds_line_find_code(line, len, &code_start, &code_end, &code))
 		return text_builder_append(builder, line, len);
-	}
 
 	status = fuel_led_status_for_code(code);
-	if (!status)
-		return text_builder_append(builder, line, len);
-
-	if (text_builder_append(builder, line, (size_t)(code_start - line)))
+	if (prefix) {
+		if (text_builder_append(builder, prefix, prefix_len))
+			return -1;
+	} else if (text_builder_append(builder, line,
+					(size_t)(code_start - line))) {
 		return -1;
+	}
+
+	if (!status || (!fuel_led_status_replaces_firmware_text(code) &&
+			!leds_line_contains_unknown_status(line, len)))
+		return text_builder_append(builder, code_start,
+					   len - (size_t)(code_start - line));
 
 	decoded_len = snprintf(decoded, sizeof(decoded), "0x%02X: %s", code,
 			       status->description);
@@ -4064,42 +4229,149 @@ static char *decode_leds_text(const char *text)
 {
 	struct text_builder builder = { 0 };
 	const char *line = text ? text : "";
+	char *pending_cpu_prefix = NULL;
+	size_t pending_cpu_prefix_len = 0;
+	bool have_output = false;
 
 	while (*line) {
 		const char *next = strchr(line, '\n');
 		size_t len = next ? (size_t)(next - line) : strlen(line);
+		const char *code_start = NULL;
+		const char *code_end = NULL;
+		unsigned int code = 0;
+		bool have_code = leds_line_find_code(line, len, &code_start,
+							&code_end, &code);
+		bool cpu_prefix = have_code &&
+				  leds_line_has_cpu_prefix(line, code_start);
 
-		if (text_builder_append_decoded_leds_line(&builder, line, len)) {
-			free(builder.buf);
-			return NULL;
+		(void)code_end;
+		if (have_code && leds_code_is_console_activity(code)) {
+			if (cpu_prefix) {
+				char *replacement = strndup(line,
+							(size_t)(code_start - line));
+
+				if (!replacement) {
+					perror("strndup");
+					free(pending_cpu_prefix);
+					free(builder.buf);
+					return NULL;
+				}
+				free(pending_cpu_prefix);
+				pending_cpu_prefix = replacement;
+				pending_cpu_prefix_len =
+					(size_t)(code_start - line);
+			}
+			goto next_line;
 		}
+
+		if (cpu_prefix) {
+			free(pending_cpu_prefix);
+			pending_cpu_prefix = NULL;
+			pending_cpu_prefix_len = 0;
+		}
+		if (have_output && text_builder_append(&builder, "\n", 1))
+			goto fail;
+
+		if (text_builder_append_decoded_leds_line(
+				&builder, line, len,
+				pending_cpu_prefix && have_code ?
+					pending_cpu_prefix : NULL,
+				pending_cpu_prefix_len))
+			goto fail;
+		have_output = true;
+		free(pending_cpu_prefix);
+		pending_cpu_prefix = NULL;
+		pending_cpu_prefix_len = 0;
+
+next_line:
 		if (!next)
 			break;
-		if (text_builder_append(&builder, "\n", 1)) {
-			free(builder.buf);
-			return NULL;
-		}
 		line = next + 1;
 	}
 
 	if (!builder.buf && text_builder_append(&builder, "", 0))
-		return NULL;
+		goto fail;
+	free(pending_cpu_prefix);
 	return builder.buf;
+
+fail:
+	free(pending_cpu_prefix);
+	free(builder.buf);
+	return NULL;
+}
+
+static bool leds_text_has_current_console_activity(const char *text)
+{
+	const char *line = text ? text : "";
+
+	while (*line) {
+		const char *next = strchr(line, '\n');
+		size_t len = next ? (size_t)(next - line) : strlen(line);
+		const char *code_start;
+		const char *code_end;
+		unsigned int code;
+
+		if (leds_line_find_code(line, len, &code_start, &code_end, &code) &&
+		    leds_line_has_cpu_prefix(line, code_start) &&
+		    leds_code_is_console_activity(code))
+			return true;
+		if (!next)
+			break;
+		line = next + 1;
+	}
+
+	return false;
+}
+
+static void print_leds_mapping_provenance(const char *text)
+{
+	bool seen[256] = { false };
+	const char *line = text ? text : "";
+
+	while (*line) {
+		const char *next = strchr(line, '\n');
+		size_t len = next ? (size_t)(next - line) : strlen(line);
+		const char *code_start;
+		const char *code_end;
+		const struct fuel_led_status *status;
+		unsigned int code;
+
+		if (!leds_line_find_code(line, len, &code_start, &code_end, &code) ||
+		    seen[code])
+			goto provenance_next;
+		seen[code] = true;
+		if (code == 0x7f) {
+			printf("LED mapping 0x7F source: IP35 PROM input-wait pattern\n");
+			goto provenance_next;
+		}
+		status = fuel_led_status_for_code(code);
+		if (status)
+			printf("LED mapping 0x%02X source: %s\n", code,
+			       fuel_led_status_source_name(code));
+		else
+			printf("LED mapping 0x%02X source: unmapped\n", code);
+
+provenance_next:
+		if (!next)
+			break;
+		line = next + 1;
+	}
 }
 
 static void print_leds_text_block(const char *text)
 {
 	char *decoded = decode_leds_text(text);
 
-	print_text_block(decoded ? decoded : text);
+	if (decoded && !*decoded)
+		printf("No diagnostic LED status available.\n");
+	else
+		print_text_block(decoded ? decoded : text);
 	free(decoded);
 }
 
 static void print_l1_command_text_block(const char *l1cmd, const char *text)
 {
-	if (streq_ci(l1cmd, "leds"))
-		print_leds_text_block(text);
-	else if (streq_ci(l1cmd, "debug"))
+	if (streq_ci(l1cmd, "debug"))
 		print_debug_switch_text_block(text, true);
 	else
 		print_text_block(text);
@@ -4648,6 +4920,11 @@ struct log_repeat_state {
 	unsigned int pending_count;
 };
 
+struct log_line_sink {
+	int (*emit)(void *context, const char *line);
+	void *context;
+};
+
 static void free_log_line_list(struct log_line_list *list)
 {
 	size_t i;
@@ -4825,23 +5102,43 @@ static void log_repeat_history_add(struct log_repeat_state *state, char *key)
 			      SGIL1_LOG_REPEAT_HISTORY;
 }
 
-static void flush_log_repeat_summary(struct log_repeat_state *state)
+static int stdout_log_line_emit(void *context, const char *line)
 {
-	if (!state->pending_count)
-		return;
+	(void)context;
+	return puts(line) == EOF ? -1 : 0;
+}
 
-	printf("message repeated %u time%s: %s\n", state->pending_count,
-	       state->pending_count == 1 ? "" : "s", state->pending_key);
+static int flush_log_repeat_summary(struct log_repeat_state *state,
+				    const struct log_line_sink *sink)
+{
+	char *summary;
+	size_t len;
+	int ret;
+
+	if (!state->pending_count)
+		return 0;
+
+	len = strlen(state->pending_key) + 64;
+	summary = malloc(len);
+	if (!summary) {
+		perror("malloc");
+		return -1;
+	}
+	snprintf(summary, len, "message repeated %u time%s: %s",
+		 state->pending_count, state->pending_count == 1 ? "" : "s",
+		 state->pending_key);
+	ret = sink->emit(sink->context, summary);
+	free(summary);
 	free(state->pending_key);
 	state->pending_key = NULL;
 	state->pending_count = 0;
+	return ret;
 }
 
 static void free_log_repeat_state(struct log_repeat_state *state)
 {
 	size_t i;
 
-	flush_log_repeat_summary(state);
 	for (i = 0; i < state->history_count; i++)
 		free(state->history[i]);
 	free(state->pending_key);
@@ -4849,14 +5146,13 @@ static void free_log_repeat_state(struct log_repeat_state *state)
 }
 
 static int print_follow_log_line(struct log_repeat_state *repeat,
-				 const char *line, bool repeat_summary)
+				 const char *line, bool repeat_summary,
+				 const struct log_line_sink *sink)
 {
 	char *key;
 
-	if (!repeat_summary) {
-		puts(line);
-		return 0;
-	}
+	if (!repeat_summary)
+		return sink->emit(sink->context, line);
 
 	key = log_repeat_key_for_line(line);
 	if (!key) {
@@ -4866,7 +5162,10 @@ static int print_follow_log_line(struct log_repeat_state *repeat,
 
 	if (log_repeat_history_contains(repeat, key)) {
 		if (repeat->pending_key && strcmp(repeat->pending_key, key)) {
-			flush_log_repeat_summary(repeat);
+			if (flush_log_repeat_summary(repeat, sink)) {
+				free(key);
+				return -1;
+			}
 		} else if (!repeat->pending_key) {
 			repeat->pending_key = key;
 			key = NULL;
@@ -4876,24 +5175,32 @@ static int print_follow_log_line(struct log_repeat_state *repeat,
 		return 0;
 	}
 
-	flush_log_repeat_summary(repeat);
-	puts(line);
+	if (flush_log_repeat_summary(repeat, sink)) {
+		free(key);
+		return -1;
+	}
+	if (sink->emit(sink->context, line)) {
+		free(key);
+		return -1;
+	}
 	log_repeat_history_add(repeat, key);
 	return 0;
 }
 
 static int print_follow_log_lines(struct log_repeat_state *repeat,
 				  const struct log_line_list *lines,
-				  size_t start, bool repeat_summary)
+				  size_t start, bool repeat_summary,
+				  const struct log_line_sink *sink)
 {
 	size_t i;
 
 	for (i = start; i < lines->count; i++) {
 		if (print_follow_log_line(repeat, lines->lines[i],
-					  repeat_summary))
+					  repeat_summary, sink))
 			return -1;
 	}
-	flush_log_repeat_summary(repeat);
+	if (flush_log_repeat_summary(repeat, sink))
+		return -1;
 	fflush(stdout);
 	return 0;
 }
@@ -4935,11 +5242,15 @@ static int parse_log_args(int argc, char **argv, int start,
 static int do_log_follow(const struct options *opts,
 			 const struct log_options *log)
 {
+	const struct log_line_sink sink = {
+		.emit = stdout_log_line_emit,
+	};
 	struct options cmd_opts;
 	struct log_line_list previous = { 0 };
 	struct log_repeat_state repeat = { 0 };
 	bool have_previous = false;
-	bool burst_poll = false;
+	uint64_t next_pressure_decay = UINT64_MAX;
+	unsigned int queue_pressure = 0;
 	int ret = 1;
 
 	if (prepare_command_options(opts, &cmd_opts))
@@ -4950,6 +5261,10 @@ static int do_log_follow(const struct options *opts,
 		char *text = NULL;
 		size_t start = 0;
 		size_t new_lines;
+		size_t i;
+		bool substantive_new = false;
+		uint64_t now;
+		int delay;
 		int command_ret;
 
 		command_ret = l1_text_command_status(&cmd_opts, "log", false,
@@ -4964,6 +5279,17 @@ static int do_log_follow(const struct options *opts,
 			goto out;
 		}
 		free(text);
+		now = monotonic_milliseconds();
+		if (queue_pressure && now >= next_pressure_decay) {
+			queue_pressure--;
+			next_pressure_decay = queue_pressure ?
+				milliseconds_after(
+					now, SGIL1_QUEUE_PRESSURE_DECAY_MS) :
+				UINT64_MAX;
+			fprintf(stderr,
+				"Log follow: L1 USB queue pressure level %u/%u; recovering\n",
+				queue_pressure, SGIL1_QUEUE_PRESSURE_MAX);
+		}
 
 		if (have_previous) {
 			start = log_line_overlap(&previous, &current);
@@ -4973,9 +5299,26 @@ static int do_log_follow(const struct options *opts,
 		}
 
 		new_lines = current.count - start;
+		for (i = start; i < current.count; i++) {
+			if (have_previous &&
+			    log_line_is_queue_full(current.lines[i])) {
+				if (queue_pressure < SGIL1_QUEUE_PRESSURE_MAX) {
+					queue_pressure++;
+					fprintf(stderr,
+						"Log follow: L1 USB queue pressure level %u/%u; polling slowed\n",
+						queue_pressure,
+						SGIL1_QUEUE_PRESSURE_MAX);
+				}
+				next_pressure_decay = milliseconds_after(
+					now, SGIL1_QUEUE_PRESSURE_DECAY_MS);
+			} else if (!log_line_is_queue_feedback(
+					   current.lines[i])) {
+				substantive_new = true;
+			}
+		}
 		if (new_lines &&
 		    print_follow_log_lines(&repeat, &current, start,
-					   log->repeat_summary)) {
+					   log->repeat_summary, &sink)) {
 			free_log_line_list(&current);
 			goto out;
 		}
@@ -4983,12 +5326,14 @@ static int do_log_follow(const struct options *opts,
 		free_log_line_list(&previous);
 		previous = current;
 		have_previous = true;
-		burst_poll = new_lines > 0;
-		sleep_milliseconds(burst_poll ? SGIL1_LOG_BURST_POLL_MS :
-				   log->poll_interval_ms);
+		delay = substantive_new ? SGIL1_LOG_BURST_POLL_MS :
+					  log->poll_interval_ms;
+		sleep_milliseconds(
+			queue_pressure_scaled_delay(delay, queue_pressure));
 	}
 
 out:
+	(void)flush_log_repeat_summary(&repeat, &sink);
 	free_log_line_list(&previous);
 	free_log_repeat_state(&repeat);
 	return ret;
@@ -5005,6 +5350,920 @@ static int do_log_command(const struct options *opts, int argc, char **argv,
 		return do_log_follow(opts, &log);
 
 	return do_l1_command(opts, "log", false);
+}
+
+static volatile sig_atomic_t watch_stop_requested;
+
+#ifdef SGIL1_WITH_TUI
+#define SGIL1_TUI_LOG_HISTORY 4096
+
+enum watch_tui_focus {
+	WATCH_TUI_FOCUS_LOG,
+	WATCH_TUI_FOCUS_LEDS,
+};
+
+struct watch_tui_state {
+	char **log_lines;
+	size_t log_count;
+	struct log_line_list led_lines;
+	size_t log_scroll;
+	size_t led_scroll;
+	enum watch_tui_focus focus;
+	char status[256];
+	bool alternate_screen;
+	bool initialized;
+};
+
+struct watch_tui_rect {
+	int y;
+	int x;
+	int height;
+	int width;
+};
+#endif
+
+struct watch_display {
+	bool tui;
+	unsigned int queue_pressure;
+	uint64_t console_activity_until;
+#ifdef SGIL1_WITH_TUI
+	struct watch_tui_state tui_state;
+#endif
+};
+
+struct watch_signal_state {
+	struct sigaction old_int;
+	struct sigaction old_term;
+	struct sigaction old_hup;
+	unsigned int installed;
+};
+
+static void watch_signal_handler(int signal_number)
+{
+	(void)signal_number;
+	watch_stop_requested = 1;
+}
+
+static void restore_watch_signal_handlers(struct watch_signal_state *state);
+
+static int install_watch_signal_handlers(struct watch_signal_state *state)
+{
+	struct sigaction action;
+
+	memset(state, 0, sizeof(*state));
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = watch_signal_handler;
+	sigemptyset(&action.sa_mask);
+	if (sigaction(SIGINT, &action, &state->old_int))
+		goto error;
+	state->installed = 1;
+	if (sigaction(SIGTERM, &action, &state->old_term))
+		goto error;
+	state->installed = 2;
+	if (sigaction(SIGHUP, &action, &state->old_hup))
+		goto error;
+	state->installed = 3;
+	return 0;
+
+error:
+	{
+		int saved_errno = errno;
+
+		fprintf(stderr, "could not install watch signal handlers: %s\n",
+			strerror(saved_errno));
+		restore_watch_signal_handlers(state);
+		errno = saved_errno;
+		return -1;
+	}
+}
+
+static void restore_watch_signal_handlers(struct watch_signal_state *state)
+{
+	if (state->installed >= 3)
+		(void)sigaction(SIGHUP, &state->old_hup, NULL);
+	if (state->installed >= 2)
+		(void)sigaction(SIGTERM, &state->old_term, NULL);
+	if (state->installed >= 1)
+		(void)sigaction(SIGINT, &state->old_int, NULL);
+	state->installed = 0;
+}
+
+static uint64_t monotonic_milliseconds(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return 0;
+	return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
+
+static uint64_t milliseconds_after(uint64_t now, int delay)
+{
+	uint64_t later = now + (uint64_t)delay;
+
+	return later < now ? UINT64_MAX : later;
+}
+
+static int queue_pressure_scaled_delay(int delay, unsigned int pressure)
+{
+	int64_t scaled = (int64_t)delay * (2 + (int)pressure);
+
+	scaled /= 2;
+	return scaled > INT_MAX ? INT_MAX : (int)scaled;
+}
+
+static int watch_next_led_idle_delay(int current, int minimum)
+{
+	int next = current + current / 2;
+
+	if (next <= current)
+		next = current + 1;
+	if (next < minimum)
+		next = minimum;
+	if (next > SGIL1_WATCH_LED_IDLE_MAX_MS)
+		next = SGIL1_WATCH_LED_IDLE_MAX_MS;
+	return next;
+}
+
+static int watch_next_failure_backoff(int current)
+{
+	int next = current + current / 2;
+
+	if (next <= current)
+		next = current + 1;
+	if (next > SGIL1_WATCH_FAILURE_BACKOFF_MAX_MS)
+		next = SGIL1_WATCH_FAILURE_BACKOFF_MAX_MS;
+	return next;
+}
+
+#ifdef SGIL1_WITH_TUI
+static void watch_tui_layout(struct watch_tui_rect *log_rect,
+			     struct watch_tui_rect *led_rect)
+{
+	int content_height = LINES - 2;
+
+	if (COLS >= 100) {
+		int log_width = (COLS * 2) / 3;
+
+		*log_rect = (struct watch_tui_rect) {
+			.y = 1,
+			.x = 0,
+			.height = content_height,
+			.width = log_width,
+		};
+		*led_rect = (struct watch_tui_rect) {
+			.y = 1,
+			.x = log_width,
+			.height = content_height,
+			.width = COLS - log_width,
+		};
+	} else {
+		int led_height = content_height / 3;
+
+		if (led_height < 4)
+			led_height = 4;
+		if (led_height > content_height - 3)
+			led_height = content_height - 3;
+		*led_rect = (struct watch_tui_rect) {
+			.y = 1,
+			.x = 0,
+			.height = led_height,
+			.width = COLS,
+		};
+		*log_rect = (struct watch_tui_rect) {
+			.y = 1 + led_height,
+			.x = 0,
+			.height = content_height - led_height,
+			.width = COLS,
+		};
+	}
+}
+
+static void watch_tui_draw_pane(const struct watch_tui_rect *rect,
+				const char *title, char *const *lines,
+				size_t count, size_t scroll, bool focused)
+{
+	WINDOW *window;
+	size_t visible;
+	size_t end;
+	size_t start;
+	size_t i;
+
+	if (rect->height < 3 || rect->width < 4)
+		return;
+	window = derwin(stdscr, rect->height, rect->width, rect->y, rect->x);
+	if (!window)
+		return;
+	werase(window);
+	box(window, 0, 0);
+	if (focused)
+		wattron(window, A_BOLD);
+	mvwaddnstr(window, 0, 2, title, rect->width - 4);
+	if (focused)
+		wattroff(window, A_BOLD);
+
+	visible = (size_t)(rect->height - 2);
+	if (scroll > count)
+		scroll = count;
+	end = count - scroll;
+	start = end > visible ? end - visible : 0;
+	for (i = start; i < end; i++)
+		mvwaddnstr(window, 1 + (int)(i - start), 1, lines[i],
+			    rect->width - 2);
+	wnoutrefresh(window);
+	delwin(window);
+}
+
+static void watch_tui_render(struct watch_display *display)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	struct watch_tui_rect log_rect;
+	struct watch_tui_rect led_rect;
+	char header[256];
+	char footer[320];
+	bool activity = monotonic_milliseconds() <
+			display->console_activity_until;
+
+	if (!state->initialized)
+		return;
+	if (LINES < 10 || COLS < 40) {
+		erase();
+		mvaddnstr(0, 0, "sgil1ctl watch", COLS);
+		mvaddnstr(2, 0, "Terminal must be at least 40x10.", COLS);
+		refresh();
+		return;
+	}
+
+	watch_tui_layout(&log_rect, &led_rect);
+	erase();
+	snprintf(header, sizeof(header),
+		 " sgil1ctl watch | queue pressure %u/%u%s",
+		 display->queue_pressure, SGIL1_QUEUE_PRESSURE_MAX,
+		 activity ? " | console input activity" : "");
+	attron(A_REVERSE | A_BOLD);
+	mvhline(0, 0, ' ', COLS);
+	mvaddnstr(0, 0, header, COLS);
+	attroff(A_REVERSE | A_BOLD);
+
+	watch_tui_draw_pane(&log_rect, " L1 log ", state->log_lines,
+			    state->log_count, state->log_scroll,
+			    state->focus == WATCH_TUI_FOCUS_LOG);
+	watch_tui_draw_pane(&led_rect, " LEDs ", state->led_lines.lines,
+			    state->led_lines.count, state->led_scroll,
+			    state->focus == WATCH_TUI_FOCUS_LEDS);
+
+	snprintf(footer, sizeof(footer), " %s%s",
+		 state->status[0] ? state->status : "Monitoring L1",
+		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
+							 " | LEDs selected");
+	attron(A_REVERSE);
+	mvhline(LINES - 1, 0, ' ', COLS);
+	mvaddnstr(LINES - 1, 0, footer, COLS);
+	attroff(A_REVERSE);
+	wnoutrefresh(stdscr);
+	doupdate();
+}
+
+static int watch_tui_append_log(struct watch_tui_state *state,
+				const char *line)
+{
+	char **next;
+	char *copy = strdup(line);
+
+	if (!copy) {
+		perror("strdup");
+		return -1;
+	}
+	if (state->log_count == SGIL1_TUI_LOG_HISTORY) {
+		free(state->log_lines[0]);
+		memmove(state->log_lines, state->log_lines + 1,
+			(SGIL1_TUI_LOG_HISTORY - 1) * sizeof(*state->log_lines));
+		state->log_count--;
+	} else {
+		next = realloc(state->log_lines,
+			       (state->log_count + 1) * sizeof(*state->log_lines));
+		if (!next) {
+			perror("realloc");
+			free(copy);
+			return -1;
+		}
+		state->log_lines = next;
+	}
+	state->log_lines[state->log_count++] = copy;
+	if (state->log_scroll && state->log_scroll < state->log_count)
+		state->log_scroll++;
+	return 0;
+}
+
+static int watch_tui_set_leds(struct watch_tui_state *state, const char *text)
+{
+	struct log_line_list replacement;
+
+	if (split_log_lines(text ? text : "", &replacement))
+		return -1;
+	free_log_line_list(&state->led_lines);
+	state->led_lines = replacement;
+	if (state->led_scroll > state->led_lines.count)
+		state->led_scroll = state->led_lines.count;
+	return 0;
+}
+
+static size_t watch_tui_page_size(enum watch_tui_focus focus)
+{
+	struct watch_tui_rect log_rect;
+	struct watch_tui_rect led_rect;
+	int height;
+
+	watch_tui_layout(&log_rect, &led_rect);
+	height = focus == WATCH_TUI_FOCUS_LOG ? log_rect.height :
+						     led_rect.height;
+	return height > 2 ? (size_t)(height - 2) : 1;
+}
+
+static void watch_tui_adjust_scroll(struct watch_tui_state *state,
+				    bool upward, size_t amount)
+{
+	size_t *scroll = state->focus == WATCH_TUI_FOCUS_LOG ?
+			 &state->log_scroll : &state->led_scroll;
+	size_t count = state->focus == WATCH_TUI_FOCUS_LOG ?
+		       state->log_count : state->led_lines.count;
+
+	if (upward) {
+		if (amount > count - *scroll)
+			*scroll = count;
+		else
+			*scroll += amount;
+	} else if (amount >= *scroll) {
+		*scroll = 0;
+	} else {
+		*scroll -= amount;
+	}
+}
+
+static bool watch_tui_wait(struct watch_display *display, int milliseconds)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	int timeout = milliseconds > 100 ? 100 : milliseconds;
+	int key;
+
+	if (timeout < 0)
+		timeout = 100;
+	wtimeout(stdscr, timeout);
+	key = wgetch(stdscr);
+	switch (key) {
+	case 'q':
+	case 'Q':
+		watch_stop_requested = 1;
+		break;
+	case '\t':
+		state->focus = state->focus == WATCH_TUI_FOCUS_LOG ?
+			       WATCH_TUI_FOCUS_LEDS : WATCH_TUI_FOCUS_LOG;
+		break;
+	case KEY_UP:
+		watch_tui_adjust_scroll(state, true, 1);
+		break;
+	case KEY_DOWN:
+		watch_tui_adjust_scroll(state, false, 1);
+		break;
+	case KEY_PPAGE:
+		watch_tui_adjust_scroll(state, true,
+					watch_tui_page_size(state->focus));
+		break;
+	case KEY_NPAGE:
+		watch_tui_adjust_scroll(state, false,
+					watch_tui_page_size(state->focus));
+		break;
+	case KEY_END:
+		if (state->focus == WATCH_TUI_FOCUS_LOG)
+			state->log_scroll = 0;
+		else
+			state->led_scroll = 0;
+		break;
+	case KEY_RESIZE:
+		clearok(stdscr, true);
+		break;
+	default:
+		break;
+	}
+	watch_tui_render(display);
+	return watch_stop_requested != 0;
+}
+
+static void watch_tui_free(struct watch_tui_state *state)
+{
+	size_t i;
+
+	for (i = 0; i < state->log_count; i++)
+		free(state->log_lines[i]);
+	free(state->log_lines);
+	free_log_line_list(&state->led_lines);
+	memset(state, 0, sizeof(*state));
+}
+#endif
+
+static void watch_display_status(struct watch_display *display,
+				 const char *message)
+{
+#ifdef SGIL1_WITH_TUI
+	if (display->tui) {
+		snprintf(display->tui_state.status,
+			 sizeof(display->tui_state.status), "%s", message);
+		watch_tui_render(display);
+		return;
+	}
+#else
+	(void)display;
+#endif
+	fprintf(stderr, "[watch] %s\n", message);
+	fflush(stderr);
+}
+
+static int watch_display_log_line(void *context, const char *line)
+{
+	struct watch_display *display = context;
+
+#ifdef SGIL1_WITH_TUI
+	if (display->tui) {
+		if (watch_tui_append_log(&display->tui_state, line))
+			return -1;
+		watch_tui_render(display);
+		return 0;
+	}
+#else
+	(void)display;
+#endif
+	if (printf("[log] %s\n", line) < 0)
+		return -1;
+	fflush(stdout);
+	return 0;
+}
+
+static void watch_display_leds(struct watch_display *display, const char *text,
+			       bool changed, bool console_activity)
+{
+	const char *line = text;
+
+	if (console_activity)
+		display->console_activity_until = milliseconds_after(
+			monotonic_milliseconds(), 750);
+#ifdef SGIL1_WITH_TUI
+	if (display->tui) {
+		if (changed && watch_tui_set_leds(&display->tui_state, text)) {
+			snprintf(display->tui_state.status,
+				 sizeof(display->tui_state.status),
+				 "Could not update LED display");
+		}
+		watch_tui_render(display);
+		return;
+	}
+#endif
+	if (!changed || !text || !*text)
+		return;
+	while (*line) {
+		const char *next = strchr(line, '\n');
+		size_t len = next ? (size_t)(next - line) : strlen(line);
+
+		printf("[led] %.*s\n", (int)len, line);
+		if (!next)
+			break;
+		line = next + 1;
+	}
+	fflush(stdout);
+}
+
+static bool watch_display_wait(struct watch_display *display, int milliseconds)
+{
+#ifdef SGIL1_WITH_TUI
+	if (display->tui)
+		return watch_tui_wait(display, milliseconds);
+#else
+	(void)display;
+#endif
+	sleep_milliseconds(milliseconds);
+	return watch_stop_requested != 0;
+}
+
+static int watch_display_init(struct watch_display *display,
+			      const struct watch_options *watch)
+{
+	memset(display, 0, sizeof(*display));
+	display->tui = watch->tui;
+#ifdef SGIL1_WITH_TUI
+	if (watch->tui) {
+		struct watch_tui_state *state = &display->tui_state;
+
+		if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+			fprintf(stderr,
+				"sgil1ctl watch --tui requires an interactive terminal\n");
+			return -1;
+		}
+		state->alternate_screen = watch->alternate_screen;
+		if (!initscr()) {
+			fprintf(stderr, "could not initialize ncurses TUI\n");
+			return -1;
+		}
+		state->initialized = true;
+		if (!state->alternate_screen) {
+			char *leave_ca = tigetstr("rmcup");
+
+			if (leave_ca && leave_ca != (char *)-1)
+				putp(leave_ca);
+#ifdef exit_ca_mode
+			exit_ca_mode = NULL;
+#endif
+			clearok(stdscr, true);
+		}
+		cbreak();
+		noecho();
+		keypad(stdscr, true);
+		(void)curs_set(0);
+		state->focus = WATCH_TUI_FOCUS_LOG;
+		snprintf(state->status, sizeof(state->status),
+			 "Monitoring L1");
+		watch_tui_render(display);
+	}
+#else
+	(void)watch;
+#endif
+	return 0;
+}
+
+static void watch_display_finish(struct watch_display *display)
+{
+#ifdef SGIL1_WITH_TUI
+	if (display->tui) {
+		(void)curs_set(1);
+		if (display->tui_state.alternate_screen) {
+			endwin();
+		} else {
+			keypad(stdscr, false);
+			(void)reset_shell_mode();
+			fflush(stdout);
+		}
+		watch_tui_free(&display->tui_state);
+	}
+#else
+	(void)display;
+#endif
+}
+
+static bool log_line_is_queue_full(const char *line)
+{
+	return contains_ci(line, "USB_WQUE") && contains_ci(line, "Q full");
+}
+
+static bool log_line_is_queue_feedback(const char *line)
+{
+	return contains_ci(line, "USB_WQUE") &&
+	       (contains_ci(line, "Q full") || contains_ci(line, "Q avail"));
+}
+
+static void watch_report_queue_pressure(struct watch_display *display,
+					unsigned int pressure,
+					bool increasing)
+{
+	char message[160];
+
+	display->queue_pressure = pressure;
+	snprintf(message, sizeof(message),
+		 "L1 USB queue pressure level %u/%u; polling %s",
+		 pressure, SGIL1_QUEUE_PRESSURE_MAX,
+		 increasing ? "slowed" : "recovering");
+	watch_display_status(display, message);
+}
+
+static int parse_watch_args(int argc, char **argv, int start,
+			    struct watch_options *watch)
+{
+	int i;
+
+	memset(watch, 0, sizeof(*watch));
+	watch->alternate_screen = true;
+	watch->repeat_summary = true;
+	watch->log_interval_ms = SGIL1_LOG_DEFAULT_POLL_MS;
+	watch->led_interval_ms = SGIL1_WATCH_LED_MIN_MS;
+
+	for (i = start; i < argc; i++) {
+		if (!strcmp(argv[i], "--tui")) {
+			watch->tui = true;
+		} else if (!strcmp(argv[i], "--no-alternate-screen")) {
+			watch->alternate_screen = false;
+		} else if (!strcmp(argv[i], "--log-interval")) {
+			if (++i >= argc) {
+				fprintf(stderr, "--log-interval needs milliseconds\n");
+				return -1;
+			}
+			if (parse_int_arg(argv[i], SGIL1_WATCH_LOG_MIN_MS,
+					  INT_MAX, &watch->log_interval_ms)) {
+				fprintf(stderr,
+					"invalid --log-interval value; minimum is %d ms\n",
+					SGIL1_WATCH_LOG_MIN_MS);
+				return -1;
+			}
+		} else if (!strcmp(argv[i], "--led-interval")) {
+			if (++i >= argc) {
+				fprintf(stderr, "--led-interval needs milliseconds\n");
+				return -1;
+			}
+			if (parse_int_arg(argv[i], SGIL1_WATCH_LED_MIN_MS,
+					  SGIL1_WATCH_LED_IDLE_MAX_MS,
+					  &watch->led_interval_ms)) {
+				fprintf(stderr,
+					"invalid --led-interval value; expected %d..%d ms\n",
+					SGIL1_WATCH_LED_MIN_MS,
+					SGIL1_WATCH_LED_IDLE_MAX_MS);
+				return -1;
+			}
+		} else if (!strcmp(argv[i], "--no-repeat-summary")) {
+			watch->repeat_summary = false;
+		} else {
+			fprintf(stderr, "unknown watch option: %s\n", argv[i]);
+			return -1;
+		}
+	}
+
+	if (!watch->alternate_screen && !watch->tui) {
+		fprintf(stderr, "--no-alternate-screen requires --tui\n");
+		return -1;
+	}
+#ifndef SGIL1_WITH_TUI
+	if (watch->tui) {
+		fprintf(stderr,
+			"sgil1ctl watch --tui is unavailable:\n"
+			"this edition was built without optional ncurses TUI support;\n"
+			"rebuild with 'make -C tools WITH_TUI=1'\n");
+		return -1;
+	}
+#endif
+
+	return 0;
+}
+
+static int run_watch_scheduler(const struct options *opts,
+			       struct options *cmd_opts,
+			       const struct watch_options *watch,
+			       struct watch_display *display)
+{
+	const struct log_line_sink log_sink = {
+		.emit = watch_display_log_line,
+		.context = display,
+	};
+	struct log_line_list previous_log = { 0 };
+	struct log_repeat_state repeat = { 0 };
+	char *previous_leds = NULL;
+	uint64_t now = monotonic_milliseconds();
+	uint64_t next_log = now;
+	uint64_t next_led = now;
+	uint64_t next_pressure_decay = UINT64_MAX;
+	int led_delay = watch->led_interval_ms;
+	int failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
+	unsigned int consecutive_failures = 0;
+	unsigned int queue_pressure = 0;
+	bool have_previous_log = false;
+	bool route_valid = true;
+	bool last_was_led = false;
+	int ret = 0;
+
+	cmd_opts->skip_command_drain = true;
+	while (!watch_stop_requested) {
+		bool do_led;
+		bool do_log;
+
+		now = monotonic_milliseconds();
+		if (queue_pressure && now >= next_pressure_decay) {
+			queue_pressure--;
+			next_pressure_decay = queue_pressure ?
+				milliseconds_after(now,
+					SGIL1_QUEUE_PRESSURE_DECAY_MS) :
+				UINT64_MAX;
+			watch_report_queue_pressure(display, queue_pressure, false);
+		}
+
+		do_led = now >= next_led;
+		do_log = now >= next_log;
+		if (!do_led && !do_log) {
+			uint64_t next = next_led < next_log ? next_led : next_log;
+			uint64_t remaining = next > now ? next - now : 0;
+			int wait_ms = remaining > INT_MAX ? INT_MAX : (int)remaining;
+
+			if (watch_display_wait(display, wait_ms))
+				break;
+			continue;
+		}
+
+		if (!route_valid) {
+			struct options replacement;
+
+			if (prepare_command_options(opts, &replacement)) {
+				char message[128];
+
+				now = monotonic_milliseconds();
+				snprintf(message, sizeof(message),
+					 "could not restore L1 route; retrying in %d ms",
+					 failure_backoff);
+				watch_display_status(display, message);
+				next_led = next_log =
+					milliseconds_after(now, failure_backoff);
+				failure_backoff =
+					watch_next_failure_backoff(failure_backoff);
+				continue;
+			}
+			replacement.skip_command_drain = true;
+			*cmd_opts = replacement;
+			route_valid = true;
+			watch_display_status(display, "restored L1 command route");
+		}
+
+		do_led = do_led && (!do_log || !last_was_led);
+		if (do_led) {
+			char *raw = NULL;
+			char *decoded = NULL;
+			bool changed;
+			bool console_activity;
+			int command_ret;
+
+			command_ret = l1_text_command_status(cmd_opts, "leds", false,
+							     &raw);
+			if (command_ret) {
+				char message[128];
+
+				now = monotonic_milliseconds();
+				free(raw);
+				consecutive_failures++;
+				snprintf(message, sizeof(message),
+					 "LED request failed; retrying transport in %d ms",
+					 failure_backoff);
+				watch_display_status(display, message);
+				next_led = next_log =
+					milliseconds_after(now, failure_backoff);
+				failure_backoff =
+					watch_next_failure_backoff(failure_backoff);
+				if (consecutive_failures >= 3 &&
+				    cmd_opts->dest_auto_discovered)
+					route_valid = false;
+				last_was_led = true;
+				continue;
+			}
+
+			if (consecutive_failures)
+				watch_display_status(display, "L1 transport recovered");
+			now = monotonic_milliseconds();
+			consecutive_failures = 0;
+			failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
+			console_activity =
+				leds_text_has_current_console_activity(raw);
+			decoded = decode_leds_text(raw);
+			if (!decoded)
+				decoded = strdup(raw ? raw : "");
+			free(raw);
+			if (!decoded) {
+				perror("strdup");
+				ret = 1;
+				break;
+			}
+
+			changed = !previous_leds || strcmp(previous_leds, decoded);
+			watch_display_leds(display, decoded, changed,
+					   console_activity);
+			if (changed) {
+				free(previous_leds);
+				previous_leds = decoded;
+				decoded = NULL;
+				led_delay = watch->led_interval_ms;
+			} else {
+				led_delay = watch_next_led_idle_delay(
+					led_delay, watch->led_interval_ms);
+			}
+			free(decoded);
+			next_led = milliseconds_after(
+				now, queue_pressure_scaled_delay(led_delay,
+								 queue_pressure));
+			last_was_led = true;
+			continue;
+		}
+
+		{
+			struct log_line_list current;
+			char *text = NULL;
+			size_t start = 0;
+			size_t i;
+			bool substantive_new = false;
+			int command_ret;
+
+			command_ret = l1_text_command_status(cmd_opts, "log", false,
+							     &text);
+			if (command_ret) {
+				char message[128];
+
+				now = monotonic_milliseconds();
+				free(text);
+				consecutive_failures++;
+				snprintf(message, sizeof(message),
+					 "log request failed; retrying transport in %d ms",
+					 failure_backoff);
+				watch_display_status(display, message);
+				next_led = next_log =
+					milliseconds_after(now, failure_backoff);
+				failure_backoff =
+					watch_next_failure_backoff(failure_backoff);
+				if (consecutive_failures >= 3 &&
+				    cmd_opts->dest_auto_discovered)
+					route_valid = false;
+				last_was_led = false;
+				continue;
+			}
+
+			if (consecutive_failures)
+				watch_display_status(display, "L1 transport recovered");
+			now = monotonic_milliseconds();
+			consecutive_failures = 0;
+			failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
+			if (split_log_lines(text, &current)) {
+				free(text);
+				ret = 1;
+				break;
+			}
+			free(text);
+
+			if (have_previous_log) {
+				start = log_line_overlap(&previous_log, &current);
+				if (!start && previous_log.count && current.count)
+					watch_display_status(display,
+						"L1 log advanced without overlap; entries may have been missed");
+			}
+
+			for (i = start; i < current.count; i++) {
+				if (!have_previous_log)
+					continue;
+				if (log_line_is_queue_full(current.lines[i])) {
+					if (queue_pressure <
+					    SGIL1_QUEUE_PRESSURE_MAX) {
+						queue_pressure++;
+						watch_report_queue_pressure(
+							display, queue_pressure, true);
+					}
+					next_pressure_decay = milliseconds_after(
+						now,
+						SGIL1_QUEUE_PRESSURE_DECAY_MS);
+				} else if (!log_line_is_queue_feedback(
+						   current.lines[i])) {
+					substantive_new = true;
+				}
+			}
+
+			if (current.count > start &&
+			    print_follow_log_lines(&repeat, &current, start,
+						   watch->repeat_summary,
+						   &log_sink)) {
+				free_log_line_list(&current);
+				ret = 1;
+				break;
+			}
+
+			free_log_line_list(&previous_log);
+			previous_log = current;
+			have_previous_log = true;
+			next_log = milliseconds_after(
+				now, queue_pressure_scaled_delay(
+					substantive_new ? SGIL1_LOG_BURST_POLL_MS :
+							  watch->log_interval_ms,
+					queue_pressure));
+			last_was_led = false;
+		}
+	}
+
+	(void)flush_log_repeat_summary(&repeat, &log_sink);
+	free(previous_leds);
+	free_log_line_list(&previous_log);
+	free_log_repeat_state(&repeat);
+	return ret;
+}
+
+static int do_watch_command(const struct options *opts, int argc, char **argv,
+			    int command_index)
+{
+	struct watch_signal_state signals;
+	struct watch_options watch;
+	struct watch_display display;
+	struct options cmd_opts;
+	int ret;
+
+	if (parse_watch_args(argc, argv, command_index + 1, &watch))
+		return 2;
+	if (prepare_command_options(opts, &cmd_opts))
+		return 1;
+	if (watch_display_init(&display, &watch))
+		return 1;
+	watch_stop_requested = 0;
+	if (install_watch_signal_handlers(&signals)) {
+		watch_display_finish(&display);
+		return 1;
+	}
+
+	ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display);
+	restore_watch_signal_handlers(&signals);
+	watch_display_finish(&display);
+	return ret;
 }
 
 static bool debug_arg_is_option(const char *arg)
@@ -5418,7 +6677,7 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 				buffer_leds = false;
 			}
 		}
-		if (changed) {
+		if (changed && *text) {
 			if (buffer_leds) {
 				if (text_builder_append_text_block(&pending,
 								   text)) {
@@ -5431,6 +6690,8 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 				print_text_block(text);
 				fflush(stdout);
 			}
+		}
+		if (changed) {
 			free(previous);
 			previous = text;
 			text = NULL;
@@ -5446,6 +6707,8 @@ static int do_leds_command(const struct options *opts, int argc, char **argv,
 			   int command_index)
 {
 	struct leds_options leds;
+	char *text = NULL;
+	int ret;
 
 	if (parse_leds_args(argc, argv, command_index + 1, &leds))
 		return 2;
@@ -5453,7 +6716,18 @@ static int do_leds_command(const struct options *opts, int argc, char **argv,
 		return do_leds_follow(opts, leds.poll_interval_ms,
 				      LEDS_FOLLOW_CONFIRM_NONE);
 
-	return do_l1_command(opts, "leds", false);
+	ret = run_l1_command_core(opts, "leds", false, opts->force, false,
+				  false, opts->debug, &text);
+	if (ret) {
+		free(text);
+		return ret;
+	}
+	if (opts->debug)
+		print_leds_mapping_provenance(text);
+	else
+		print_leds_text_block(text);
+	free(text);
+	return 0;
 }
 
 static int parse_force_follow_args(int argc, char **argv, int command_index,
@@ -6125,6 +7399,8 @@ int main(int argc, char **argv)
 		return do_log_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "leds"))
 		return do_leds_command(&opts, argc, argv, command_index);
+	if (!strcmp(cmd, "watch"))
+		return do_watch_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "debug"))
 		return do_debug_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "power"))
