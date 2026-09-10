@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -5385,7 +5386,8 @@ struct watch_tui_rect {
 struct watch_display {
 	bool tui;
 	unsigned int queue_pressure;
-	uint64_t console_activity_until;
+	bool console_activity_seen;
+	uint64_t console_activity_last_seen;
 #ifdef SGIL1_WITH_TUI
 	struct watch_tui_state tui_state;
 #endif
@@ -5574,6 +5576,36 @@ static void watch_tui_draw_pane(const struct watch_tui_rect *rect,
 	delwin(window);
 }
 
+static void watch_tui_format_console_activity(
+	const struct watch_display *display, char *text, size_t text_size)
+{
+	uint64_t now;
+	uint64_t elapsed_seconds;
+
+	if (!display->console_activity_seen) {
+		snprintf(text, text_size, "Console last active: never");
+		return;
+	}
+
+	now = monotonic_milliseconds();
+	elapsed_seconds = now >= display->console_activity_last_seen ?
+		(now - display->console_activity_last_seen) / 1000U : 0;
+	if (!elapsed_seconds)
+		snprintf(text, text_size, "Console last active: now");
+	else if (elapsed_seconds < 60)
+		snprintf(text, text_size, "Console last active: %" PRIu64 "s ago",
+			 elapsed_seconds);
+	else if (elapsed_seconds < 60U * 60U)
+		snprintf(text, text_size, "Console last active: %" PRIu64 "m ago",
+			 elapsed_seconds / 60U);
+	else if (elapsed_seconds < 24U * 60U * 60U)
+		snprintf(text, text_size, "Console last active: %" PRIu64 "h ago",
+			 elapsed_seconds / (60U * 60U));
+	else
+		snprintf(text, text_size, "Console last active: %" PRIu64 "d ago",
+			 elapsed_seconds / (24U * 60U * 60U));
+}
+
 static void watch_tui_render(struct watch_display *display)
 {
 	struct watch_tui_state *state = &display->tui_state;
@@ -5581,8 +5613,9 @@ static void watch_tui_render(struct watch_display *display)
 	struct watch_tui_rect led_rect;
 	char header[256];
 	char footer[320];
-	bool activity = monotonic_milliseconds() <
-			display->console_activity_until;
+	char activity[64];
+	int activity_x;
+	int footer_width;
 
 	if (!state->initialized)
 		return;
@@ -5597,9 +5630,8 @@ static void watch_tui_render(struct watch_display *display)
 	watch_tui_layout(&log_rect, &led_rect);
 	erase();
 	snprintf(header, sizeof(header),
-		 " sgil1ctl watch | queue pressure %u/%u%s",
-		 display->queue_pressure, SGIL1_QUEUE_PRESSURE_MAX,
-		 activity ? " | console input activity" : "");
+		 " sgil1ctl watch | queue pressure %u/%u",
+		 display->queue_pressure, SGIL1_QUEUE_PRESSURE_MAX);
 	attron(A_REVERSE | A_BOLD);
 	mvhline(0, 0, ' ', COLS);
 	mvaddnstr(0, 0, header, COLS);
@@ -5616,9 +5648,16 @@ static void watch_tui_render(struct watch_display *display)
 		 state->status[0] ? state->status : "Monitoring L1",
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
+	watch_tui_format_console_activity(display, activity, sizeof(activity));
+	activity_x = COLS - (int)strlen(activity) - 1;
+	if (activity_x < 0)
+		activity_x = 0;
+	footer_width = activity_x > 1 ? activity_x - 1 : 0;
 	attron(A_REVERSE);
 	mvhline(LINES - 1, 0, ' ', COLS);
-	mvaddnstr(LINES - 1, 0, footer, COLS);
+	if (footer_width)
+		mvaddnstr(LINES - 1, 0, footer, footer_width);
+	mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
 	doupdate();
@@ -5803,9 +5842,10 @@ static void watch_display_leds(struct watch_display *display, const char *text,
 {
 	const char *line = text;
 
-	if (console_activity)
-		display->console_activity_until = milliseconds_after(
-			monotonic_milliseconds(), 750);
+	if (console_activity) {
+		display->console_activity_seen = true;
+		display->console_activity_last_seen = monotonic_milliseconds();
+	}
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
 		if (changed && watch_tui_set_leds(&display->tui_state, text)) {

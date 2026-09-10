@@ -73,8 +73,8 @@ For each mode, verify `q`, `Tab`, Up/Down, Page Up/Page Down, and `End`. Resize
 the terminal above and below 100 columns: wide mode should place LEDs to the
 right of the larger log pane, while narrow mode should place the smaller LED
 pane above the log. If a harmless PROM-console character can be entered from an
-existing console, the header should briefly show console input activity without
-adding `0x7f` or `0xff` to the LED pane.
+existing console, the bottom-right `Console last active` age should reset
+without adding `0x7f` or `0xff` to the LED pane.
 
 ## Transport Recovery
 

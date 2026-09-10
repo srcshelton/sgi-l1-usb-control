@@ -240,7 +240,8 @@ found in the IP35 PROM and L1 1.48.1 firmware tables are added where the Fuel
 manual has no definition. High-level LED output suppresses the transient
 `0x7f` input-wait and `0xff` console-character-read markers. They remain
 visible in raw `sgil1ctl l1cmd leds` output and IRouter diagnostics under
-`--debug`; the TUI represents either value as recent console input activity.
+`--debug`; the TUI records either value and shows the elapsed time since the
+console was last active in the bottom-right corner.
 
 `power up --follow`,
 `power down --force --follow`, `power reset --force --follow`,
