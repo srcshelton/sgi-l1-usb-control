@@ -3,6 +3,7 @@
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -164,7 +165,20 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("leds [-w|--follow]", proc.stdout)
         self.assertIn("watch [OPTIONS]", proc.stdout)
         self.assertIn("debug [OPTIONS]", proc.stdout)
+        self.assertIn("--version", proc.stdout)
         self.assertIn("sgil1ctl COMMAND --help", proc.stdout)
+
+    def test_tool_version_is_reported_without_l1_access(self):
+        proc, commands = self.run_with_log(["--version"])
+        version = subprocess.check_output(
+            ["sh", str(ROOT / "scripts" / "package-version.sh"),
+             str(ROOT / "debian" / "changelog")],
+            text=True,
+        ).strip()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, f"sgil1ctl {version}\n")
+        self.assertEqual(commands, "")
 
     def test_command_specific_help_documents_wait_options(self):
         proc = self.run_ctl(["wait", "--help"])
@@ -215,6 +229,8 @@ class Sgil1CtlMockTests(unittest.TestCase):
                     "--no-alternate-screen",
                     "--log-interval MS",
                     "--led-interval MS",
+                    "--log-history ENTRIES",
+                    "--led-history ENTRIES",
                     "--no-repeat-summary",
                 ],
             ),
@@ -322,6 +338,21 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("05/27/2026 12:38:00 L1 booted", proc.stdout)
         self.assertIn("CMD log", log)
+
+    def test_led_alias_matches_leds_command(self):
+        proc, log = self.run_with_log(["led"])
+        canonical = self.run_ctl(["leds"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, canonical.stdout)
+        self.assertIn("CMD leds", log)
+
+    def test_hidden_led_alias_uses_canonical_help(self):
+        proc = self.run_ctl(["led", "--help"])
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Usage: sgil1ctl [GLOBAL OPTIONS] leds [OPTIONS]", proc.stdout)
+        self.assertNotIn("alias", proc.stdout.lower())
 
     def test_debug_shows_virtual_switch_decode_and_l1dbg_state(self):
         proc, log = self.run_with_log(
@@ -483,7 +514,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         proc = self.run_ctl(["leds"], {"SGIL1_MOCK_LEDS_EXTENDED": "1"})
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("CPU  A: 0xFE: raw PROM value (no L1 mapping)", proc.stdout)
+        self.assertNotIn("0xFE: raw PROM value", proc.stdout)
         self.assertIn("0x10: Unused (PLED_INITDCACHE)", proc.stdout)
         self.assertIn("0x49: Unused (PLED_UARTBASE)", proc.stdout)
         self.assertIn("0xB1: NASID/module ID arbitration failure", proc.stdout)
@@ -541,7 +572,9 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("[log] 05/27/2026 12:38:00 L1 booted", stdout)
         self.assertIn("USB_WQUE Q full", stdout)
         self.assertIn("voltage nominal", stdout)
+        self.assertIn("message repeated 1 time: voltage nominal", stdout)
         self.assertNotIn("0x7f", stdout.lower())
+        self.assertNotIn("0xfe", stdout.lower())
         self.assertNotIn("0xff", stdout.lower())
         self.assertIn("queue pressure level 1", stderr)
         self.assertIn("CMD leds", commands)
@@ -558,6 +591,29 @@ class Sgil1CtlMockTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--no-alternate-screen requires --tui", proc.stderr)
+
+    def test_watch_history_options_require_tui(self):
+        for option in ("--log-history", "--led-history"):
+            with self.subTest(option=option):
+                proc = self.run_ctl(["watch", option, "17"])
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("apply only with --tui", proc.stderr)
+
+    def test_watch_history_options_validate_entry_counts(self):
+        for option in ("--log-history", "--led-history"):
+            with self.subTest(option=option):
+                proc = self.run_ctl(["watch", "--tui", option, "0"])
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(f"invalid {option} value", proc.stderr)
+
+                proc = self.run_ctl(
+                    ["watch", "--tui", option, "1000001"]
+                )
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("expected 1..1000000 entries", proc.stderr)
 
     def test_watch_uses_bounded_incremental_transport_backoff(self):
         stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
@@ -580,6 +636,45 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("L1 transport recovered", stderr)
         self.assertIn("[led] CPU  A: 0x55: Global master in PROM", stdout)
         self.assertGreaterEqual(commands.count("CMD leds"), 3)
+
+    def test_watch_interrupt_cancels_inflight_read_without_pipe_reset(self):
+        env = os.environ.copy()
+        env.update(
+            {
+                "LD_PRELOAD": str(MOCK),
+                "SGIL1_MOCK": "1",
+                "SGIL1_MOCK_FAIL_COMMANDS": "100",
+                "SGIL1_MOCK_REAL_POLL_WAIT": "1",
+                "TZ": "Europe/London",
+            }
+        )
+        proc = subprocess.Popen(
+            [
+                str(BIN),
+                "--device",
+                "/dev/sgi-l1/l1-0",
+                "--status-device",
+                "/dev/sgi-l1/status",
+                "--timeout",
+                "3000",
+                "watch",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.2)
+        started = time.monotonic()
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=2)
+
+        self.assertLess(time.monotonic() - started, 0.75)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertNotIn("timed out waiting", stderr)
+        self.assertNotIn("reset-pipes", stderr)
+        self.assertEqual(stdout, "")
 
     def test_l1cmd_leds_preserves_firmware_output(self):
         proc = self.run_ctl(
@@ -918,8 +1013,78 @@ class Sgil1CtlMockTests(unittest.TestCase):
         proc, log = self.run_with_log(["--force", "l1cmd", long_command])
 
         self.assertEqual(proc.returncode, 2)
-        self.assertIn("maximum safe L1 USB command text is 72 bytes", proc.stderr)
+        self.assertIn(
+            "maximum qualified direct-USB command text is 72 bytes",
+            proc.stderr,
+        )
+        self.assertIn("CMD version", log)
         self.assertNotIn("CMD " + long_command, log)
+
+    def test_l1_command_length_guard_uses_extended_fuel_limit(self):
+        version_env = {
+            "SGIL1_MOCK_VERSION_RESPONSE": (
+                "L1 1.48.1 (Image B), Built 01/22/2007 11:34:20    "
+                "[Fuel/PE/O300 1MB image]\n"
+            )
+        }
+        maximum_command = "A" * 279
+        proc, log = self.run_with_log(
+            ["--force", "l1cmd", maximum_command], version_env
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("refusing L1 command text", proc.stderr)
+        self.assertIn("CMD version", log)
+        self.assertIn("CMD " + maximum_command, log)
+
+        oversized_command = "A" * 280
+        proc, log = self.run_with_log(
+            ["--force", "l1cmd", oversized_command], version_env
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(
+            "maximum supported direct-USB command text is 279 bytes",
+            proc.stderr,
+        )
+        self.assertNotIn("CMD " + oversized_command, log)
+
+    def test_l1_command_length_guard_keeps_non_fuel_firmware_conservative(self):
+        long_command = "A" * 73
+        proc, log = self.run_with_log(
+            ["--force", "l1cmd", long_command],
+            {
+                "SGIL1_MOCK_VERSION_RESPONSE": (
+                    "L1 1.48.1 (Image B), Built 01/22/2007 11:34:20    "
+                    "[C-brick 2MB image]\n"
+                )
+            },
+        )
+
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn(
+            "maximum qualified direct-USB command text is 72 bytes",
+            proc.stderr,
+        )
+        self.assertNotIn("CMD " + long_command, log)
+
+    def test_l1_command_extended_limit_starts_at_qualified_version(self):
+        long_command = "A" * 73
+
+        for version, should_send in [("1.26.4", False), ("1.26.5", True)]:
+            with self.subTest(version=version):
+                proc, log = self.run_with_log(
+                    ["--force", "l1cmd", long_command],
+                    {
+                        "SGIL1_MOCK_VERSION_RESPONSE": (
+                            f"L1 {version} (Image B), Built 01/01/2004 "
+                            "00:00:00    [Fuel/PE/O300 1MB image]\n"
+                        )
+                    },
+                )
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertEqual("CMD " + long_command in log, should_send)
 
     def test_timeout_parser_rejects_bad_values(self):
         bad_text = subprocess.run(

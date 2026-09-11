@@ -23,7 +23,14 @@ optional TUI configuration locally:
 ```sh
 make -C tools clean
 make -C tools WITH_TUI=1
+make -C tests mock_l1.so
+python3 tests/tui_smoke.py
 ```
+
+The smoke test runs the TUI in a 120x24 pseudo-terminal, forces small log and
+LED histories to wrap, checks filtered/All views, timestamp and help toggles,
+colour/monochrome switching, sends `q` during monitoring, and verifies clean
+primary-screen teardown.
 
 Run the normal suite and then build Debian packages:
 

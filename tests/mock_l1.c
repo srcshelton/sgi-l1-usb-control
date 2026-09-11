@@ -188,6 +188,16 @@ static bool is_data_path(const char *path)
 	       !strcmp(path, usb);
 }
 
+static bool is_data_candidate_path(const char *path)
+{
+	unsigned int index;
+	char trailing;
+
+	return sscanf(path, "/dev/sgi-l1/l1-%u%c", &index, &trailing) == 1 ||
+	       sscanf(path, "/dev/sgil1_%u%c", &index, &trailing) == 1 ||
+	       sscanf(path, "/dev/usb/sgil1_%u%c", &index, &trailing) == 1;
+}
+
 static bool is_status_path(const char *path)
 {
 	return !strcmp(path, "/dev/sgi-l1/status") ||
@@ -329,10 +339,16 @@ static const char *mock_log_response(void)
 		if (mock_log_call_count == 2)
 			return "05/27/2026 12:38:00 L1 booted\n"
 			       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n";
+		if (mock_log_call_count == 3)
+			return "05/27/2026 12:38:00 L1 booted\n"
+			       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n"
+			       "05/27/2026 12:38:02 USB_WQUE Q avail - lost: 0/0/20 repl: 0 (BROAD)\n"
+			       "05/27/2026 12:38:03 voltage nominal\n";
 		return "05/27/2026 12:38:00 L1 booted\n"
 		       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n"
 		       "05/27/2026 12:38:02 USB_WQUE Q avail - lost: 0/0/20 repl: 0 (BROAD)\n"
-		       "05/27/2026 12:38:03 voltage nominal\n";
+		       "05/27/2026 12:38:03 voltage nominal\n"
+		       "05/27/2026 12:38:04 voltage nominal\n";
 	}
 
 	if (!getenv("SGIL1_MOCK_LOG_FOLLOW"))
@@ -434,8 +450,13 @@ static const char *known_response_for_command(const char *cmd)
 		return "ERROR: command not found.\n";
 	if (!strcmp(cmd, "date help"))
 		return "ERROR: command not found.\n";
-	if (!strcmp(cmd, "version") || !strcmp(cmd, "ver"))
+	if (!strcmp(cmd, "version") || !strcmp(cmd, "ver")) {
+		const char *response = getenv("SGIL1_MOCK_VERSION_RESPONSE");
+
+		if (response)
+			return response;
 		return "L1 1.24.11 (Image B), Built 10/29/2003 00:05:26    [Fuel/PE 1MB image]\n";
+	}
 	if (!strcmp(cmd, "bedrock"))
 		return "L1 <-> system protocol is PPP\n"
 		       "system event subchannel 23\n";
@@ -463,8 +484,10 @@ static const char *known_response_for_command(const char *cmd)
 			if (mock_leds_call_count++ == 0)
 				return "CPU  A: 0xff: Console poll found data for reading\n"
 				       "        0x7f: unknown LED status.\n"
+				       "        0xfe: (no description available)\n"
 				       "        0x55: unknown LED status.\n";
-			return "CPU  A: 0x70: unknown LED status.\n";
+			return "CPU  A: 0xfe: (no description available)\n"
+			       "        0x70: unknown LED status.\n";
 		}
 		if (getenv("SGIL1_MOCK_LEDS_FOLLOW")) {
 			if (mock_leds_call_count++ == 0)
@@ -686,6 +709,10 @@ int open(const char *pathname, int flags, ...)
 	mock_fd = open_mock_path(pathname);
 	if (mock_fd >= 0)
 		return mock_fd;
+	if (getenv("SGIL1_MOCK") && is_data_candidate_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
 
 	return real_open_fn(pathname, flags, mode);
 }
@@ -707,6 +734,10 @@ int open64(const char *pathname, int flags, ...)
 	mock_fd = open_mock_path(pathname);
 	if (mock_fd >= 0)
 		return mock_fd;
+	if (getenv("SGIL1_MOCK") && is_data_candidate_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
 
 	if (real_open64_fn)
 		return real_open64_fn(pathname, flags, mode);
@@ -721,6 +752,10 @@ int __open_2(const char *pathname, int flags)
 	mock_fd = open_mock_path(pathname);
 	if (mock_fd >= 0)
 		return mock_fd;
+	if (getenv("SGIL1_MOCK") && is_data_candidate_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
 
 	return real_open_fn(pathname, flags);
 }
@@ -814,8 +849,15 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout)
 		}
 	}
 
-	if (saw_mock)
+	if (saw_mock) {
+		if (!ready && timeout > 0 && getenv("SGIL1_MOCK_REAL_POLL_WAIT")) {
+			int ret = real_poll_fn(NULL, 0, timeout);
+
+			if (ret < 0)
+				return ret;
+		}
 		return ready;
+	}
 
 	return real_poll_fn(fds, nfds, timeout);
 }
@@ -918,6 +960,8 @@ int stat(const char *pathname, struct stat *st)
 		return 0;
 	if (errno != ENOENT)
 		return -1;
+	if (getenv("SGIL1_MOCK") && is_data_candidate_path(pathname))
+		return -1;
 	return real_stat_fn(pathname, st);
 }
 
@@ -927,6 +971,8 @@ int lstat(const char *pathname, struct stat *st)
 	if (stat_mock_path(pathname, st) == 0)
 		return 0;
 	if (errno != ENOENT)
+		return -1;
+	if (getenv("SGIL1_MOCK") && is_data_candidate_path(pathname))
 		return -1;
 	return real_lstat_fn(pathname, st);
 }

@@ -54,12 +54,16 @@ jobs:
         run: |
           make -C tools clean
           make -C tools
+          expected="sgil1ctl $(make --no-print-directory -s print-version)"
+          test "$(tools/sgil1ctl --version)" = "$expected"
           if ldd tools/sgil1ctl | grep -Fq libncurses; then
             echo "minimal sgil1ctl unexpectedly links ncurses" >&2
             exit 1
           fi
           make -C tools WITH_TUI=1
+          test "$(tools/sgil1ctl --version)" = "$expected"
           ldd tools/sgil1ctl | grep -Fq libncurses
+          python3 tests/tui_smoke.py
           make -C tools clean
           make -C tools
 

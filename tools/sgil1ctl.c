@@ -32,6 +32,10 @@
 
 #include "sgi_l1_ioctl.h"
 
+#ifndef SGIL1CTL_VERSION
+#define SGIL1CTL_VERSION "unknown"
+#endif
+
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define SGIL1_REV_LEN 64
 #define SGIL1_IO_SIZE 4096
@@ -46,10 +50,12 @@
 #define SGIL1_IR_ARG_BASE 0x10U
 #define SGIL1_IR_HEADER_LEN 20U
 #define SGIL1_IR_ARG_LEN 8U
-#define SGIL1_L1_MAX_COMMAND_TEXT 72U
-#define SGIL1_L1_MAX_COMMAND_TRANSFER \
+#define SGIL1_L1_LEGACY_MAX_COMMAND_TEXT 72U
+#define SGIL1_L1_EXTENDED_MAX_COMMAND_TEXT 279U
+#define SGIL1_L1_MAX_COMMAND_TEXT SGIL1_L1_EXTENDED_MAX_COMMAND_TEXT
+#define SGIL1_L1_COMMAND_TRANSFER(text_len) \
 	(SGIL1_IR_HEADER_LEN + (2U * SGIL1_IR_ARG_LEN) + \
-	 SGIL1_L1_MAX_COMMAND_TEXT + 1U)
+	 (text_len) + 1U)
 #define SGIL1_IR_MAX_FRAMES 32U
 #define SGIL1_DRAIN_MAX_FRAMES 256U
 #define SGIL1_RESPONSE_SCAN_MAX_FRAMES 256U
@@ -87,8 +93,20 @@
 #define SGIL1_WATCH_FAILURE_BACKOFF_MAX_MS 2000
 #define SGIL1_QUEUE_PRESSURE_MAX 4
 #define SGIL1_QUEUE_PRESSURE_DECAY_MS 10000
+#define SGIL1_TUI_LOG_HISTORY_DEFAULT 4096
+#define SGIL1_TUI_LED_HISTORY_DEFAULT 512
+#define SGIL1_TUI_HISTORY_MAX 1000000
+#define SGIL1_TUI_LED_CONTENT_MAX 127
+#define SGIL1_TUI_LOG_CONTINUATION_INDENT 18
+#define SGIL1_TUI_LED_CONTINUATION_INDENT 14
+#define SGIL1_TUI_TIMESTAMP_SIZE 24
+#define SGIL1_READ_CANCELLED -2
 
 static int sgil1_lock_fd = -1;
+static volatile sig_atomic_t watch_stop_requested;
+static bool l1_wait_cancel_enabled;
+static bool (*l1_wait_input_hook)(void *context);
+static void *l1_wait_input_context;
 
 static const char *data_candidate_patterns[] = {
 	"/dev/sgi-l1/l1-%u",
@@ -126,6 +144,13 @@ struct status_options {
 	int drift_seconds;
 };
 
+struct l1_firmware_version {
+	unsigned int major;
+	unsigned int minor;
+	unsigned int patch;
+	bool fuel_family;
+};
+
 struct wait_options {
 	struct status_options status;
 	bool power_up;
@@ -155,6 +180,8 @@ struct watch_options {
 	bool repeat_summary;
 	int log_interval_ms;
 	int led_interval_ms;
+	size_t log_history;
+	size_t led_history;
 };
 
 struct debug_options {
@@ -223,6 +250,7 @@ static void usage(FILE *out, bool full)
 			"  --timeout MS          poll timeout for reads (default 3000)\n"
 			"  --force               confirm guarded actions or unlisted pass-through\n"
 			"  --debug               show IRouter framing diagnostics\n"
+			"  --version             show the installed sgil1ctl version\n"
 			"  -h, --help            show this help\n"
 			"  --help-all            show all commands and low-level options\n"
 			"                        global options are parsed before COMMAND\n"
@@ -294,7 +322,9 @@ static void usage(FILE *out, bool full)
 		"Pass-through notes:\n"
 		"  l1cmd '*' <command>   SGI broadcast-prefix form; quote '*'\n"
 		"                        to avoid shell expansion\n"
-		"                        L1 text commands are limited to 72 bytes on direct USB\n");
+		"                        direct USB text is limited to 72 bytes on\n"
+		"                        legacy or unknown firmware, and 279 bytes on\n"
+		"                        qualified Fuel 1.26.5 or newer firmware\n");
 }
 
 static void command_usage_footer(FILE *out)
@@ -375,7 +405,7 @@ static bool command_usage(FILE *out, const char *cmd)
 		command_usage_footer(out);
 		return true;
 	}
-	if (!strcmp(cmd, "leds")) {
+	if (!strcmp(cmd, "leds") || !strcmp(cmd, "led")) {
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] leds [OPTIONS]\n"
 			"\n"
@@ -401,7 +431,17 @@ static bool command_usage(FILE *out, const char *cmd)
 			"                        default 1000\n"
 			"  --led-interval MS     active LED polling interval; minimum 100,\n"
 			"                        default 100\n"
-			"  --no-repeat-summary   print repeated log messages individually\n");
+			"  --log-history ENTRIES retained TUI log messages; default 4096\n"
+			"  --led-history ENTRIES retained TUI LED responses; default 512\n"
+			"  --no-repeat-summary   print repeated log messages individually\n"
+			"\n"
+			"TUI keys:\n"
+			"  Tab                   select log or LED pane\n"
+			"  Up/Down, PgUp/PgDn    scroll selected pane; End returns to live\n"
+			"  a                     toggle Filtered and All observations\n"
+			"  t                     show or hide LED timestamps\n"
+			"  c, m                  cycle colour palettes or use monochrome\n"
+			"  h, q                  show the key guide or quit\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -497,7 +537,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"\n"
 			"Notes:\n"
 			"  Quote '*' to use SGI's broadcast-prefix form.\n"
-			"  Direct USB L1 text commands are limited to 72 bytes.\n"
+			"  Direct USB text is limited to 72 bytes on legacy or unknown\n"
+			"  firmware and 279 bytes on qualified Fuel 1.26.5 or newer.\n"
 			"  Use 'l1cmd help' to ask the L1 for its own command list.\n");
 		command_usage_footer(out);
 		return true;
@@ -511,7 +552,11 @@ static bool command_usage(FILE *out, const char *cmd)
 			"\n"
 			"Options:\n"
 			"  --force, --yes        build unlisted commands, or confirm guarded\n"
-			"                        power/reset command frames\n");
+			"                        power/reset command frames\n"
+			"\n"
+			"Notes:\n"
+			"  Frames with up to 279 bytes of command text can be built.\n"
+			"  Confirm the target firmware limit before sending one manually.\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -1005,6 +1050,33 @@ static bool l1_command_is_destructive(const char *cmd)
 	       l1_command_matches_prefix(cmd, "softrst");
 }
 
+static bool parse_l1_firmware_version(const char *text,
+				      struct l1_firmware_version *version)
+{
+	const char *p = text;
+
+	while ((p = strstr(p, "L1 ")) != NULL) {
+		if (sscanf(p, "L1 %u.%u.%u", &version->major,
+			   &version->minor, &version->patch) == 3) {
+			version->fuel_family = contains_ci(text, "Fuel/PE");
+			return true;
+		}
+		p += 3;
+	}
+
+	return false;
+}
+
+static bool l1_firmware_supports_extended_commands(
+	const struct l1_firmware_version *version)
+{
+	if (!version->fuel_family || version->major != 1)
+		return false;
+	if (version->minor > 26)
+		return true;
+	return version->minor == 26 && version->patch >= 5;
+}
+
 static int validate_l1_command_text_len(const char *cmd)
 {
 	size_t text_len = strlen(cmd);
@@ -1013,9 +1085,47 @@ static int validate_l1_command_text_len(const char *cmd)
 		return 0;
 
 	fprintf(stderr,
-		"refusing L1 command text of %zu bytes; maximum safe L1 USB command text is %u bytes (%u-byte IRouter transfer)\n",
+		"refusing L1 command text of %zu bytes; maximum supported direct-USB command text is %u bytes (%u-byte IRouter transfer)\n",
 		text_len, SGIL1_L1_MAX_COMMAND_TEXT,
-		SGIL1_L1_MAX_COMMAND_TRANSFER);
+		SGIL1_L1_COMMAND_TRANSFER(SGIL1_L1_MAX_COMMAND_TEXT));
+	return -1;
+}
+
+static int validate_live_l1_command_text_len(const struct options *opts,
+					     const char *cmd)
+{
+	struct l1_firmware_version version = { 0 };
+	char *version_text = NULL;
+	size_t text_len = strlen(cmd);
+	unsigned int max_text = SGIL1_L1_LEGACY_MAX_COMMAND_TEXT;
+	int ret;
+
+	if (text_len <= SGIL1_L1_LEGACY_MAX_COMMAND_TEXT)
+		return 0;
+	if (validate_l1_command_text_len(cmd))
+		return -1;
+
+	ret = l1_text_command_status(opts, "version", false, &version_text);
+	if (ret || !version_text ||
+	    !parse_l1_firmware_version(version_text, &version)) {
+		fprintf(stderr,
+			"could not qualify the live L1 firmware command limit; refusing %zu-byte command above the conservative %u-byte limit\n",
+			text_len, SGIL1_L1_LEGACY_MAX_COMMAND_TEXT);
+		free(version_text);
+		return -1;
+	}
+
+	if (l1_firmware_supports_extended_commands(&version))
+		max_text = SGIL1_L1_EXTENDED_MAX_COMMAND_TEXT;
+	free(version_text);
+
+	if (text_len <= max_text)
+		return 0;
+
+	fprintf(stderr,
+		"refusing L1 command text of %zu bytes for L1 %u.%u.%u; maximum qualified direct-USB command text is %u bytes (%u-byte IRouter transfer)\n",
+		text_len, version.major, version.minor, version.patch, max_text,
+		SGIL1_L1_COMMAND_TRANSFER(max_text));
 	return -1;
 }
 
@@ -1719,27 +1829,75 @@ static bool irouter_frame_matches_command_response(const uint8_t *buf,
 	return true;
 }
 
+static bool l1_wait_cancel_requested(void)
+{
+	if (!l1_wait_cancel_enabled)
+		return false;
+	if (watch_stop_requested)
+		return true;
+	return l1_wait_input_hook &&
+	       l1_wait_input_hook(l1_wait_input_context);
+}
+
+static int poll_l1_fd(int fd, short events, int timeout_ms, short *revents)
+{
+	int remaining = timeout_ms;
+
+	for (;;) {
+		struct pollfd pfd = {
+			.fd = fd,
+			.events = events,
+		};
+		int poll_timeout = remaining;
+		int ret;
+
+		if (l1_wait_cancel_requested())
+			return SGIL1_READ_CANCELLED;
+		if (l1_wait_cancel_enabled &&
+		    (poll_timeout < 0 || poll_timeout > 100))
+			poll_timeout = 100;
+
+		ret = poll(&pfd, 1, poll_timeout);
+		if (ret > 0) {
+			*revents = pfd.revents;
+			return ret;
+		}
+		if (ret < 0) {
+			if (errno == EINTR) {
+				if (l1_wait_cancel_requested())
+					return SGIL1_READ_CANCELLED;
+				continue;
+			}
+			return ret;
+		}
+		if (l1_wait_cancel_requested())
+			return SGIL1_READ_CANCELLED;
+		if (timeout_ms < 0)
+			continue;
+		remaining -= poll_timeout;
+		if (remaining <= 0)
+			return 0;
+	}
+}
+
 static int read_raw_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 				  size_t cap, size_t *out_len)
 {
 	for (;;) {
-		struct pollfd pfd = {
-			.fd = fd,
-			.events = POLLIN | POLLHUP,
-		};
+		short revents = 0;
 		int ret;
 		ssize_t n;
 
-		ret = poll(&pfd, 1, timeout_ms);
+		ret = poll_l1_fd(fd, POLLIN | POLLHUP, timeout_ms, &revents);
+		if (ret == SGIL1_READ_CANCELLED)
+			return ret;
 		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
 			fprintf(stderr, "poll failed: %s\n", strerror(errno));
 			return -1;
 		}
 		if (ret == 0)
 			return 0;
-		if (pfd.revents & POLLHUP) {
+		if (revents & POLLHUP) {
 			fprintf(stderr, "device disconnected\n");
 			return -1;
 		}
@@ -1823,6 +1981,8 @@ static int discover_l1_command_dest_fd(const struct options *opts, int fd,
 
 			ret = read_raw_irouter_frame(fd, timeout, rx, sizeof(rx),
 						     &rx_len);
+			if (ret == SGIL1_READ_CANCELLED)
+				return ret;
 			if (ret < 0) {
 				recover_l1_pipes_fd(fd,
 						    "L1 discovery read failure");
@@ -1880,10 +2040,7 @@ static int read_pipe_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 	bool started = false;
 
 	for (;;) {
-		struct pollfd pfd = {
-			.fd = fd,
-			.events = POLLIN | POLLHUP,
-		};
+		short revents = 0;
 		int poll_timeout = started && timeout_ms >= 0 ? 500 : timeout_ms;
 		uint16_t type;
 		uint16_t total_len;
@@ -1891,10 +2048,11 @@ static int read_pipe_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 		int ret;
 		ssize_t n;
 
-		ret = poll(&pfd, 1, poll_timeout);
+		ret = poll_l1_fd(fd, POLLIN | POLLHUP, poll_timeout,
+				 &revents);
+		if (ret == SGIL1_READ_CANCELLED)
+			return ret;
 		if (ret < 0) {
-			if (errno == EINTR)
-				continue;
 			fprintf(stderr, "poll failed: %s\n", strerror(errno));
 			return -1;
 		}
@@ -1904,7 +2062,7 @@ static int read_pipe_irouter_frame(int fd, int timeout_ms, uint8_t *buf,
 					"timed out waiting for pipe continuation\n");
 			return started ? -1 : 0;
 		}
-		if (pfd.revents & POLLHUP) {
+		if (revents & POLLHUP) {
 			fprintf(stderr, "device disconnected\n");
 			return -1;
 		}
@@ -2083,7 +2241,7 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 			l1cmd);
 		return 2;
 	}
-	if (validate_l1_command_text_len(l1cmd))
+	if (validate_live_l1_command_text_len(opts, l1cmd))
 		return 2;
 
 	fd = open_data_device(opts, O_RDWR | O_NONBLOCK);
@@ -2151,6 +2309,8 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 		else
 			ret = read_raw_irouter_frame(fd, timeout, rx,
 						     sizeof(rx), &rx_len);
+		if (ret == SGIL1_READ_CANCELLED)
+			goto out;
 		if (ret < 0) {
 			recover_l1_pipes_fd(fd, "L1 response read failure");
 			ret = 1;
@@ -2719,7 +2879,6 @@ static int do_l1_pass_through_command(const struct options *opts,
 		free(command_word);
 		return 2;
 	}
-
 	if (!force && !streq_ci(l1cmd, "help")) {
 		help_ret = l1_text_command_status(opts, "help", false,
 						  &help_text);
@@ -4139,6 +4298,11 @@ static bool leds_code_is_console_activity(unsigned int code)
 	return code == 0x7f || code == 0xff;
 }
 
+static bool leds_code_is_filtered(unsigned int code)
+{
+	return leds_code_is_console_activity(code) || code == 0xfe;
+}
+
 static int hex_digit_value(char c)
 {
 	if (c >= '0' && c <= '9')
@@ -4226,7 +4390,7 @@ static int text_builder_append_decoded_leds_line(struct text_builder *builder,
 	return text_builder_append(builder, decoded, (size_t)decoded_len);
 }
 
-static char *decode_leds_text(const char *text)
+static char *decode_leds_text(const char *text, bool include_filtered_codes)
 {
 	struct text_builder builder = { 0 };
 	const char *line = text ? text : "";
@@ -4246,7 +4410,8 @@ static char *decode_leds_text(const char *text)
 				  leds_line_has_cpu_prefix(line, code_start);
 
 		(void)code_end;
-		if (have_code && leds_code_is_console_activity(code)) {
+		if (have_code && !include_filtered_codes &&
+		    leds_code_is_filtered(code)) {
 			if (cpu_prefix) {
 				char *replacement = strndup(line,
 							(size_t)(code_start - line));
@@ -4361,7 +4526,7 @@ provenance_next:
 
 static void print_leds_text_block(const char *text)
 {
-	char *decoded = decode_leds_text(text);
+	char *decoded = decode_leds_text(text, false);
 
 	if (decoded && !*decoded)
 		printf("No diagnostic LED status available.\n");
@@ -5353,26 +5518,52 @@ static int do_log_command(const struct options *opts, int argc, char **argv,
 	return do_l1_command(opts, "log", false);
 }
 
-static volatile sig_atomic_t watch_stop_requested;
-
 #ifdef SGIL1_WITH_TUI
-#define SGIL1_TUI_LOG_HISTORY 4096
-
 enum watch_tui_focus {
 	WATCH_TUI_FOCUS_LOG,
 	WATCH_TUI_FOCUS_LEDS,
 };
 
+struct watch_tui_line_history {
+	char **lines;
+	size_t capacity;
+	size_t start;
+	size_t count;
+};
+
+struct watch_tui_led_snapshot {
+	struct log_line_list all_lines;
+	struct log_line_list filtered_lines;
+	char (*timestamps)[SGIL1_TUI_TIMESTAMP_SIZE];
+	size_t timestamp_capacity;
+	size_t timestamp_start;
+	size_t timestamp_count;
+};
+
+struct watch_tui_led_history {
+	struct watch_tui_led_snapshot *snapshots;
+	size_t capacity;
+	size_t start;
+	size_t run_count;
+	size_t response_count;
+};
+
 struct watch_tui_state {
-	char **log_lines;
-	size_t log_count;
-	struct log_line_list led_lines;
+	struct watch_tui_line_history raw_log_history;
+	struct watch_tui_line_history log_history;
+	struct watch_tui_led_history led_history;
 	size_t log_scroll;
 	size_t led_scroll;
 	enum watch_tui_focus focus;
 	char status[256];
+	bool color_capable;
+	bool all_mode;
+	bool show_led_timestamps;
+	bool help_visible;
 	bool alternate_screen;
 	bool initialized;
+	int color_theme;
+	int last_color_theme;
 };
 
 struct watch_tui_rect {
@@ -5381,6 +5572,36 @@ struct watch_tui_rect {
 	int height;
 	int width;
 };
+
+enum watch_tui_color_pair {
+	WATCH_TUI_COLOR_ACCENT = 1,
+	WATCH_TUI_COLOR_WARNING,
+};
+
+enum watch_tui_color_theme {
+	WATCH_TUI_THEME_DARK,
+	WATCH_TUI_THEME_LIGHT,
+	WATCH_TUI_THEME_MONOCHROME,
+};
+
+enum watch_tui_line_style {
+	WATCH_TUI_LINE_NORMAL,
+	WATCH_TUI_LINE_TIMESTAMP,
+};
+
+struct watch_tui_content {
+	const void *context;
+	size_t line_count;
+	const char *(*line_at)(const void *context, size_t index,
+			       enum watch_tui_line_style *style);
+	int continuation_indent;
+};
+
+static bool watch_tui_colors_enabled(const struct watch_tui_state *state)
+{
+	return state->color_capable &&
+	       state->color_theme != WATCH_TUI_THEME_MONOCHROME;
+}
 #endif
 
 struct watch_display {
@@ -5505,7 +5726,12 @@ static void watch_tui_layout(struct watch_tui_rect *log_rect,
 	int content_height = LINES - 2;
 
 	if (COLS >= 100) {
-		int log_width = (COLS * 2) / 3;
+		int led_width = COLS / 3;
+		int log_width;
+
+		if (led_width > SGIL1_TUI_LED_CONTENT_MAX + 2)
+			led_width = SGIL1_TUI_LED_CONTENT_MAX + 2;
+		log_width = COLS - led_width;
 
 		*log_rect = (struct watch_tui_rect) {
 			.y = 1,
@@ -5517,7 +5743,7 @@ static void watch_tui_layout(struct watch_tui_rect *log_rect,
 			.y = 1,
 			.x = log_width,
 			.height = content_height,
-			.width = COLS - log_width,
+			.width = led_width,
 		};
 	} else {
 		int led_height = content_height / 3;
@@ -5541,14 +5767,264 @@ static void watch_tui_layout(struct watch_tui_rect *log_rect,
 	}
 }
 
-static void watch_tui_draw_pane(const struct watch_tui_rect *rect,
-				const char *title, char *const *lines,
-				size_t count, size_t scroll, bool focused)
+static size_t watch_tui_history_index(size_t start, size_t offset,
+				      size_t capacity)
+{
+	return (start + offset) % capacity;
+}
+
+static const char *watch_tui_log_line_at(const void *context, size_t index,
+					 enum watch_tui_line_style *style)
+{
+	const struct watch_tui_line_history *history = context;
+
+	*style = WATCH_TUI_LINE_NORMAL;
+	if (index >= history->count)
+		return "";
+	return history->lines[watch_tui_history_index(
+		history->start, index, history->capacity)];
+}
+
+static const struct watch_tui_led_snapshot *watch_tui_led_snapshot_at(
+	const struct watch_tui_led_history *history, size_t index)
+{
+	if (index >= history->run_count)
+		return NULL;
+	return &history->snapshots[watch_tui_history_index(
+		history->start, index, history->capacity)];
+}
+
+static const char *watch_tui_led_timestamp_at(
+	const struct watch_tui_led_snapshot *snapshot, size_t index)
+{
+	if (index >= snapshot->timestamp_count)
+		return "";
+	return snapshot->timestamps[watch_tui_history_index(
+		snapshot->timestamp_start, index, snapshot->timestamp_capacity)];
+}
+
+static bool log_line_lists_equal(const struct log_line_list *left,
+				 const struct log_line_list *right)
+{
+	size_t i;
+
+	if (left->count != right->count)
+		return false;
+	for (i = 0; i < left->count; i++)
+		if (strcmp(left->lines[i], right->lines[i]))
+			return false;
+	return true;
+}
+
+static size_t watch_tui_led_visible_line_count(
+	const struct watch_tui_state *state)
+{
+	const struct watch_tui_led_history *history = &state->led_history;
+	const struct log_line_list *previous = NULL;
+	size_t count = 0;
+	size_t i;
+
+	for (i = 0; i < history->run_count; i++) {
+		const struct watch_tui_led_snapshot *snapshot =
+			watch_tui_led_snapshot_at(history, i);
+
+		if (state->all_mode) {
+			size_t per_response = snapshot->all_lines.count +
+				(state->show_led_timestamps ? 1U : 0U);
+
+			if (snapshot->timestamp_count &&
+			    per_response > SIZE_MAX / snapshot->timestamp_count)
+				return SIZE_MAX;
+			if (snapshot->timestamp_count * per_response >
+			    SIZE_MAX - count)
+				return SIZE_MAX;
+			count += snapshot->timestamp_count * per_response;
+			continue;
+		}
+
+		if (!snapshot->filtered_lines.count ||
+		    (previous && log_line_lists_equal(
+			previous, &snapshot->filtered_lines)))
+			continue;
+		previous = &snapshot->filtered_lines;
+		if (snapshot->filtered_lines.count +
+		    (state->show_led_timestamps ? 1U : 0U) > SIZE_MAX - count)
+			return SIZE_MAX;
+		count += snapshot->filtered_lines.count +
+			 (state->show_led_timestamps ? 1U : 0U);
+	}
+	return count;
+}
+
+static const char *watch_tui_led_line_at(const void *context, size_t index,
+					 enum watch_tui_line_style *style)
+{
+	const struct watch_tui_state *state = context;
+	const struct watch_tui_led_history *history = &state->led_history;
+	const struct log_line_list *previous = NULL;
+	size_t i;
+
+	for (i = 0; i < history->run_count; i++) {
+		const struct watch_tui_led_snapshot *snapshot =
+			watch_tui_led_snapshot_at(history, i);
+		size_t observation;
+
+		if (!state->all_mode) {
+			if (!snapshot->filtered_lines.count ||
+			    (previous && log_line_lists_equal(
+				previous, &snapshot->filtered_lines)))
+				continue;
+			previous = &snapshot->filtered_lines;
+			if (state->show_led_timestamps) {
+				if (!index) {
+					*style = WATCH_TUI_LINE_TIMESTAMP;
+					return watch_tui_led_timestamp_at(snapshot, 0);
+				}
+				index--;
+			}
+			if (index < snapshot->filtered_lines.count) {
+				*style = WATCH_TUI_LINE_NORMAL;
+				return snapshot->filtered_lines.lines[index];
+			}
+			index -= snapshot->filtered_lines.count;
+			continue;
+		}
+
+		for (observation = 0;
+		     observation < snapshot->timestamp_count; observation++) {
+			if (state->show_led_timestamps) {
+				if (!index) {
+					*style = WATCH_TUI_LINE_TIMESTAMP;
+					return watch_tui_led_timestamp_at(
+						snapshot, observation);
+				}
+				index--;
+			}
+			if (index < snapshot->all_lines.count) {
+				*style = WATCH_TUI_LINE_NORMAL;
+				return snapshot->all_lines.lines[index];
+			}
+			index -= snapshot->all_lines.count;
+		}
+	}
+
+	*style = WATCH_TUI_LINE_NORMAL;
+	return "";
+}
+
+static void watch_tui_content_for_focus(const struct watch_tui_state *state,
+					enum watch_tui_focus focus,
+					struct watch_tui_content *content)
+{
+	memset(content, 0, sizeof(*content));
+	if (focus == WATCH_TUI_FOCUS_LOG) {
+		const struct watch_tui_line_history *history = state->all_mode ?
+			&state->raw_log_history : &state->log_history;
+
+		content->context = history;
+		content->line_count = history->count;
+		content->line_at = watch_tui_log_line_at;
+		content->continuation_indent =
+			SGIL1_TUI_LOG_CONTINUATION_INDENT;
+	} else {
+		content->context = state;
+		content->line_count = watch_tui_led_visible_line_count(state);
+		content->line_at = watch_tui_led_line_at;
+		content->continuation_indent =
+			SGIL1_TUI_LED_CONTINUATION_INDENT;
+	}
+}
+
+static size_t watch_tui_wrap_segment(const char *line, size_t offset,
+				     size_t width, size_t *segment_len)
+{
+	size_t remaining = strlen(line + offset);
+	size_t len;
+	size_t next;
+	size_t i;
+
+	if (!remaining) {
+		*segment_len = 0;
+		return offset;
+	}
+	if (remaining <= width) {
+		*segment_len = remaining;
+		return offset + remaining;
+	}
+
+	len = width;
+	next = offset + width;
+	for (i = width; i > 1; i--) {
+		if (!isspace((unsigned char)line[offset + i - 1]))
+			continue;
+		len = i - 1;
+		next = offset + i;
+		while (line[next] && isspace((unsigned char)line[next]))
+			next++;
+		break;
+	}
+	*segment_len = len;
+	return next;
+}
+
+static size_t watch_tui_line_rows(const char *line, size_t width,
+				  size_t continuation_indent)
+{
+	size_t offset = 0;
+	size_t rows = 0;
+	bool first = true;
+
+	if (!width)
+		return 0;
+	do {
+		size_t indent = first ? 0 : continuation_indent;
+		size_t available;
+		size_t segment_len;
+
+		if (indent >= width)
+			indent = width > 1 ? width - 1 : 0;
+		available = width - indent;
+		offset = watch_tui_wrap_segment(line, offset, available,
+						&segment_len);
+		(void)segment_len;
+		rows++;
+		first = false;
+	} while (line[offset]);
+	return rows;
+}
+
+static size_t watch_tui_content_rows(const struct watch_tui_content *content,
+				     size_t width)
+{
+	size_t rows = 0;
+	size_t i;
+
+	for (i = 0; i < content->line_count; i++) {
+		enum watch_tui_line_style style;
+		const char *line = content->line_at(content->context, i, &style);
+		size_t line_rows = watch_tui_line_rows(
+			line, width, (size_t)content->continuation_indent);
+
+		(void)style;
+		if (line_rows > SIZE_MAX - rows)
+			return SIZE_MAX;
+		rows += line_rows;
+	}
+	return rows;
+}
+
+static void watch_tui_draw_pane(const struct watch_tui_state *state,
+				const struct watch_tui_rect *rect,
+				const char *title,
+				const struct watch_tui_content *content,
+				size_t scroll, bool focused)
 {
 	WINDOW *window;
 	size_t visible;
+	size_t total;
 	size_t end;
 	size_t start;
+	size_t row = 0;
 	size_t i;
 
 	if (rect->height < 3 || rect->width < 4)
@@ -5557,21 +6033,67 @@ static void watch_tui_draw_pane(const struct watch_tui_rect *rect,
 	if (!window)
 		return;
 	werase(window);
+	if (focused && watch_tui_colors_enabled(state))
+		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
 	box(window, 0, 0);
 	if (focused)
 		wattron(window, A_BOLD);
 	mvwaddnstr(window, 0, 2, title, rect->width - 4);
 	if (focused)
 		wattroff(window, A_BOLD);
+	if (focused && watch_tui_colors_enabled(state))
+		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
 
 	visible = (size_t)(rect->height - 2);
-	if (scroll > count)
-		scroll = count;
-	end = count - scroll;
+	total = watch_tui_content_rows(content, (size_t)(rect->width - 2));
+	if (scroll > total)
+		scroll = total;
+	end = total - scroll;
 	start = end > visible ? end - visible : 0;
-	for (i = start; i < end; i++)
-		mvwaddnstr(window, 1 + (int)(i - start), 1, lines[i],
-			    rect->width - 2);
+	for (i = 0; i < content->line_count && row < end; i++) {
+		enum watch_tui_line_style style;
+		const char *line = content->line_at(content->context, i, &style);
+		size_t offset = 0;
+		bool first = true;
+
+		do {
+			size_t indent = first ? 0 :
+				(size_t)content->continuation_indent;
+			size_t width = (size_t)(rect->width - 2);
+			size_t available;
+			size_t segment_len;
+			size_t next;
+
+			if (indent >= width)
+				indent = width > 1 ? width - 1 : 0;
+			available = width - indent;
+			next = watch_tui_wrap_segment(line, offset, available,
+							 &segment_len);
+			if (row >= start) {
+				int y = 1 + (int)(row - start);
+
+				if (style == WATCH_TUI_LINE_TIMESTAMP) {
+					if (watch_tui_colors_enabled(state))
+						wattron(window, COLOR_PAIR(
+							WATCH_TUI_COLOR_ACCENT));
+					wattron(window, A_DIM);
+				}
+				if (indent)
+					mvwhline(window, y, 1, ' ', (int)indent);
+				mvwaddnstr(window, y, 1 + (int)indent,
+					   line + offset, (int)segment_len);
+				if (style == WATCH_TUI_LINE_TIMESTAMP) {
+					wattroff(window, A_DIM);
+					if (watch_tui_colors_enabled(state))
+						wattroff(window, COLOR_PAIR(
+							WATCH_TUI_COLOR_ACCENT));
+				}
+			}
+			row++;
+			offset = next;
+			first = false;
+		} while (line[offset] && row < end);
+	}
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -5606,16 +6128,124 @@ static void watch_tui_format_console_activity(
 			 elapsed_seconds / (24U * 60U * 60U));
 }
 
+static const char *watch_tui_theme_name(int theme)
+{
+	switch (theme) {
+	case WATCH_TUI_THEME_LIGHT:
+		return "light";
+	case WATCH_TUI_THEME_MONOCHROME:
+		return "monochrome";
+	default:
+		return "dark";
+	}
+}
+
+static int watch_tui_background_hint(void)
+{
+	const char *colorfgbg = getenv("COLORFGBG");
+	const char *background;
+	char *end;
+	long value;
+
+	if (!colorfgbg || !*colorfgbg)
+		return WATCH_TUI_THEME_DARK;
+	background = strrchr(colorfgbg, ';');
+	background = background ? background + 1 : colorfgbg;
+	errno = 0;
+	value = strtol(background, &end, 10);
+	if (errno || end == background || *end)
+		return WATCH_TUI_THEME_DARK;
+	if (value == 7 || value == 15 || value == 231 || value >= 250)
+		return WATCH_TUI_THEME_LIGHT;
+	return WATCH_TUI_THEME_DARK;
+}
+
+static bool watch_tui_apply_theme(struct watch_tui_state *state, int theme)
+{
+	short accent;
+	short warning;
+
+	if (theme == WATCH_TUI_THEME_MONOCHROME) {
+		state->color_theme = theme;
+		return true;
+	}
+	if (!state->color_capable)
+		return false;
+	if (theme == WATCH_TUI_THEME_LIGHT) {
+		accent = COLOR_BLUE;
+		warning = COLOR_RED;
+	} else {
+		accent = COLOR_CYAN;
+		warning = COLOR_YELLOW;
+	}
+	if (init_pair(WATCH_TUI_COLOR_ACCENT, accent, -1) == ERR ||
+	    init_pair(WATCH_TUI_COLOR_WARNING, warning, -1) == ERR)
+		return false;
+	state->color_theme = theme;
+	state->last_color_theme = theme;
+	return true;
+}
+
+static void watch_tui_draw_help(const struct watch_tui_state *state)
+{
+	static const char *const lines[] = {
+		"Tab pane       Up/Down line",
+		"PgUp/PgDn page   End live",
+		"a Filtered/All   t LED time",
+		"c colour cycle   m monochrome",
+		"h close help     q quit",
+	};
+	WINDOW *window;
+	int width = COLS - 4;
+	int height = (int)ARRAY_SIZE(lines) + 2;
+	int y;
+	int x;
+	size_t i;
+
+	if (!state->help_visible)
+		return;
+	if (width > 54)
+		width = 54;
+	if (height > LINES - 2)
+		height = LINES - 2;
+	if (width < 4 || height < 3)
+		return;
+	y = (LINES - height) / 2;
+	x = (COLS - width) / 2;
+	window = derwin(stdscr, height, width, y, x);
+	if (!window)
+		return;
+	werase(window);
+	if (watch_tui_colors_enabled(state))
+		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
+	box(window, 0, 0);
+	wattron(window, A_BOLD);
+	mvwaddnstr(window, 0, 2, " Keys ", width - 4);
+	wattroff(window, A_BOLD);
+	if (watch_tui_colors_enabled(state))
+		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
+	for (i = 0; i < ARRAY_SIZE(lines) && (int)i < height - 2; i++)
+		mvwaddnstr(window, 1 + (int)i, 2, lines[i], width - 4);
+	wnoutrefresh(window);
+	delwin(window);
+}
+
 static void watch_tui_render(struct watch_display *display)
 {
 	struct watch_tui_state *state = &display->tui_state;
 	struct watch_tui_rect log_rect;
 	struct watch_tui_rect led_rect;
+	struct watch_tui_content log_content;
+	struct watch_tui_content led_content;
+	const struct watch_tui_line_history *shown_log;
 	char header[256];
 	char footer[320];
 	char activity[64];
+	char log_title[80];
+	char led_title[80];
 	int activity_x;
 	int footer_width;
+	int header_attributes = A_REVERSE | A_BOLD;
 
 	if (!state->initialized)
 		return;
@@ -5628,23 +6258,38 @@ static void watch_tui_render(struct watch_display *display)
 	}
 
 	watch_tui_layout(&log_rect, &led_rect);
+	watch_tui_content_for_focus(state, WATCH_TUI_FOCUS_LOG, &log_content);
+	watch_tui_content_for_focus(state, WATCH_TUI_FOCUS_LEDS, &led_content);
+	shown_log = state->all_mode ? &state->raw_log_history :
+				    &state->log_history;
 	erase();
 	snprintf(header, sizeof(header),
-		 " sgil1ctl watch | queue pressure %u/%u",
+		 " sgil1ctl watch | %s | %s palette | queue pressure %u/%u",
+		 state->all_mode ? "all" : "filtered",
+		 watch_tui_theme_name(state->color_theme),
 		 display->queue_pressure, SGIL1_QUEUE_PRESSURE_MAX);
-	attron(A_REVERSE | A_BOLD);
+	if (watch_tui_colors_enabled(state))
+		header_attributes |= COLOR_PAIR(display->queue_pressure ?
+			WATCH_TUI_COLOR_WARNING : WATCH_TUI_COLOR_ACCENT);
+	attron(header_attributes);
 	mvhline(0, 0, ' ', COLS);
 	mvaddnstr(0, 0, header, COLS);
-	attroff(A_REVERSE | A_BOLD);
+	attroff(header_attributes);
 
-	watch_tui_draw_pane(&log_rect, " L1 log ", state->log_lines,
-			    state->log_count, state->log_scroll,
+	snprintf(log_title, sizeof(log_title), " L1 log %zu/%zu ",
+		 shown_log->count, shown_log->capacity);
+	snprintf(led_title, sizeof(led_title), " LEDs %zu/%zu ",
+		 state->led_history.response_count,
+		 state->led_history.capacity);
+	watch_tui_draw_pane(state, &log_rect, log_title, &log_content,
+			    state->log_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LOG);
-	watch_tui_draw_pane(&led_rect, " LEDs ", state->led_lines.lines,
-			    state->led_lines.count, state->led_scroll,
+	watch_tui_draw_pane(state, &led_rect, led_title, &led_content,
+			    state->led_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
+	watch_tui_draw_help(state);
 
-	snprintf(footer, sizeof(footer), " %s%s",
+	snprintf(footer, sizeof(footer), " %s%s | h help",
 		 state->status[0] ? state->status : "Monitoring L1",
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
@@ -5663,47 +6308,242 @@ static void watch_tui_render(struct watch_display *display)
 	doupdate();
 }
 
-static int watch_tui_append_log(struct watch_tui_state *state,
-				const char *line)
+static int watch_tui_init_histories(struct watch_tui_state *state,
+				    size_t log_capacity,
+				    size_t led_capacity)
 {
-	char **next;
+	if (log_capacity > SIZE_MAX / sizeof(*state->log_history.lines) ||
+	    led_capacity > SIZE_MAX / sizeof(*state->led_history.snapshots)) {
+		fprintf(stderr, "TUI history entry count is too large\n");
+		return -1;
+	}
+
+	state->raw_log_history.lines = calloc(
+		log_capacity, sizeof(*state->raw_log_history.lines));
+	if (!state->raw_log_history.lines) {
+		perror("calloc");
+		return -1;
+	}
+	state->raw_log_history.capacity = log_capacity;
+	state->log_history.lines = calloc(
+		log_capacity, sizeof(*state->log_history.lines));
+	if (!state->log_history.lines) {
+		perror("calloc");
+		free(state->raw_log_history.lines);
+		memset(&state->raw_log_history, 0,
+		       sizeof(state->raw_log_history));
+		return -1;
+	}
+	state->log_history.capacity = log_capacity;
+	state->led_history.snapshots = calloc(
+		led_capacity, sizeof(*state->led_history.snapshots));
+	if (!state->led_history.snapshots) {
+		perror("calloc");
+		free(state->raw_log_history.lines);
+		free(state->log_history.lines);
+		memset(&state->raw_log_history, 0,
+		       sizeof(state->raw_log_history));
+		memset(&state->log_history, 0, sizeof(state->log_history));
+		return -1;
+	}
+	state->led_history.capacity = led_capacity;
+	return 0;
+}
+
+static size_t watch_tui_rows_for_focus(const struct watch_tui_state *state,
+				       enum watch_tui_focus focus)
+{
+	struct watch_tui_rect log_rect;
+	struct watch_tui_rect led_rect;
+	struct watch_tui_content content;
+	const struct watch_tui_rect *rect;
+
+	watch_tui_layout(&log_rect, &led_rect);
+	watch_tui_content_for_focus(state, focus, &content);
+	rect = focus == WATCH_TUI_FOCUS_LOG ? &log_rect : &led_rect;
+	return rect->width > 2 ? watch_tui_content_rows(
+		&content, (size_t)(rect->width - 2)) : 0;
+}
+
+static int watch_tui_append_log(struct watch_tui_state *state,
+				const char *line, bool raw)
+{
+	struct watch_tui_line_history *history = raw ?
+		&state->raw_log_history : &state->log_history;
+	bool visible = state->all_mode == raw;
+	size_t before_rows = visible && state->log_scroll ?
+		watch_tui_rows_for_focus(state, WATCH_TUI_FOCUS_LOG) : 0;
+	size_t index;
 	char *copy = strdup(line);
 
 	if (!copy) {
 		perror("strdup");
 		return -1;
 	}
-	if (state->log_count == SGIL1_TUI_LOG_HISTORY) {
-		free(state->log_lines[0]);
-		memmove(state->log_lines, state->log_lines + 1,
-			(SGIL1_TUI_LOG_HISTORY - 1) * sizeof(*state->log_lines));
-		state->log_count--;
+	if (history->count == history->capacity) {
+		index = history->start;
+		free(history->lines[index]);
+		history->start = watch_tui_history_index(
+			history->start, 1, history->capacity);
 	} else {
-		next = realloc(state->log_lines,
-			       (state->log_count + 1) * sizeof(*state->log_lines));
-		if (!next) {
-			perror("realloc");
-			free(copy);
-			return -1;
-		}
-		state->log_lines = next;
+		index = watch_tui_history_index(
+			history->start, history->count, history->capacity);
+		history->count++;
 	}
-	state->log_lines[state->log_count++] = copy;
-	if (state->log_scroll && state->log_scroll < state->log_count)
-		state->log_scroll++;
+	history->lines[index] = copy;
+	if (visible && state->log_scroll) {
+		size_t after_rows = watch_tui_rows_for_focus(
+			state, WATCH_TUI_FOCUS_LOG);
+
+		if (after_rows > before_rows &&
+		    after_rows - before_rows <= SIZE_MAX - state->log_scroll)
+			state->log_scroll += after_rows - before_rows;
+		if (state->log_scroll > after_rows)
+			state->log_scroll = after_rows;
+	}
 	return 0;
 }
 
-static int watch_tui_set_leds(struct watch_tui_state *state, const char *text)
+static void watch_tui_format_snapshot_time(char *buf, size_t size)
 {
-	struct log_line_list replacement;
+	struct timespec now;
+	struct tm tm;
+	unsigned int milliseconds;
 
-	if (split_log_lines(text ? text : "", &replacement))
+	if (clock_gettime(CLOCK_REALTIME, &now) ||
+	    !localtime_r(&now.tv_sec, &tm)) {
+		snprintf(buf, size, "[time unavailable]");
+		return;
+	}
+	milliseconds = (unsigned int)(now.tv_nsec / 1000000L);
+	snprintf(buf, size, "%02u/%02u/%02u %02u:%02u:%02u.%03u",
+		 (unsigned int)tm.tm_mon % 12U + 1U,
+		 (unsigned int)tm.tm_mday % 32U,
+		 (unsigned int)(tm.tm_year + 1900) % 100U,
+		 (unsigned int)tm.tm_hour % 24U,
+		 (unsigned int)tm.tm_min % 60U,
+		 (unsigned int)tm.tm_sec % 61U, milliseconds % 1000U);
+}
+
+static void watch_tui_free_led_snapshot(
+	struct watch_tui_led_snapshot *snapshot)
+{
+	free_log_line_list(&snapshot->all_lines);
+	free_log_line_list(&snapshot->filtered_lines);
+	free(snapshot->timestamps);
+	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static int watch_tui_append_led_timestamp(
+	struct watch_tui_led_snapshot *snapshot, const char *timestamp)
+{
+	if (snapshot->timestamp_count == snapshot->timestamp_capacity) {
+		size_t new_capacity = snapshot->timestamp_capacity ?
+			snapshot->timestamp_capacity * 2 : 4;
+		char (*replacement)[SGIL1_TUI_TIMESTAMP_SIZE];
+		size_t i;
+
+		if (new_capacity < snapshot->timestamp_capacity ||
+		    new_capacity > SIZE_MAX / sizeof(*replacement)) {
+			fprintf(stderr, "too many retained LED timestamps\n");
+			return -1;
+		}
+		replacement = calloc(new_capacity, sizeof(*replacement));
+		if (!replacement) {
+			perror("calloc");
+			return -1;
+		}
+		for (i = 0; i < snapshot->timestamp_count; i++)
+			memcpy(replacement[i], watch_tui_led_timestamp_at(
+				snapshot, i), SGIL1_TUI_TIMESTAMP_SIZE);
+		free(snapshot->timestamps);
+		snapshot->timestamps = replacement;
+		snapshot->timestamp_capacity = new_capacity;
+		snapshot->timestamp_start = 0;
+	}
+
+	snprintf(snapshot->timestamps[watch_tui_history_index(
+		 snapshot->timestamp_start, snapshot->timestamp_count,
+		 snapshot->timestamp_capacity)], SGIL1_TUI_TIMESTAMP_SIZE,
+		 "%s", timestamp);
+	snapshot->timestamp_count++;
+	return 0;
+}
+
+static void watch_tui_drop_oldest_led_response(
+	struct watch_tui_led_history *history)
+{
+	struct watch_tui_led_snapshot *oldest;
+
+	if (!history->response_count || !history->run_count)
+		return;
+	oldest = &history->snapshots[history->start];
+	oldest->timestamp_start = watch_tui_history_index(
+		oldest->timestamp_start, 1, oldest->timestamp_capacity);
+	oldest->timestamp_count--;
+	history->response_count--;
+	if (oldest->timestamp_count)
+		return;
+	watch_tui_free_led_snapshot(oldest);
+	history->start = watch_tui_history_index(
+		history->start, 1, history->capacity);
+	history->run_count--;
+}
+
+static int watch_tui_append_leds(struct watch_tui_state *state,
+				 const char *all_text,
+				 const char *filtered_text)
+{
+	struct watch_tui_led_history *history = &state->led_history;
+	struct watch_tui_led_snapshot replacement = { 0 };
+	size_t before_rows = state->led_scroll ?
+		watch_tui_rows_for_focus(state, WATCH_TUI_FOCUS_LEDS) : 0;
+	char timestamp[SGIL1_TUI_TIMESTAMP_SIZE];
+	struct watch_tui_led_snapshot *last = NULL;
+	size_t index;
+
+	if (split_log_lines(all_text ? all_text : "", &replacement.all_lines))
 		return -1;
-	free_log_line_list(&state->led_lines);
-	state->led_lines = replacement;
-	if (state->led_scroll > state->led_lines.count)
-		state->led_scroll = state->led_lines.count;
+	if (split_log_lines(filtered_text ? filtered_text : "",
+			    &replacement.filtered_lines)) {
+		free_log_line_list(&replacement.all_lines);
+		return -1;
+	}
+	watch_tui_format_snapshot_time(timestamp, sizeof(timestamp));
+	if (history->response_count == history->capacity)
+		watch_tui_drop_oldest_led_response(history);
+	if (history->run_count)
+		last = &history->snapshots[watch_tui_history_index(
+			history->start, history->run_count - 1,
+			history->capacity)];
+	if (last && log_line_lists_equal(
+			&last->all_lines, &replacement.all_lines)) {
+		if (watch_tui_append_led_timestamp(last, timestamp)) {
+			watch_tui_free_led_snapshot(&replacement);
+			return -1;
+		}
+		watch_tui_free_led_snapshot(&replacement);
+	} else {
+		if (watch_tui_append_led_timestamp(&replacement, timestamp)) {
+			watch_tui_free_led_snapshot(&replacement);
+			return -1;
+		}
+		index = watch_tui_history_index(
+			history->start, history->run_count, history->capacity);
+		history->snapshots[index] = replacement;
+		history->run_count++;
+	}
+	history->response_count++;
+	if (state->led_scroll) {
+		size_t after_rows = watch_tui_rows_for_focus(
+			state, WATCH_TUI_FOCUS_LEDS);
+
+		if (after_rows > before_rows &&
+		    after_rows - before_rows <= SIZE_MAX - state->led_scroll)
+			state->led_scroll += after_rows - before_rows;
+		if (state->led_scroll > after_rows)
+			state->led_scroll = after_rows;
+	}
 	return 0;
 }
 
@@ -5724,8 +6564,7 @@ static void watch_tui_adjust_scroll(struct watch_tui_state *state,
 {
 	size_t *scroll = state->focus == WATCH_TUI_FOCUS_LOG ?
 			 &state->log_scroll : &state->led_scroll;
-	size_t count = state->focus == WATCH_TUI_FOCUS_LOG ?
-		       state->log_count : state->led_lines.count;
+	size_t count = watch_tui_rows_for_focus(state, state->focus);
 
 	if (upward) {
 		if (amount > count - *scroll)
@@ -5758,6 +6597,54 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		state->focus = state->focus == WATCH_TUI_FOCUS_LOG ?
 			       WATCH_TUI_FOCUS_LEDS : WATCH_TUI_FOCUS_LOG;
 		break;
+	case 'a':
+	case 'A':
+		state->all_mode = !state->all_mode;
+		state->log_scroll = 0;
+		state->led_scroll = 0;
+		snprintf(state->status, sizeof(state->status), "%s view",
+			 state->all_mode ? "All observations" :
+					   "Filtered");
+		break;
+	case 't':
+	case 'T':
+		state->show_led_timestamps = !state->show_led_timestamps;
+		state->led_scroll = 0;
+		snprintf(state->status, sizeof(state->status),
+			 "LED timestamps %s",
+			 state->show_led_timestamps ? "shown" : "hidden");
+		break;
+	case 'h':
+	case 'H':
+		state->help_visible = !state->help_visible;
+		break;
+	case 'c':
+	case 'C':
+		if (!state->color_capable) {
+			snprintf(state->status, sizeof(state->status),
+				 "Terminal colour is unavailable");
+		} else {
+			int theme = state->color_theme ==
+				WATCH_TUI_THEME_MONOCHROME ?
+				state->last_color_theme :
+				(state->color_theme == WATCH_TUI_THEME_DARK ?
+				 WATCH_TUI_THEME_LIGHT : WATCH_TUI_THEME_DARK);
+
+			if (watch_tui_apply_theme(state, theme))
+				snprintf(state->status, sizeof(state->status),
+					 "%s colour palette",
+					 theme == WATCH_TUI_THEME_LIGHT ?
+					 "Light-background" : "Dark-background");
+		}
+		break;
+	case 'm':
+	case 'M':
+		if (state->color_theme != WATCH_TUI_THEME_MONOCHROME)
+			state->last_color_theme = state->color_theme;
+		(void)watch_tui_apply_theme(state, WATCH_TUI_THEME_MONOCHROME);
+		snprintf(state->status, sizeof(state->status),
+			 "Monochrome palette");
+		break;
 	case KEY_UP:
 		watch_tui_adjust_scroll(state, true, 1);
 		break;
@@ -5784,18 +6671,38 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	default:
 		break;
 	}
-	watch_tui_render(display);
+	if (key != ERR)
+		watch_tui_render(display);
 	return watch_stop_requested != 0;
+}
+
+static void watch_tui_free_line_history(
+	struct watch_tui_line_history *history)
+{
+	size_t i;
+
+	for (i = 0; i < history->count; i++)
+		free(history->lines[watch_tui_history_index(
+			history->start, i, history->capacity)]);
+	free(history->lines);
+	memset(history, 0, sizeof(*history));
 }
 
 static void watch_tui_free(struct watch_tui_state *state)
 {
+	struct watch_tui_led_history *led = &state->led_history;
 	size_t i;
 
-	for (i = 0; i < state->log_count; i++)
-		free(state->log_lines[i]);
-	free(state->log_lines);
-	free_log_line_list(&state->led_lines);
+	watch_tui_free_line_history(&state->raw_log_history);
+	watch_tui_free_line_history(&state->log_history);
+	for (i = 0; i < led->run_count; i++) {
+		struct watch_tui_led_snapshot *snapshot =
+			&led->snapshots[watch_tui_history_index(
+				led->start, i, led->capacity)];
+
+		watch_tui_free_led_snapshot(snapshot);
+	}
+	free(led->snapshots);
 	memset(state, 0, sizeof(*state));
 }
 #endif
@@ -5823,9 +6730,8 @@ static int watch_display_log_line(void *context, const char *line)
 
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
-		if (watch_tui_append_log(&display->tui_state, line))
+		if (watch_tui_append_log(&display->tui_state, line, false))
 			return -1;
-		watch_tui_render(display);
 		return 0;
 	}
 #else
@@ -5837,10 +6743,35 @@ static int watch_display_log_line(void *context, const char *line)
 	return 0;
 }
 
-static void watch_display_leds(struct watch_display *display, const char *text,
+static int watch_display_raw_log_line(struct watch_display *display,
+				      const char *line)
+{
+#ifdef SGIL1_WITH_TUI
+	if (display->tui)
+		return watch_tui_append_log(&display->tui_state, line, true);
+#else
+	(void)display;
+	(void)line;
+#endif
+	return 0;
+}
+
+static void watch_display_refresh(struct watch_display *display)
+{
+#ifdef SGIL1_WITH_TUI
+	if (display->tui)
+		watch_tui_render(display);
+#else
+	(void)display;
+#endif
+}
+
+static void watch_display_leds(struct watch_display *display,
+			       const char *all_text,
+			       const char *filtered_text,
 			       bool changed, bool console_activity)
 {
-	const char *line = text;
+	const char *line = filtered_text;
 
 	if (console_activity) {
 		display->console_activity_seen = true;
@@ -5848,16 +6779,19 @@ static void watch_display_leds(struct watch_display *display, const char *text,
 	}
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
-		if (changed && watch_tui_set_leds(&display->tui_state, text)) {
+		if (watch_tui_append_leds(&display->tui_state, all_text,
+					  filtered_text)) {
 			snprintf(display->tui_state.status,
 				 sizeof(display->tui_state.status),
-				 "Could not update LED display");
+				 "Could not retain LED response");
 		}
 		watch_tui_render(display);
 		return;
 	}
+#else
+	(void)all_text;
 #endif
-	if (!changed || !text || !*text)
+	if (!changed || !filtered_text || !*filtered_text)
 		return;
 	while (*line) {
 		const char *next = strchr(line, '\n');
@@ -5883,6 +6817,11 @@ static bool watch_display_wait(struct watch_display *display, int milliseconds)
 	return watch_stop_requested != 0;
 }
 
+static bool watch_display_input_hook(void *context)
+{
+	return watch_display_wait(context, 0);
+}
+
 static int watch_display_init(struct watch_display *display,
 			      const struct watch_options *watch)
 {
@@ -5897,9 +6836,13 @@ static int watch_display_init(struct watch_display *display,
 				"sgil1ctl watch --tui requires an interactive terminal\n");
 			return -1;
 		}
+		if (watch_tui_init_histories(state, watch->log_history,
+					     watch->led_history))
+			return -1;
 		state->alternate_screen = watch->alternate_screen;
 		if (!initscr()) {
 			fprintf(stderr, "could not initialize ncurses TUI\n");
+			watch_tui_free(state);
 			return -1;
 		}
 		state->initialized = true;
@@ -5917,6 +6860,18 @@ static int watch_display_init(struct watch_display *display,
 		noecho();
 		keypad(stdscr, true);
 		(void)curs_set(0);
+		state->color_theme = watch_tui_background_hint();
+		state->last_color_theme = state->color_theme;
+		if (has_colors() && start_color() == OK &&
+		    use_default_colors() == OK) {
+			state->color_capable = true;
+			if (!watch_tui_apply_theme(state, state->color_theme)) {
+				state->color_capable = false;
+				state->color_theme = WATCH_TUI_THEME_MONOCHROME;
+			}
+		} else {
+			state->color_theme = WATCH_TUI_THEME_MONOCHROME;
+		}
 		state->focus = WATCH_TUI_FOCUS_LOG;
 		snprintf(state->status, sizeof(state->status),
 			 "Monitoring L1");
@@ -5936,6 +6891,11 @@ static void watch_display_finish(struct watch_display *display)
 		if (display->tui_state.alternate_screen) {
 			endwin();
 		} else {
+			if (LINES > 0) {
+				move(LINES - 1, 0);
+				clrtoeol();
+				refresh();
+			}
 			keypad(stdscr, false);
 			(void)reset_shell_mode();
 			fflush(stdout);
@@ -5975,6 +6935,7 @@ static void watch_report_queue_pressure(struct watch_display *display,
 static int parse_watch_args(int argc, char **argv, int start,
 			    struct watch_options *watch)
 {
+	bool history_option = false;
 	int i;
 
 	memset(watch, 0, sizeof(*watch));
@@ -5982,6 +6943,8 @@ static int parse_watch_args(int argc, char **argv, int start,
 	watch->repeat_summary = true;
 	watch->log_interval_ms = SGIL1_LOG_DEFAULT_POLL_MS;
 	watch->led_interval_ms = SGIL1_WATCH_LED_MIN_MS;
+	watch->log_history = SGIL1_TUI_LOG_HISTORY_DEFAULT;
+	watch->led_history = SGIL1_TUI_LED_HISTORY_DEFAULT;
 
 	for (i = start; i < argc; i++) {
 		if (!strcmp(argv[i], "--tui")) {
@@ -6014,6 +6977,31 @@ static int parse_watch_args(int argc, char **argv, int start,
 					SGIL1_WATCH_LED_IDLE_MAX_MS);
 				return -1;
 			}
+		} else if (!strcmp(argv[i], "--log-history") ||
+			   !strcmp(argv[i], "--led-history")) {
+			bool log_history = !strcmp(argv[i], "--log-history");
+			int entries;
+
+			history_option = true;
+			if (++i >= argc) {
+				fprintf(stderr, "%s needs an entry count\n",
+					log_history ? "--log-history" :
+						      "--led-history");
+				return -1;
+			}
+			if (parse_int_arg(argv[i], 1, SGIL1_TUI_HISTORY_MAX,
+					  &entries)) {
+				fprintf(stderr,
+					"invalid %s value; expected 1..%d entries\n",
+					log_history ? "--log-history" :
+							      "--led-history",
+					SGIL1_TUI_HISTORY_MAX);
+				return -1;
+			}
+			if (log_history)
+				watch->log_history = (size_t)entries;
+			else
+				watch->led_history = (size_t)entries;
 		} else if (!strcmp(argv[i], "--no-repeat-summary")) {
 			watch->repeat_summary = false;
 		} else {
@@ -6024,6 +7012,11 @@ static int parse_watch_args(int argc, char **argv, int start,
 
 	if (!watch->alternate_screen && !watch->tui) {
 		fprintf(stderr, "--no-alternate-screen requires --tui\n");
+		return -1;
+	}
+	if (history_option && !watch->tui) {
+		fprintf(stderr,
+			"--log-history and --led-history apply only with --tui\n");
 		return -1;
 	}
 #ifndef SGIL1_WITH_TUI
@@ -6097,6 +7090,9 @@ static int run_watch_scheduler(const struct options *opts,
 			if (prepare_command_options(opts, &replacement)) {
 				char message[128];
 
+				if (watch_stop_requested)
+					break;
+
 				now = monotonic_milliseconds();
 				snprintf(message, sizeof(message),
 					 "could not restore L1 route; retrying in %d ms",
@@ -6117,7 +7113,8 @@ static int run_watch_scheduler(const struct options *opts,
 		do_led = do_led && (!do_log || !last_was_led);
 		if (do_led) {
 			char *raw = NULL;
-			char *decoded = NULL;
+			char *all_decoded = NULL;
+			char *filtered = NULL;
 			bool changed;
 			bool console_activity;
 			int command_ret;
@@ -6129,6 +7126,9 @@ static int run_watch_scheduler(const struct options *opts,
 
 				now = monotonic_milliseconds();
 				free(raw);
+				if (command_ret == SGIL1_READ_CANCELLED &&
+				    watch_stop_requested)
+					break;
 				consecutive_failures++;
 				snprintf(message, sizeof(message),
 					 "LED request failed; retrying transport in %d ms",
@@ -6152,29 +7152,35 @@ static int run_watch_scheduler(const struct options *opts,
 			failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
 			console_activity =
 				leds_text_has_current_console_activity(raw);
-			decoded = decode_leds_text(raw);
-			if (!decoded)
-				decoded = strdup(raw ? raw : "");
+			all_decoded = decode_leds_text(raw, true);
+			filtered = decode_leds_text(raw, false);
+			if (!all_decoded)
+				all_decoded = strdup(raw ? raw : "");
+			if (!filtered)
+				filtered = strdup(raw ? raw : "");
 			free(raw);
-			if (!decoded) {
+			if (!all_decoded || !filtered) {
 				perror("strdup");
+				free(all_decoded);
+				free(filtered);
 				ret = 1;
 				break;
 			}
 
-			changed = !previous_leds || strcmp(previous_leds, decoded);
-			watch_display_leds(display, decoded, changed,
+			changed = !previous_leds || strcmp(previous_leds, filtered);
+			watch_display_leds(display, all_decoded, filtered, changed,
 					   console_activity);
+			free(all_decoded);
 			if (changed) {
 				free(previous_leds);
-				previous_leds = decoded;
-				decoded = NULL;
+				previous_leds = filtered;
+				filtered = NULL;
 				led_delay = watch->led_interval_ms;
 			} else {
 				led_delay = watch_next_led_idle_delay(
 					led_delay, watch->led_interval_ms);
 			}
-			free(decoded);
+			free(filtered);
 			next_led = milliseconds_after(
 				now, queue_pressure_scaled_delay(led_delay,
 								 queue_pressure));
@@ -6197,6 +7203,9 @@ static int run_watch_scheduler(const struct options *opts,
 
 				now = monotonic_milliseconds();
 				free(text);
+				if (command_ret == SGIL1_READ_CANCELLED &&
+				    watch_stop_requested)
+					break;
 				consecutive_failures++;
 				snprintf(message, sizeof(message),
 					 "log request failed; retrying transport in %d ms",
@@ -6233,6 +7242,12 @@ static int run_watch_scheduler(const struct options *opts,
 			}
 
 			for (i = start; i < current.count; i++) {
+				if (watch_display_raw_log_line(
+						display, current.lines[i])) {
+					free_log_line_list(&current);
+					ret = 1;
+					goto cleanup;
+				}
 				if (!have_previous_log)
 					continue;
 				if (log_line_is_queue_full(current.lines[i])) {
@@ -6259,6 +7274,7 @@ static int run_watch_scheduler(const struct options *opts,
 				ret = 1;
 				break;
 			}
+			watch_display_refresh(display);
 
 			free_log_line_list(&previous_log);
 			previous_log = current;
@@ -6272,7 +7288,9 @@ static int run_watch_scheduler(const struct options *opts,
 		}
 	}
 
+cleanup:
 	(void)flush_log_repeat_summary(&repeat, &log_sink);
+	watch_display_refresh(display);
 	free(previous_leds);
 	free_log_line_list(&previous_log);
 	free_log_repeat_state(&repeat);
@@ -6290,17 +7308,24 @@ static int do_watch_command(const struct options *opts, int argc, char **argv,
 
 	if (parse_watch_args(argc, argv, command_index + 1, &watch))
 		return 2;
-	if (prepare_command_options(opts, &cmd_opts))
-		return 1;
+	watch_stop_requested = 0;
 	if (watch_display_init(&display, &watch))
 		return 1;
-	watch_stop_requested = 0;
 	if (install_watch_signal_handlers(&signals)) {
 		watch_display_finish(&display);
 		return 1;
 	}
 
-	ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display);
+	l1_wait_input_hook = watch_display_input_hook;
+	l1_wait_input_context = &display;
+	l1_wait_cancel_enabled = true;
+	if (prepare_command_options(opts, &cmd_opts))
+		ret = watch_stop_requested ? 0 : 1;
+	else
+		ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display);
+	l1_wait_cancel_enabled = false;
+	l1_wait_input_hook = NULL;
+	l1_wait_input_context = NULL;
 	restore_watch_signal_handlers(&signals);
 	watch_display_finish(&display);
 	return ret;
@@ -6694,7 +7719,7 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 		}
 
 		backoff_ms = poll_interval_ms;
-		decoded = decode_leds_text(text);
+		decoded = decode_leds_text(text, false);
 		if (decoded) {
 			free(text);
 			text = decoded;
@@ -7315,6 +8340,9 @@ static int parse_options(int argc, char **argv, struct options *opts,
 			opts->force = true;
 		} else if (!strcmp(argv[i], "--debug")) {
 			opts->debug = true;
+		} else if (!strcmp(argv[i], "--version")) {
+			printf("sgil1ctl %s\n", SGIL1CTL_VERSION);
+			exit(0);
 		} else if (!strcmp(argv[i], "--pipe-records")) {
 			opts->pipe_records = true;
 		} else if (!strcmp(argv[i], "--no-discover")) {
@@ -7437,7 +8465,7 @@ int main(int argc, char **argv)
 		return do_l1_command(&opts, "env", false);
 	if (!strcmp(cmd, "log") || !strcmp(cmd, "logs"))
 		return do_log_command(&opts, argc, argv, command_index);
-	if (!strcmp(cmd, "leds"))
+	if (!strcmp(cmd, "leds") || !strcmp(cmd, "led"))
 		return do_leds_command(&opts, argc, argv, command_index);
 	if (!strcmp(cmd, "watch"))
 		return do_watch_command(&opts, argc, argv, command_index);

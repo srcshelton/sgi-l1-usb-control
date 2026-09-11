@@ -1,3 +1,35 @@
+sgi-l1-usb-control (0.1.54) unstable; urgency=medium
+
+  * Updated components since 0.1.53: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Qualify direct-USB command limits from the live Fuel firmware version,
+    retaining the 72-byte legacy limit and permitting 279 bytes on Fuel L1
+    1.26.5 and newer after live version validation.
+  * Add configurable, process-local TUI histories for log messages and every
+    successful LED response, with 4096-message and 512-response defaults.
+  * Timestamp retained LED responses and show history occupancy in pane titles.
+  * Add restrained ncurses colour accents while preserving monochrome output.
+  * Wrap long TUI lines with indented continuations and scroll by visual row.
+  * Cap the side-by-side LED pane at its 129-column generated-output maximum.
+  * Keep watch cancellation responsive during L1 response waits without
+    resetting transport pipes solely because the user requested shutdown.
+  * Exercise TUI history, colour, cancellation, and primary-screen cleanup in
+    CI through a real pseudo-terminal smoke test.
+  * Clear the TUI status line before returning to the shell on the primary
+    screen, and accept led as a hidden alias for the canonical leds command.
+  * Add sgil1ctl --version using the changelog-derived package version without
+    opening the L1 USB device.
+  * Retain raw and filtered TUI log histories so the default repeat summaries
+    can be toggled to a lossless All view without changing capture behaviour.
+  * Suppress raw 0xfe PROM values with the transient console-input LED markers
+    in normal high-level output while preserving all three in TUI history.
+  * Run-length encode adjacent identical LED responses while retaining a
+    timestamp for every observation; add All-view and timestamp toggles.
+  * Add an in-TUI key guide and selectable light-background,
+    dark-background, and monochrome palettes.
+
+ -- Stuart Shelton <stuart@shelton.me>  Fri, 11 Sep 2026 16:46:20 +0100
+
 sgi-l1-usb-control (0.1.53) unstable; urgency=medium
 
   * Updated components since 0.1.52: user-space sgil1ctl only; kernel module

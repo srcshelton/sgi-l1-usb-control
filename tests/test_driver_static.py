@@ -21,6 +21,8 @@ POSTINST = ROOT / "debian" / "sgi-l1-usb-dkms.postinst"
 CONTROL = ROOT / "debian" / "control"
 SGIL1_TUI_INSTALL = ROOT / "debian" / "sgil1ctl-tui.install"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+SGIL1CTL_SOURCE = ROOT / "tools" / "sgil1ctl.c"
+SGIL1CTL_MAKEFILE = ROOT / "tools" / "Makefile"
 L2_L3_CONTAINER = ROOT / "contrib" / "l2-l3-container" / "Containerfile"
 L2_L3_CONTAINER_README = ROOT / "contrib" / "l2-l3-container" / "README.md"
 L2_L3_CONTAINER_SCRIPT = ROOT / "scripts" / "build-l2-l3-container.sh"
@@ -103,6 +105,7 @@ class KernelDriverStaticTests(unittest.TestCase):
         version = self.current_version()
         make_version = self.make_print_version()
         module_make = MODULE_MAKEFILE.read_text()
+        tool_make = SGIL1CTL_MAKEFILE.read_text()
         dkms_template = DKMS_TEMPLATE.read_text()
         debian_rules = DEBIAN_RULES.read_text()
         makefile = MAKEFILE.read_text()
@@ -114,10 +117,12 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertTrue(changelog.startswith(f"sgi-l1-usb-control ({version}) "))
         self.assertIn("scripts/package-version.sh", makefile)
         self.assertIn("../scripts/package-version.sh", module_make)
+        self.assertIn("../scripts/package-version.sh", tool_make)
         self.assertIn("dpkg-parsechangelog", version_script)
         self.assertIn("sed -n", version_script)
         self.assertIn('ccflags-y += -DSGI_L1_VERSION=', module_make)
         self.assertIn('SGI_L1_VERSION=$(SGI_L1_VERSION)', module_make)
+        self.assertIn("SGIL1CTL_VERSION", tool_make)
         self.assertIn('PACKAGE_VERSION="@VERSION@"', dkms_template)
         self.assertIn("SGI_L1_VERSION=@VERSION@", dkms_template)
         self.assertNotIn(version, dkms_template)
@@ -282,6 +287,19 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("tools/sgil1ctl-tui", rules)
         self.assertIn("README.md usr/share/doc/sgil1ctl-tui/", tui_install)
 
+    def test_tui_led_width_matches_longest_generated_mapping(self):
+        source = SGIL1CTL_SOURCE.read_text()
+        descriptions = re.findall(
+            r'^\s*\{ 0x[0-9a-f]{2}, "([^"]*)" \},$',
+            source,
+            re.MULTILINE,
+        )
+
+        self.assertTrue(descriptions)
+        self.assertEqual(14 + max(map(len, descriptions)), 127)
+        self.assertIn("#define SGIL1_TUI_LED_CONTENT_MAX 127", source)
+        self.assertIn("SGIL1_TUI_LED_CONTENT_MAX + 2", source)
+
     def test_ci_release_gate_backfills_missing_release_assets(self):
         workflow = CI_WORKFLOW.read_text()
 
@@ -294,7 +312,9 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn('"sgil1ctl-tui_${current}_arm64.deb"', workflow)
         self.assertIn("name: sgil1ctl-arm64-debs", workflow)
         self.assertIn("minimal sgil1ctl unexpectedly links ncurses", workflow)
+        self.assertIn("tools/sgil1ctl --version", workflow)
         self.assertIn("ldd tools/sgil1ctl | grep -Fq libncurses", workflow)
+        self.assertIn("python3 tests/tui_smoke.py", workflow)
         self.assertIn("[ -z \"$missing_assets\" ]", workflow)
         self.assertIn("Release $tag is missing; publishing current version", workflow)
         self.assertIn("Release $tag is missing expected asset(s)", workflow)
