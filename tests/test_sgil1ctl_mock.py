@@ -444,7 +444,11 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(stdout.count("L1 booted"), 1, stdout)
         self.assertIn("05/27/2026 12:38:01 USB ready", stdout)
         self.assertIn("05/27/2026 12:38:02 fan stable", stdout)
-        self.assertIn("message repeated 2 times: fan stable", stdout)
+        self.assertEqual(stdout.count("05/27/2026 12:38:02 fan stable"), 1)
+        self.assertIn(
+            "earlier message repeated 2 additional times: fan stable",
+            stdout,
+        )
         self.assertIn("05/27/2026 12:38:05 voltage nominal", stdout)
         self.assertNotIn("advanced without overlap", stderr)
 
@@ -572,7 +576,10 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("[log] 05/27/2026 12:38:00 L1 booted", stdout)
         self.assertIn("USB_WQUE Q full", stdout)
         self.assertIn("voltage nominal", stdout)
-        self.assertIn("message repeated 1 time: voltage nominal", stdout)
+        self.assertIn(
+            "earlier message repeated 1 additional time: voltage nominal",
+            stdout,
+        )
         self.assertNotIn("0x7f", stdout.lower())
         self.assertNotIn("0xfe", stdout.lower())
         self.assertNotIn("0xff", stdout.lower())
@@ -593,12 +600,31 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("--no-alternate-screen requires --tui", proc.stderr)
 
     def test_watch_history_options_require_tui(self):
-        for option in ("--log-history", "--led-history"):
+        for option in ("--log-history", "--led-history", "--palette"):
             with self.subTest(option=option):
-                proc = self.run_ctl(["watch", option, "17"])
+                value = "indigo" if option == "--palette" else "17"
+                proc = self.run_ctl(["watch", option, value])
 
                 self.assertEqual(proc.returncode, 2)
-                self.assertIn("apply only with --tui", proc.stderr)
+                self.assertIn("applies only with --tui", proc.stderr)
+
+    def test_watch_palette_accepts_hardware_and_colour_names(self):
+        for name in ("fuel", "SGI Fuel", "red", "O2+", "Tezro"):
+            with self.subTest(name=name):
+                proc = self.run_ctl(["watch", "--tui", "--palette", name])
+
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn(
+                    "built without optional ncurses TUI support",
+                    proc.stderr,
+                )
+
+        proc = self.run_ctl(
+            ["watch", "--tui", "--palette", "chartreuse"]
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("unknown TUI palette: chartreuse", proc.stderr)
+        self.assertIn("personal-iris", proc.stderr)
 
     def test_watch_history_options_validate_entry_counts(self):
         for option in ("--log-history", "--led-history"):

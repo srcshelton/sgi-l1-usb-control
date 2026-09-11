@@ -1,3 +1,20 @@
+sgi-l1-usb-control (0.1.55) unstable; urgency=medium
+
+  * Updated components since 0.1.54: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Distinguish visible filtered LED states from retained response samples in
+    the TUI pane title, including the all-filtered empty-state case.
+  * Clarify that repeat summaries count additional occurrences after the first
+    displayed log message.
+  * Redesign the TUI Help view with a prominent border, aligned key columns,
+    added spacing, active-setting highlights, and matching Help/Keys labels.
+  * Accept both h and ? for Help, and make m restore the previous colour
+    palette when monochrome is toggled off.
+  * Add SGI hardware-inspired TUI palettes, command-line machine and colour
+    aliases, cycling status, and best-effort one-request chassis selection.
+
+ -- Stuart Shelton <stuart@shelton.me>  Fri, 11 Sep 2026 23:41:50 +0100
+
 sgi-l1-usb-control (0.1.54) unstable; urgency=medium
 
   * Updated components since 0.1.53: user-space sgil1ctl only; kernel module

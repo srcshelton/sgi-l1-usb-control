@@ -28,9 +28,10 @@ python3 tests/tui_smoke.py
 ```
 
 The smoke test runs the TUI in a 120x24 pseudo-terminal, forces small log and
-LED histories to wrap, checks filtered/All views, timestamp and help toggles,
-colour/monochrome switching, sends `q` during monitoring, and verifies clean
-primary-screen teardown.
+LED histories to wrap, and verifies the empty-filtered-state/sample-count
+distinction. It also checks filtered/All views, timestamp and Help toggles,
+automatic and cycled hardware palettes, reversible monochrome mode, `q`
+cancellation, and clean primary-screen teardown.
 
 Run the normal suite and then build Debian packages:
 

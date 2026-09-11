@@ -174,6 +174,20 @@ struct leds_options {
 	int poll_interval_ms;
 };
 
+enum watch_palette {
+	WATCH_PALETTE_AUTO,
+	WATCH_PALETTE_INDIGO,
+	WATCH_PALETTE_INDIGO2,
+	WATCH_PALETTE_IMPACT,
+	WATCH_PALETTE_INDY,
+	WATCH_PALETTE_O2,
+	WATCH_PALETTE_O2PLUS,
+	WATCH_PALETTE_FUEL,
+	WATCH_PALETTE_PERSONAL_IRIS,
+	WATCH_PALETTE_MONOCHROME,
+	WATCH_PALETTE_COUNT,
+};
+
 struct watch_options {
 	bool tui;
 	bool alternate_screen;
@@ -182,6 +196,7 @@ struct watch_options {
 	int led_interval_ms;
 	size_t log_history;
 	size_t led_history;
+	enum watch_palette palette;
 };
 
 struct debug_options {
@@ -433,6 +448,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"                        default 100\n"
 			"  --log-history ENTRIES retained TUI log messages; default 4096\n"
 			"  --led-history ENTRIES retained TUI LED responses; default 512\n"
+			"  --palette NAME        select TUI palette; default auto\n"
+			"                        hardware and colour aliases are accepted\n"
 			"  --no-repeat-summary   print repeated log messages individually\n"
 			"\n"
 			"TUI keys:\n"
@@ -440,8 +457,9 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  Up/Down, PgUp/PgDn    scroll selected pane; End returns to live\n"
 			"  a                     toggle Filtered and All observations\n"
 			"  t                     show or hide LED timestamps\n"
-			"  c, m                  cycle colour palettes or use monochrome\n"
-			"  h, q                  show the key guide or quit\n");
+			"  c, m                  cycle palettes or toggle monochrome\n"
+			"  h, ?                  show or hide Help\n"
+			"  q                     quit\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -5284,13 +5302,13 @@ static int flush_log_repeat_summary(struct log_repeat_state *state,
 	if (!state->pending_count)
 		return 0;
 
-	len = strlen(state->pending_key) + 64;
+	len = strlen(state->pending_key) + 80;
 	summary = malloc(len);
 	if (!summary) {
 		perror("malloc");
 		return -1;
 	}
-	snprintf(summary, len, "message repeated %u time%s: %s",
+	snprintf(summary, len, "earlier message repeated %u additional time%s: %s",
 		 state->pending_count, state->pending_count == 1 ? "" : "s",
 		 state->pending_key);
 	ret = sink->emit(sink->context, summary);
@@ -5518,7 +5536,107 @@ static int do_log_command(const struct options *opts, int argc, char **argv,
 	return do_l1_command(opts, "log", false);
 }
 
+struct watch_palette_info {
+	enum watch_palette id;
+	const char *name;
+	const char *label;
+	const char *inspiration;
+};
+
+static const struct watch_palette_info watch_palettes[] = {
+	{ WATCH_PALETTE_INDIGO, "indigo", "Indigo",
+	  "SGI Indigo / Onyx" },
+	{ WATCH_PALETTE_INDIGO2, "indigo2", "Indigo2",
+	  "SGI Indigo2 / Octane" },
+	{ WATCH_PALETTE_IMPACT, "impact", "IMPACT",
+	  "SGI Indigo2 IMPACT" },
+	{ WATCH_PALETTE_INDY, "indy", "Indy", "SGI Indy" },
+	{ WATCH_PALETTE_O2, "o2", "O2", "SGI O2 / Octane2 / Origin" },
+	{ WATCH_PALETTE_O2PLUS, "o2plus", "O2+",
+	  "SGI O2+ / Tezro" },
+	{ WATCH_PALETTE_FUEL, "fuel", "Fuel", "SGI Fuel / Crimson" },
+	{ WATCH_PALETTE_PERSONAL_IRIS, "personal-iris", "Personal IRIS",
+	  "SGI Personal IRIS" },
+};
+
+static void normalize_palette_name(const char *name, char *normalized,
+				   size_t normalized_size)
+{
+	size_t used = 0;
+
+	while (*name && used + 1 < normalized_size) {
+		if (isalnum((unsigned char)*name)) {
+			normalized[used++] = (char)tolower((unsigned char)*name);
+		} else if (*name == '+' && used + 4 < normalized_size) {
+			memcpy(normalized + used, "plus", 4);
+			used += 4;
+		}
+		name++;
+	}
+	normalized[used] = '\0';
+	if (!strncmp(normalized, "sgi", 3))
+		memmove(normalized, normalized + 3, strlen(normalized + 3) + 1);
+}
+
+static bool parse_watch_palette(const char *name, enum watch_palette *palette)
+{
+	char normalized[64];
+
+	normalize_palette_name(name, normalized, sizeof(normalized));
+	if (!strcmp(normalized, "auto"))
+		*palette = WATCH_PALETTE_AUTO;
+	else if (!strcmp(normalized, "indigo") ||
+		 !strcmp(normalized, "purple") || !strcmp(normalized, "onyx"))
+		*palette = WATCH_PALETTE_INDIGO;
+	else if (!strcmp(normalized, "indigo2") ||
+		 !strcmp(normalized, "teal") || !strcmp(normalized, "green") ||
+		 !strcmp(normalized, "octane"))
+		*palette = WATCH_PALETTE_INDIGO2;
+	else if (!strcmp(normalized, "impact") ||
+		 !strcmp(normalized, "indigo2impact") ||
+		 !strcmp(normalized, "magenta") ||
+		 !strcmp(normalized, "burgundy"))
+		*palette = WATCH_PALETTE_IMPACT;
+	else if (!strcmp(normalized, "indy") ||
+		 !strcmp(normalized, "lightblue") ||
+		 !strcmp(normalized, "skyblue"))
+		*palette = WATCH_PALETTE_INDY;
+	else if (!strcmp(normalized, "o2") || !strcmp(normalized, "blue") ||
+		 !strcmp(normalized, "midblue") ||
+		 !strcmp(normalized, "octane2") ||
+		 !strncmp(normalized, "origin", 6) ||
+		 !strncmp(normalized, "onyx2", 5) ||
+		 !strncmp(normalized, "onyx3", 5))
+		*palette = WATCH_PALETTE_O2;
+	else if (!strcmp(normalized, "o2plus") ||
+		 !strcmp(normalized, "violet") || !strcmp(normalized, "tezro"))
+		*palette = WATCH_PALETTE_O2PLUS;
+	else if (!strcmp(normalized, "fuel") || !strcmp(normalized, "red") ||
+		 !strcmp(normalized, "crimson"))
+		*palette = WATCH_PALETTE_FUEL;
+	else if (!strcmp(normalized, "personaliris") ||
+		 !strcmp(normalized, "brown"))
+		*palette = WATCH_PALETTE_PERSONAL_IRIS;
+	else if (!strcmp(normalized, "monochrome") ||
+		 !strcmp(normalized, "mono"))
+		*palette = WATCH_PALETTE_MONOCHROME;
+	else
+		return false;
+	return true;
+}
+
 #ifdef SGIL1_WITH_TUI
+static const struct watch_palette_info *watch_palette_info_for_id(
+	enum watch_palette id)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(watch_palettes); i++)
+		if (watch_palettes[i].id == id)
+			return &watch_palettes[i];
+	return &watch_palettes[0];
+}
+
 enum watch_tui_focus {
 	WATCH_TUI_FOCUS_LOG,
 	WATCH_TUI_FOCUS_LEDS,
@@ -5562,8 +5680,9 @@ struct watch_tui_state {
 	bool help_visible;
 	bool alternate_screen;
 	bool initialized;
-	int color_theme;
-	int last_color_theme;
+	bool monochrome;
+	enum watch_palette palette;
+	int background;
 };
 
 struct watch_tui_rect {
@@ -5578,10 +5697,9 @@ enum watch_tui_color_pair {
 	WATCH_TUI_COLOR_WARNING,
 };
 
-enum watch_tui_color_theme {
-	WATCH_TUI_THEME_DARK,
-	WATCH_TUI_THEME_LIGHT,
-	WATCH_TUI_THEME_MONOCHROME,
+enum watch_tui_background {
+	WATCH_TUI_BACKGROUND_DARK,
+	WATCH_TUI_BACKGROUND_LIGHT,
 };
 
 enum watch_tui_line_style {
@@ -5600,7 +5718,7 @@ struct watch_tui_content {
 static bool watch_tui_colors_enabled(const struct watch_tui_state *state)
 {
 	return state->color_capable &&
-	       state->color_theme != WATCH_TUI_THEME_MONOCHROME;
+	       !state->monochrome;
 }
 #endif
 
@@ -5852,6 +5970,27 @@ static size_t watch_tui_led_visible_line_count(
 			return SIZE_MAX;
 		count += snapshot->filtered_lines.count +
 			 (state->show_led_timestamps ? 1U : 0U);
+	}
+	return count;
+}
+
+static size_t watch_tui_led_filtered_state_count(
+	const struct watch_tui_led_history *history)
+{
+	const struct log_line_list *previous = NULL;
+	size_t count = 0;
+	size_t i;
+
+	for (i = 0; i < history->run_count; i++) {
+		const struct watch_tui_led_snapshot *snapshot =
+			watch_tui_led_snapshot_at(history, i);
+
+		if (!snapshot->filtered_lines.count ||
+		    (previous && log_line_lists_equal(
+			previous, &snapshot->filtered_lines)))
+			continue;
+		previous = &snapshot->filtered_lines;
+		count++;
 	}
 	return count;
 }
@@ -6128,18 +6267,6 @@ static void watch_tui_format_console_activity(
 			 elapsed_seconds / (24U * 60U * 60U));
 }
 
-static const char *watch_tui_theme_name(int theme)
-{
-	switch (theme) {
-	case WATCH_TUI_THEME_LIGHT:
-		return "light";
-	case WATCH_TUI_THEME_MONOCHROME:
-		return "monochrome";
-	default:
-		return "dark";
-	}
-}
-
 static int watch_tui_background_hint(void)
 {
 	const char *colorfgbg = getenv("COLORFGBG");
@@ -6148,64 +6275,221 @@ static int watch_tui_background_hint(void)
 	long value;
 
 	if (!colorfgbg || !*colorfgbg)
-		return WATCH_TUI_THEME_DARK;
+		return WATCH_TUI_BACKGROUND_DARK;
 	background = strrchr(colorfgbg, ';');
 	background = background ? background + 1 : colorfgbg;
 	errno = 0;
 	value = strtol(background, &end, 10);
 	if (errno || end == background || *end)
-		return WATCH_TUI_THEME_DARK;
+		return WATCH_TUI_BACKGROUND_DARK;
 	if (value == 7 || value == 15 || value == 231 || value >= 250)
-		return WATCH_TUI_THEME_LIGHT;
-	return WATCH_TUI_THEME_DARK;
+		return WATCH_TUI_BACKGROUND_LIGHT;
+	return WATCH_TUI_BACKGROUND_DARK;
 }
 
-static bool watch_tui_apply_theme(struct watch_tui_state *state, int theme)
+struct watch_tui_palette_colors {
+	enum watch_palette id;
+	short light_256;
+	short dark_256;
+	short light_basic;
+	short dark_basic;
+};
+
+/* Fixed xterm-256 shades with basic-colour fallbacks for older terminals. */
+static const struct watch_tui_palette_colors watch_tui_palette_colors[] = {
+	{ WATCH_PALETTE_INDIGO, 54, 99, COLOR_MAGENTA, COLOR_MAGENTA },
+	{ WATCH_PALETTE_INDIGO2, 23, 44, COLOR_CYAN, COLOR_CYAN },
+	{ WATCH_PALETTE_IMPACT, 89, 170, COLOR_MAGENTA, COLOR_MAGENTA },
+	{ WATCH_PALETTE_INDY, 25, 81, COLOR_BLUE, COLOR_CYAN },
+	{ WATCH_PALETTE_O2, 18, 39, COLOR_BLUE, COLOR_BLUE },
+	{ WATCH_PALETTE_O2PLUS, 55, 135, COLOR_MAGENTA, COLOR_MAGENTA },
+	{ WATCH_PALETTE_FUEL, 124, 203, COLOR_RED, COLOR_RED },
+	{ WATCH_PALETTE_PERSONAL_IRIS, 94, 179, COLOR_RED, COLOR_YELLOW },
+};
+
+static const struct watch_tui_palette_colors *watch_tui_colors_for_palette(
+	enum watch_palette palette)
 {
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(watch_tui_palette_colors); i++)
+		if (watch_tui_palette_colors[i].id == palette)
+			return &watch_tui_palette_colors[i];
+	return &watch_tui_palette_colors[0];
+}
+
+static bool watch_tui_apply_palette(struct watch_tui_state *state,
+				    enum watch_palette palette)
+{
+	const struct watch_tui_palette_colors *colors;
 	short accent;
 	short warning;
 
-	if (theme == WATCH_TUI_THEME_MONOCHROME) {
-		state->color_theme = theme;
-		return true;
-	}
 	if (!state->color_capable)
 		return false;
-	if (theme == WATCH_TUI_THEME_LIGHT) {
-		accent = COLOR_BLUE;
-		warning = COLOR_RED;
+	colors = watch_tui_colors_for_palette(palette);
+	if (COLORS >= 256) {
+		accent = state->background == WATCH_TUI_BACKGROUND_LIGHT ?
+			 colors->light_256 : colors->dark_256;
 	} else {
-		accent = COLOR_CYAN;
-		warning = COLOR_YELLOW;
+		accent = state->background == WATCH_TUI_BACKGROUND_LIGHT ?
+			 colors->light_basic : colors->dark_basic;
 	}
+	warning = state->background == WATCH_TUI_BACKGROUND_LIGHT ?
+		  COLOR_RED : COLOR_YELLOW;
 	if (init_pair(WATCH_TUI_COLOR_ACCENT, accent, -1) == ERR ||
 	    init_pair(WATCH_TUI_COLOR_WARNING, warning, -1) == ERR)
 		return false;
-	state->color_theme = theme;
-	state->last_color_theme = theme;
+	state->palette = palette;
 	return true;
+}
+
+static enum watch_palette watch_tui_palette_for_platform(const char *text)
+{
+	if (contains_ci(text, "O2+") || contains_ci(text, "Tezro"))
+		return WATCH_PALETTE_O2PLUS;
+	if (contains_ci(text, "Fuel") || contains_ci(text, "Crimson"))
+		return WATCH_PALETTE_FUEL;
+	if (contains_ci(text, "Indigo2 IMPACT"))
+		return WATCH_PALETTE_IMPACT;
+	if (contains_ci(text, "Personal IRIS"))
+		return WATCH_PALETTE_PERSONAL_IRIS;
+	if (contains_ci(text, "Octane2") || contains_ci(text, "Origin") ||
+	    contains_ci(text, "Onyx2") || contains_ci(text, "Onyx3") ||
+	    contains_ci(text, "O2"))
+		return WATCH_PALETTE_O2;
+	if (contains_ci(text, "Indigo2") || contains_ci(text, "Octane"))
+		return WATCH_PALETTE_INDIGO2;
+	if (contains_ci(text, "Indy"))
+		return WATCH_PALETTE_INDY;
+	return WATCH_PALETTE_INDIGO;
+}
+
+static void watch_tui_palette_status(struct watch_tui_state *state,
+				     bool automatic)
+{
+	const struct watch_palette_info *info =
+		watch_palette_info_for_id(state->palette);
+
+	snprintf(state->status, sizeof(state->status), "%s palette: %s%s",
+		 info->label, info->inspiration, automatic ? " (auto)" : "");
+}
+
+static void watch_tui_draw_help_border(WINDOW *window)
+{
+#if defined(NCURSES_WIDECHAR) && defined(WACS_D_VLINE) && \
+	defined(WACS_D_HLINE) && defined(WACS_D_ULCORNER) && \
+	defined(WACS_D_URCORNER) && defined(WACS_D_LLCORNER) && \
+	defined(WACS_D_LRCORNER)
+	(void)wborder_set(window, WACS_D_VLINE, WACS_D_VLINE,
+			  WACS_D_HLINE, WACS_D_HLINE, WACS_D_ULCORNER,
+			  WACS_D_URCORNER, WACS_D_LLCORNER,
+			  WACS_D_LRCORNER);
+#else
+	wattron(window, A_BOLD);
+	box(window, 0, 0);
+	wattroff(window, A_BOLD);
+#endif
+}
+
+static void watch_tui_help_text(WINDOW *window, int row, int column,
+				const char *text, int width, bool active)
+{
+	if (active)
+		wattron(window, A_REVERSE);
+	mvwaddnstr(window, row, column, text, width);
+	if (active)
+		wattroff(window, A_REVERSE);
+}
+
+static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
+				     WINDOW *window, int width)
+{
+	const struct watch_palette_info *palette =
+		watch_palette_info_for_id(state->palette);
+	int heading_x = (width - 4) / 2;
+
+	wattron(window, A_BOLD);
+	mvwaddnstr(window, 2, heading_x, "Keys", 4);
+	mvwaddnstr(window, 4, 4, "Key", 12);
+	mvwaddnstr(window, 4, 18, "Action", 31);
+	mvwaddnstr(window, 4, 51, "Setting", width - 55);
+	wattroff(window, A_BOLD);
+
+	mvwaddnstr(window, 5, 4, "Tab", 12);
+	mvwaddnstr(window, 5, 18, "Select pane", 31);
+	watch_tui_help_text(window, 5, 51, "Log", 3,
+			    state->focus == WATCH_TUI_FOCUS_LOG);
+	mvwaddnstr(window, 5, 56, "/", 1);
+	watch_tui_help_text(window, 5, 58, "LEDs", 4,
+			    state->focus == WATCH_TUI_FOCUS_LEDS);
+	mvwaddnstr(window, 6, 4, "Up / Down", 12);
+	mvwaddnstr(window, 6, 18, "Scroll selected pane by line", 31);
+	mvwaddnstr(window, 7, 4, "PgUp / PgDn", 12);
+	mvwaddnstr(window, 7, 18, "Scroll selected pane by page", 31);
+	mvwaddnstr(window, 8, 4, "End", 12);
+	mvwaddnstr(window, 8, 18, "Return selected pane to live", 31);
+	mvwaddnstr(window, 9, 4, "a", 12);
+	mvwaddnstr(window, 9, 18, "Observation view", 31);
+	watch_tui_help_text(window, 9, 51, "Filtered", 8, !state->all_mode);
+	mvwaddnstr(window, 9, 61, "/", 1);
+	watch_tui_help_text(window, 9, 63, "All", 3, state->all_mode);
+	mvwaddnstr(window, 10, 4, "t", 12);
+	mvwaddnstr(window, 10, 18, "LED timestamps", 31);
+	watch_tui_help_text(window, 10, 51, "Off", 3,
+			    !state->show_led_timestamps);
+	mvwaddnstr(window, 10, 56, "/", 1);
+	watch_tui_help_text(window, 10, 58, "On", 2,
+			    state->show_led_timestamps);
+	mvwaddnstr(window, 11, 4, "c", 12);
+	mvwaddnstr(window, 11, 18, "Cycle hardware palette", 31);
+	mvwaddnstr(window, 11, 51, palette->label, width - 55);
+	mvwaddnstr(window, 12, 4, "m", 12);
+	mvwaddnstr(window, 12, 18, "Colour output", 31);
+	watch_tui_help_text(window, 12, 51, "Colour", 6,
+			    !state->monochrome && state->color_capable);
+	mvwaddnstr(window, 12, 59, "/", 1);
+	watch_tui_help_text(window, 12, 61, "Mono", 4,
+			    state->monochrome || !state->color_capable);
+	mvwaddnstr(window, 13, 4, "h / ?", 12);
+	mvwaddnstr(window, 13, 18, "Close Help", 31);
+	mvwaddnstr(window, 14, 4, "q", 12);
+	mvwaddnstr(window, 14, 18, "Quit", 31);
+}
+
+static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
+					WINDOW *window, int width)
+{
+	char view[16];
+	char timestamps[8];
+	char colour[16];
+
+	snprintf(view, sizeof(view), "%s", state->all_mode ? "All" : "Filtered");
+	snprintf(timestamps, sizeof(timestamps), "%s",
+		 state->show_led_timestamps ? "On" : "Off");
+	snprintf(colour, sizeof(colour), "%s",
+		 state->monochrome || !state->color_capable ? "Mono" : "Colour");
+	wattron(window, A_BOLD);
+	mvwaddnstr(window, 1, (width - 4) / 2, "Keys", 4);
+	wattroff(window, A_BOLD);
+	mvwaddnstr(window, 2, 2, "Tab pane    Up/Dn line", width - 4);
+	mvwaddnstr(window, 3, 2, "PgUp/PgDn page  End live", width - 4);
+	mvwprintw(window, 4, 2, "a view:%-8s t time:%s", view, timestamps);
+	mvwprintw(window, 5, 2, "c palette   m output:%s", colour);
+	mvwaddnstr(window, 6, 2, "h/? close Help   q quit", width - 4);
 }
 
 static void watch_tui_draw_help(const struct watch_tui_state *state)
 {
-	static const char *const lines[] = {
-		"Tab pane       Up/Down line",
-		"PgUp/PgDn page   End live",
-		"a Filtered/All   t LED time",
-		"c colour cycle   m monochrome",
-		"h close help     q quit",
-	};
 	WINDOW *window;
-	int width = COLS - 4;
-	int height = (int)ARRAY_SIZE(lines) + 2;
+	bool wide = COLS >= 78 && LINES >= 19;
+	int width = wide ? 76 : COLS - 2;
+	int height = wide ? 17 : 8;
 	int y;
 	int x;
-	size_t i;
 
 	if (!state->help_visible)
 		return;
-	if (width > 54)
-		width = 54;
 	if (height > LINES - 2)
 		height = LINES - 2;
 	if (width < 4 || height < 3)
@@ -6218,14 +6502,16 @@ static void watch_tui_draw_help(const struct watch_tui_state *state)
 	werase(window);
 	if (watch_tui_colors_enabled(state))
 		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
-	box(window, 0, 0);
+	watch_tui_draw_help_border(window);
 	wattron(window, A_BOLD);
-	mvwaddnstr(window, 0, 2, " Keys ", width - 4);
+	mvwaddnstr(window, 0, 3, " Help ", width - 6);
 	wattroff(window, A_BOLD);
 	if (watch_tui_colors_enabled(state))
 		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
-	for (i = 0; i < ARRAY_SIZE(lines) && (int)i < height - 2; i++)
-		mvwaddnstr(window, 1 + (int)i, 2, lines[i], width - 4);
+	if (wide)
+		watch_tui_draw_wide_help(state, window, width);
+	else
+		watch_tui_draw_compact_help(state, window, width);
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -6243,6 +6529,8 @@ static void watch_tui_render(struct watch_display *display)
 	char activity[64];
 	char log_title[80];
 	char led_title[80];
+	const struct watch_palette_info *palette;
+	size_t filtered_led_states;
 	int activity_x;
 	int footer_width;
 	int header_attributes = A_REVERSE | A_BOLD;
@@ -6262,11 +6550,13 @@ static void watch_tui_render(struct watch_display *display)
 	watch_tui_content_for_focus(state, WATCH_TUI_FOCUS_LEDS, &led_content);
 	shown_log = state->all_mode ? &state->raw_log_history :
 				    &state->log_history;
+	palette = watch_palette_info_for_id(state->palette);
 	erase();
 	snprintf(header, sizeof(header),
-		 " sgil1ctl watch | %s | %s palette | queue pressure %u/%u",
-		 state->all_mode ? "all" : "filtered",
-		 watch_tui_theme_name(state->color_theme),
+		 " sgil1ctl watch | %s | %s palette%s | queue pressure %u/%u",
+		 state->all_mode ? "All" : "Filtered", palette->label,
+		 state->monochrome || !state->color_capable ?
+			 " (monochrome)" : "",
 		 display->queue_pressure, SGIL1_QUEUE_PRESSURE_MAX);
 	if (watch_tui_colors_enabled(state))
 		header_attributes |= COLOR_PAIR(display->queue_pressure ?
@@ -6278,9 +6568,19 @@ static void watch_tui_render(struct watch_display *display)
 
 	snprintf(log_title, sizeof(log_title), " L1 log %zu/%zu ",
 		 shown_log->count, shown_log->capacity);
-	snprintf(led_title, sizeof(led_title), " LEDs %zu/%zu ",
-		 state->led_history.response_count,
-		 state->led_history.capacity);
+	filtered_led_states = watch_tui_led_filtered_state_count(
+		&state->led_history);
+	if (state->all_mode) {
+		snprintf(led_title, sizeof(led_title), " LEDs %zu/%zu samples ",
+			 state->led_history.response_count,
+			 state->led_history.capacity);
+	} else {
+		snprintf(led_title, sizeof(led_title),
+			 " LEDs %zu state%s | %zu/%zu samples ",
+			 filtered_led_states, filtered_led_states == 1 ? "" : "s",
+			 state->led_history.response_count,
+			 state->led_history.capacity);
+	}
 	watch_tui_draw_pane(state, &log_rect, log_title, &log_content,
 			    state->log_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LOG);
@@ -6289,7 +6589,7 @@ static void watch_tui_render(struct watch_display *display)
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
 	watch_tui_draw_help(state);
 
-	snprintf(footer, sizeof(footer), " %s%s | h help",
+	snprintf(footer, sizeof(footer), " %s%s | h/? Help",
 		 state->status[0] ? state->status : "Monitoring L1",
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
@@ -6578,6 +6878,27 @@ static void watch_tui_adjust_scroll(struct watch_tui_state *state,
 	}
 }
 
+static void watch_tui_cycle_palette(struct watch_tui_state *state)
+{
+	size_t i;
+	size_t next = 0;
+
+	if (!state->color_capable) {
+		snprintf(state->status, sizeof(state->status),
+			 "Terminal colour is unavailable");
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(watch_palettes); i++) {
+		if (watch_palettes[i].id != state->palette)
+			continue;
+		next = (i + 1) % ARRAY_SIZE(watch_palettes);
+		break;
+	}
+	state->monochrome = false;
+	if (watch_tui_apply_palette(state, watch_palettes[next].id))
+		watch_tui_palette_status(state, false);
+}
+
 static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 {
 	struct watch_tui_state *state = &display->tui_state;
@@ -6616,34 +6937,26 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		break;
 	case 'h':
 	case 'H':
+	case '?':
 		state->help_visible = !state->help_visible;
 		break;
 	case 'c':
 	case 'C':
-		if (!state->color_capable) {
-			snprintf(state->status, sizeof(state->status),
-				 "Terminal colour is unavailable");
-		} else {
-			int theme = state->color_theme ==
-				WATCH_TUI_THEME_MONOCHROME ?
-				state->last_color_theme :
-				(state->color_theme == WATCH_TUI_THEME_DARK ?
-				 WATCH_TUI_THEME_LIGHT : WATCH_TUI_THEME_DARK);
-
-			if (watch_tui_apply_theme(state, theme))
-				snprintf(state->status, sizeof(state->status),
-					 "%s colour palette",
-					 theme == WATCH_TUI_THEME_LIGHT ?
-					 "Light-background" : "Dark-background");
-		}
+		watch_tui_cycle_palette(state);
 		break;
 	case 'm':
 	case 'M':
-		if (state->color_theme != WATCH_TUI_THEME_MONOCHROME)
-			state->last_color_theme = state->color_theme;
-		(void)watch_tui_apply_theme(state, WATCH_TUI_THEME_MONOCHROME);
-		snprintf(state->status, sizeof(state->status),
-			 "Monochrome palette");
+		if (!state->color_capable) {
+			snprintf(state->status, sizeof(state->status),
+				 "Terminal colour is unavailable");
+			break;
+		}
+		state->monochrome = !state->monochrome;
+		if (state->monochrome)
+			snprintf(state->status, sizeof(state->status),
+				 "Monochrome output");
+		else
+			watch_tui_palette_status(state, false);
 		break;
 	case KEY_UP:
 		watch_tui_adjust_scroll(state, true, 1);
@@ -6860,27 +7173,71 @@ static int watch_display_init(struct watch_display *display,
 		noecho();
 		keypad(stdscr, true);
 		(void)curs_set(0);
-		state->color_theme = watch_tui_background_hint();
-		state->last_color_theme = state->color_theme;
+		state->background = watch_tui_background_hint();
+		state->palette = watch->palette == WATCH_PALETTE_AUTO ||
+				 watch->palette == WATCH_PALETTE_MONOCHROME ?
+				 WATCH_PALETTE_INDIGO : watch->palette;
+		state->monochrome = watch->palette == WATCH_PALETTE_MONOCHROME;
 		if (has_colors() && start_color() == OK &&
 		    use_default_colors() == OK) {
 			state->color_capable = true;
-			if (!watch_tui_apply_theme(state, state->color_theme)) {
+			if (!watch_tui_apply_palette(state, state->palette)) {
 				state->color_capable = false;
-				state->color_theme = WATCH_TUI_THEME_MONOCHROME;
+				state->monochrome = true;
 			}
 		} else {
-			state->color_theme = WATCH_TUI_THEME_MONOCHROME;
+			state->monochrome = true;
 		}
 		state->focus = WATCH_TUI_FOCUS_LOG;
-		snprintf(state->status, sizeof(state->status),
-			 "Monitoring L1");
+		if (watch->palette == WATCH_PALETTE_AUTO)
+			snprintf(state->status, sizeof(state->status),
+				 "Detecting L1 palette");
+		else if (watch->palette == WATCH_PALETTE_MONOCHROME)
+			snprintf(state->status, sizeof(state->status),
+				 "Monochrome output");
+		else
+			watch_tui_palette_status(state, false);
 		watch_tui_render(display);
 	}
 #else
 	(void)watch;
 #endif
 	return 0;
+}
+
+static void watch_display_autoselect_palette(
+	struct watch_display *display, const struct watch_options *watch,
+	const struct options *cmd_opts)
+{
+#ifdef SGIL1_WITH_TUI
+	char *version = NULL;
+	enum watch_palette palette;
+
+	if (!display->tui || watch->palette != WATCH_PALETTE_AUTO)
+		return;
+	if (l1_text_command_status(cmd_opts, "version", false, &version)) {
+		snprintf(display->tui_state.status,
+			 sizeof(display->tui_state.status),
+			 "Indigo palette: automatic detection unavailable");
+		watch_tui_render(display);
+		free(version);
+		return;
+	}
+	palette = watch_tui_palette_for_platform(version);
+	free(version);
+	display->tui_state.palette = palette;
+	if (display->tui_state.color_capable &&
+	    !watch_tui_apply_palette(&display->tui_state, palette)) {
+		display->tui_state.color_capable = false;
+		display->tui_state.monochrome = true;
+	}
+	watch_tui_palette_status(&display->tui_state, true);
+	watch_tui_render(display);
+#else
+	(void)display;
+	(void)watch;
+	(void)cmd_opts;
+#endif
 }
 
 static void watch_display_finish(struct watch_display *display)
@@ -6935,7 +7292,7 @@ static void watch_report_queue_pressure(struct watch_display *display,
 static int parse_watch_args(int argc, char **argv, int start,
 			    struct watch_options *watch)
 {
-	bool history_option = false;
+	const char *tui_option = NULL;
 	int i;
 
 	memset(watch, 0, sizeof(*watch));
@@ -6945,6 +7302,7 @@ static int parse_watch_args(int argc, char **argv, int start,
 	watch->led_interval_ms = SGIL1_WATCH_LED_MIN_MS;
 	watch->log_history = SGIL1_TUI_LOG_HISTORY_DEFAULT;
 	watch->led_history = SGIL1_TUI_LED_HISTORY_DEFAULT;
+	watch->palette = WATCH_PALETTE_AUTO;
 
 	for (i = start; i < argc; i++) {
 		if (!strcmp(argv[i], "--tui")) {
@@ -6982,7 +7340,7 @@ static int parse_watch_args(int argc, char **argv, int start,
 			bool log_history = !strcmp(argv[i], "--log-history");
 			int entries;
 
-			history_option = true;
+			tui_option = argv[i];
 			if (++i >= argc) {
 				fprintf(stderr, "%s needs an entry count\n",
 					log_history ? "--log-history" :
@@ -7002,6 +7360,23 @@ static int parse_watch_args(int argc, char **argv, int start,
 				watch->log_history = (size_t)entries;
 			else
 				watch->led_history = (size_t)entries;
+		} else if (!strcmp(argv[i], "--palette")) {
+			size_t j;
+
+			tui_option = argv[i];
+			if (++i >= argc) {
+				fprintf(stderr, "--palette needs a name\n");
+				return -1;
+			}
+			if (parse_watch_palette(argv[i], &watch->palette))
+				continue;
+			fprintf(stderr, "unknown TUI palette: %s\n",
+				argv[i]);
+			fprintf(stderr, "available palettes: auto");
+			for (j = 0; j < ARRAY_SIZE(watch_palettes); j++)
+				fprintf(stderr, ", %s", watch_palettes[j].name);
+			fprintf(stderr, ", monochrome\n");
+			return -1;
 		} else if (!strcmp(argv[i], "--no-repeat-summary")) {
 			watch->repeat_summary = false;
 		} else {
@@ -7014,9 +7389,8 @@ static int parse_watch_args(int argc, char **argv, int start,
 		fprintf(stderr, "--no-alternate-screen requires --tui\n");
 		return -1;
 	}
-	if (history_option && !watch->tui) {
-		fprintf(stderr,
-			"--log-history and --led-history apply only with --tui\n");
+	if (tui_option && !watch->tui) {
+		fprintf(stderr, "%s applies only with --tui\n", tui_option);
 		return -1;
 	}
 #ifndef SGIL1_WITH_TUI
@@ -7321,8 +7695,10 @@ static int do_watch_command(const struct options *opts, int argc, char **argv,
 	l1_wait_cancel_enabled = true;
 	if (prepare_command_options(opts, &cmd_opts))
 		ret = watch_stop_requested ? 0 : 1;
-	else
+	else {
+		watch_display_autoselect_palette(&display, &watch, &cmd_opts);
 		ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display);
+	}
 	l1_wait_cancel_enabled = false;
 	l1_wait_input_hook = NULL;
 	l1_wait_input_context = NULL;

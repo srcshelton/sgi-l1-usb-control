@@ -480,6 +480,10 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "fan"))
 		return "fan(s) are on.\nfan 0 EXHAUST  rpm 1298\n";
 	if (!strcmp(cmd, "leds")) {
+		if (getenv("SGIL1_MOCK_WATCH_ACTIVITY_ONLY"))
+			return "CPU  A: 0xff: Console poll found data for reading\n"
+			       "        0x7f: unknown LED status.\n"
+			       "        0xfe: (no description available)\n";
 		if (getenv("SGIL1_MOCK_WATCH")) {
 			if (mock_leds_call_count++ == 0)
 				return "CPU  A: 0xff: Console poll found data for reading\n"

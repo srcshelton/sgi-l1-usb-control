@@ -48,6 +48,7 @@ def main():
             "LD_PRELOAD": str(MOCK),
             "SGIL1_MOCK": "1",
             "SGIL1_MOCK_WATCH": "1",
+            "SGIL1_MOCK_WATCH_ACTIVITY_ONLY": "1",
             "TERM": "xterm-256color",
             "COLORFGBG": "0;15",
             "TZ": "Europe/London",
@@ -84,10 +85,18 @@ def main():
     os.close(slave)
     output = bytearray()
     try:
-        drain(master, output, 1.5)
-        initial = redraw(proc, master)
-        output.extend(initial)
-        if b"L1 log 3/3" not in initial or b"LEDs 2/2" not in initial:
+        drain(master, output, 1.0)
+        deadline = time.monotonic() + 5.0
+        initial = bytearray()
+        while time.monotonic() < deadline:
+            initial = redraw(proc, master)
+            output.extend(initial)
+            if (
+                b"L1 log 3/3" in initial
+                and b"LEDs 0 states | 2/2 samples" in initial
+            ):
+                break
+        else:
             raise AssertionError("TUI histories did not reach their configured limits")
         if b"0xFE" in initial:
             raise AssertionError("filtered TUI view exposed a raw PROM value")
@@ -95,8 +104,35 @@ def main():
             raise AssertionError("filtered TUI view exposed a raw repeated log")
         if re.search(rb"\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d{3}", initial):
             raise AssertionError("LED timestamps were not hidden by default")
-        if b"\x1b[34m" not in initial or b"\x1b[31m" not in initial:
-            raise AssertionError("light-background palette was not selected")
+        if b"Fuel palette" not in initial or b"\x1b[38;5;124m" not in initial:
+            raise AssertionError("Fuel palette was not selected automatically")
+
+        os.write(master, b"?")
+        help_view = redraw(proc, master)
+        output.extend(help_view)
+        if (
+            b"Help" not in help_view
+            or b"Keys" not in help_view
+            or b"Observation view" not in help_view
+            or b"Filtered" not in help_view
+            or b"All" not in help_view
+        ):
+            raise AssertionError("wide TUI Help view was incomplete")
+        if not re.search(rb"\x1b\[[0-9;]*7mFiltered", help_view):
+            raise AssertionError("active Help setting was not highlighted")
+
+        os.write(master, b"h")
+        output.extend(redraw(proc, master))
+
+        os.write(master, b"a")
+        all_view = redraw(proc, master)
+        output.extend(all_view)
+        if (
+            b"| All |" not in all_view
+            or b"0xFE: raw PROM value" not in all_view
+            or b"05/27/2026 12:38:04 voltage nominal" not in all_view
+        ):
+            raise AssertionError("All view did not reveal retained raw observations")
 
         os.write(master, b"t")
         timestamped = redraw(proc, master)
@@ -107,16 +143,6 @@ def main():
         ):
             raise AssertionError("TUI did not show timestamped LED responses")
 
-        os.write(master, b"a")
-        all_view = redraw(proc, master)
-        output.extend(all_view)
-        if (
-            b"| all |" not in all_view
-            or b"0xFE: raw PROM value" not in all_view
-            or b"05/27/2026 12:38:04 voltage nominal" not in all_view
-        ):
-            raise AssertionError("All view did not reveal retained raw observations")
-
         fcntl.ioctl(
             master,
             termios.TIOCSWINSZ,
@@ -125,7 +151,11 @@ def main():
         os.write(master, b"h")
         help_view = redraw(proc, master)
         output.extend(help_view)
-        if b"a Filtered/All" not in help_view or b"q quit" not in help_view:
+        if (
+            b"a view:All" not in help_view
+            or b"h/? close Help" not in help_view
+            or b"q quit" not in help_view
+        ):
             raise AssertionError("minimum-size TUI key guide was incomplete")
 
         fcntl.ioctl(
@@ -138,20 +168,26 @@ def main():
         os.write(master, b"m")
         monochrome = redraw(proc, master)
         output.extend(monochrome)
-        if b"\x1b[36m" in monochrome or b"\x1b[33m" in monochrome:
+        if b"Fuel palette (monochrome)" not in monochrome:
+            raise AssertionError("monochrome mode was not identified")
+        if b"\x1b[38;5;124m" in monochrome:
             raise AssertionError("monochrome mode retained colour output")
 
-        os.write(master, b"c")
-        light = redraw(proc, master)
-        output.extend(light)
-        if b"\x1b[34m" not in light:
-            raise AssertionError("colour cycling did not restore the palette")
+        os.write(master, b"m")
+        restored = redraw(proc, master)
+        output.extend(restored)
+        if b"Fuel palette" not in restored or b"\x1b[38;5;124m" not in restored:
+            raise AssertionError("monochrome toggle did not restore the palette")
 
         os.write(master, b"c")
-        dark = redraw(proc, master)
-        output.extend(dark)
-        if b"\x1b[36m" not in dark or b"\x1b[33m" not in dark:
-            raise AssertionError("colour cycling did not select the dark palette")
+        cycled = redraw(proc, master)
+        output.extend(cycled)
+        if (
+            b"Personal IRIS palette" not in cycled
+            or b"SGI Personal IRIS" not in cycled
+            or b"\x1b[38;5;94m" not in cycled
+        ):
+            raise AssertionError("colour cycling did not select the next palette")
 
         os.write(master, b"q")
         proc.wait(timeout=1)
@@ -164,7 +200,7 @@ def main():
 
     if proc.returncode != 0:
         raise AssertionError(f"TUI exited with status {proc.returncode}")
-    if b"\x1b[34m" not in output or b"\x1b[31m" not in output:
+    if b"\x1b[38;5;124m" not in output or b"\x1b[38;5;94m" not in output:
         raise AssertionError("TUI did not render its restrained colour accents")
     if not re.search(rb"\x1b\[[012]?[KJ]", output):
         raise AssertionError("TUI did not clear the final primary-screen line")
