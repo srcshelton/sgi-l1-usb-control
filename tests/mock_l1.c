@@ -333,6 +333,11 @@ static int enqueue_discovery_response(struct mock_fd *m)
 
 static const char *mock_log_response(void)
 {
+	if (getenv("SGIL1_MOCK_LOG_NONADJACENT_REPEAT"))
+		return "05/27/2026 12:38:00 USB-W: IRouter:write failed\n"
+		       "05/27/2026 12:38:00 USB-W: USB:endpoint not configured\n"
+		       "05/27/2026 12:38:00 USB-W: IRouter:write failed\n";
+
 	if (getenv("SGIL1_MOCK_WATCH")) {
 		if (mock_log_call_count++ == 0)
 			return "05/27/2026 12:38:00 L1 booted\n";

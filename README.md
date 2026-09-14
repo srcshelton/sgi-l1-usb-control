@@ -215,10 +215,11 @@ sgil1ctl debug
 ```
 
 `sgil1ctl log --follow` polls the L1 log buffer, prints only newly observed
-lines after the initial snapshot, and summarizes repeated messages using a
-five-line recent-message memory. The USB transport exposed by this driver does
-not provide a known log-change notification stream, so entries can still be
-missed if the L1 log buffer wraps completely between polls. Use
+lines after the initial snapshot, and summarizes only immediately adjacent
+copies of the same message. Intervening messages end a repeat run, matching
+traditional syslog-style folding. The USB transport exposed by this driver
+does not provide a known log-change notification stream, so entries can still
+be missed if the L1 log buffer wraps completely between polls. Use
 `sgil1ctl log --follow --poll-interval MS` to tune the steady-state poll
 interval. Newly observed `USB_WQUE Q full` entries increase a bounded pressure
 level and slow polling; `Q full` and `Q avail` remain visible but do not by
@@ -267,40 +268,61 @@ between successful requests.
 
 An ncurses-enabled build also accepts `sgil1ctl watch --tui`. Wide terminals
 show the log beside a smaller LED pane; narrow terminals put the LED pane above
-the larger log pane. `Tab` selects a pane, while Up/Down and Page Up/Page Down
-scroll; `End` returns the selected pane to live output, and `q` exits. Press
-`h` or `?` to show the complete Help view. The default Filtered view uses the
-existing five-message log repeat summaries, hides transient/raw LED markers,
-and shows LED state changes rather than unchanged repeats. A line such as
-`earlier message repeated 1 additional time` follows the first displayed copy,
-so it represents two raw occurrences in total. Press `a` to toggle the All view
-of every retained observation. LED timestamps are retained but hidden by
-default; `t` shows or hides them. The Help view highlights the active pane,
-Filtered/All mode, timestamp setting, and colour/monochrome setting.
+the larger log pane. `Tab` selects a pane. Up/Down or `k`/`j` scroll by line;
+Page Up/Page Down or `Ctrl-B`/`Ctrl-F` scroll by page; `End` or `G` returns the
+selected pane to live output. `Ctrl-L` redraws the screen, and `q` exits. Press
+`h` or `?` to show the complete Help view; `Esc` and Return also close it. The
+default Filtered view uses adjacent-message repeat summaries, hides
+transient/raw LED markers, and shows LED state changes rather than unchanged
+repeats. A line such as `previous message repeated 1 additional time` follows
+the first displayed copy, so it represents two raw occurrences in total.
+Press `a` to toggle the All view of every retained observation. LED timestamps
+are retained but hidden by default; `t` shows or hides them. The Help view
+highlights the active pane, Filtered/All mode, timestamp setting, and
+colour/monochrome setting.
 
 The TUI normally uses the terminal's alternate screen;
 `--no-alternate-screen` opts into drawing on the primary screen. A restrained
 colour accent identifies the selected pane and queue pressure on capable
 terminals. Ncurses has no portable way to discover the terminal's actual
 background colour. `COLORFGBG`, when present, selects readable shades within
-the active palette. `c` cycles through palettes inspired by SGI Personal IRIS,
-Indigo, Indigo2, Indigo2 IMPACT, Indy, O2/O2+, Octane/Octane2, Onyx, Origin,
-Crimson, Fuel, and Tezro hardware. `m` toggles monochrome and restores the
-previous palette when pressed again. The title and status bar identify the
-palette and its machine inspiration after a change.
+the active palette. Startup remains in the terminal's unaccented default
+colours until automatic chassis detection succeeds. `c` then cycles through
+the cached automatic choice followed by the hardware palettes in chronological
+order, with Personal IRIS deliberately last. Returning to the automatic choice
+does not repeat the L1 `version` request. `m` toggles monochrome and restores
+the previous palette when pressed again. Palette identity and machine
+inspiration appear once, at the right of the title bar. The Help view labels
+an automatically detected palette explicitly, for example `Auto (Fuel)`.
+
+The 256-colour sequence distinguishes Indigo, Crimson, Indy, Indigo2, Onyx,
+Challenge, Indigo2 IMPACT, O2/Origin, Octane, Onyx2, Octane2, O2+, Fuel,
+Tezro, and Personal IRIS shades. Basic-colour terminals collapse those into
+unique purple, red, blue, teal, green, and brown-inspired choices. Curses has
+no portable named brown; that fallback uses low-intensity yellow, which many
+terminals render as dark yellow or brown, while 256-colour terminals use an
+explicit brown shade. Early IRIS purple, teal, red, and blue top-hat colours
+are represented by these existing colour groups rather than duplicated as
+separate palettes; beige no-graphics top hats are not treated as a machine
+family.
 
 Use `--palette NAME` to choose a palette by its canonical name, a listed
 machine name, or a simple colour alias. Canonical names are `indigo`,
-`indigo2`, `impact`, `indy`, `o2`, `o2plus`, `fuel`, and `personal-iris`;
+`crimson`, `indy`, `indigo2`, `onyx`, `challenge`, `impact`, `o2`, `octane`,
+`onyx2`, `octane2`, `o2plus`, `fuel`, `tezro`, and `personal-iris`;
 `monochrome` starts without colour. The default `auto` mode makes one `version`
 request at startup and selects a palette from any chassis family named by the
 firmware. Shared image descriptions cannot always identify the enclosure; for
 example, `[Fuel/PE/O300]` selects Fuel red, so use `--palette o2` for an O300
-when desired. This startup request is not repeated while watching.
+when desired. If detection fails, the TUI remains in its unaccented default.
+This startup request is not repeated while watching.
 
 Watch-mode reads check for `q` or an interrupt at most every 100 ms, including
 while waiting for an L1 response, then close the device normally without
-resetting its pipes solely because the user cancelled.
+resetting its pipes solely because the user cancelled. Before leaving curses,
+the TUI resets terminal attributes and clears its complete final status row.
+This also leaves a clean prompt row when GNU Screen keeps the default TUI on
+its primary display instead of honouring the alternate-screen request.
 
 The TUI keeps process-local circular histories so information remains
 scrollable after it ages out of the L1 firmware buffers. Every retrieved log
@@ -320,10 +342,13 @@ samples contain only filtered activity markers. All view shows the retained
 sample count directly. Each history accepts up to one million entries. Storage
 is allocated for actual strings rather than a fixed byte allowance, and all
 histories are discarded on exit. Long lines wrap within each pane with
-indented continuation rows, and scrolling operates on those visual rows. The
-side-by-side LED pane is capped at 129 terminal columns: 127 content columns
-plus its borders, matching the longest line generated by the current LED
-table.
+indented continuation rows, and scrolling operates on those visual rows. Each
+pane's unpadded bottom-right percentage reports the position of the final
+displayed visual row within its rendered history after filtering, repeat
+collapse, and wrapping. Live view is therefore `100%`; scrolling backwards
+reduces the percentage. The side-by-side LED pane is capped at 129 terminal
+columns: 127 content columns plus its borders, matching the longest line
+generated by the current LED table.
 
 A minimal build keeps the `watch` text interface and reports how to enable the
 optional feature when `watch --tui` is requested. The history-size options

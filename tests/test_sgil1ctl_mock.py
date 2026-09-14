@@ -446,11 +446,20 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("05/27/2026 12:38:02 fan stable", stdout)
         self.assertEqual(stdout.count("05/27/2026 12:38:02 fan stable"), 1)
         self.assertIn(
-            "earlier message repeated 2 additional times: fan stable",
+            "previous message repeated 2 additional times: fan stable",
             stdout,
         )
         self.assertIn("05/27/2026 12:38:05 voltage nominal", stdout)
         self.assertNotIn("advanced without overlap", stderr)
+
+    def test_log_follow_only_collapses_adjacent_repeats(self):
+        stdout, _stderr, _returncode = self.run_follow_for(
+            ["log", "--follow", "--poll-interval", "100"],
+            {"SGIL1_MOCK_LOG_NONADJACENT_REPEAT": "1"},
+        )
+
+        self.assertEqual(stdout.count("IRouter:write failed"), 2, stdout)
+        self.assertNotIn("message repeated", stdout)
 
     def test_log_follow_uses_queue_pressure_without_false_burst_polling(self):
         proc, log = self.run_with_log(
@@ -577,7 +586,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("USB_WQUE Q full", stdout)
         self.assertIn("voltage nominal", stdout)
         self.assertIn(
-            "earlier message repeated 1 additional time: voltage nominal",
+            "previous message repeated 1 additional time: voltage nominal",
             stdout,
         )
         self.assertNotIn("0x7f", stdout.lower())
@@ -609,7 +618,19 @@ class Sgil1CtlMockTests(unittest.TestCase):
                 self.assertIn("applies only with --tui", proc.stderr)
 
     def test_watch_palette_accepts_hardware_and_colour_names(self):
-        for name in ("fuel", "SGI Fuel", "red", "O2+", "Tezro"):
+        for name in (
+            "fuel",
+            "SGI Fuel",
+            "red",
+            "Crimson",
+            "Onyx",
+            "Challenge",
+            "Octane",
+            "Onyx2",
+            "Octane2",
+            "O2+",
+            "Tezro",
+        ):
             with self.subTest(name=name):
                 proc = self.run_ctl(["watch", "--tui", "--palette", name])
 

@@ -298,6 +298,7 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertTrue(descriptions)
         self.assertEqual(14 + max(map(len, descriptions)), 127)
         self.assertIn("#define SGIL1_TUI_LED_CONTENT_MAX 127", source)
+        self.assertIn("#define SGIL1_TUI_ESCAPE_DELAY_MS 0", source)
         self.assertIn("SGIL1_TUI_LED_CONTENT_MAX + 2", source)
 
     def test_ci_release_gate_backfills_missing_release_assets(self):
@@ -315,15 +316,22 @@ class KernelDriverStaticTests(unittest.TestCase):
         self.assertIn("tools/sgil1ctl --version", workflow)
         self.assertIn("ldd tools/sgil1ctl | grep -Fq libncurses", workflow)
         self.assertIn("python3 tests/tui_smoke.py", workflow)
+        self.assertIn("python3 tests/tui_terminal_smoke.py", workflow)
+        self.assertIn("            screen", workflow)
         self.assertIn("[ -z \"$missing_assets\" ]", workflow)
         self.assertIn("Release $tag is missing; publishing current version", workflow)
         self.assertIn("Release $tag is missing expected asset(s)", workflow)
         self.assertIn("stale_notes=false", workflow)
-        self.assertIn("sgi-l1-usb-control (${current})", workflow)
-        self.assertIn("Release $tag notes contain Debian changelog metadata", workflow)
+        self.assertIn("stale_target=false", workflow)
+        self.assertIn("cmp -s - release-notes.txt", workflow)
+        self.assertIn(
+            "Release $tag notes differ from the current changelog; "
+            "refreshing release and assets",
+            workflow,
+        )
         self.assertIn("Changes in %s", workflow)
         self.assertIn("awk '", workflow)
-        self.assertIn('gh release edit "$TAG" --notes-file release-notes.txt', workflow)
+        self.assertIn('gh release edit "$TAG" --target "$GITHUB_SHA"', workflow)
 
 
 if __name__ == "__main__":

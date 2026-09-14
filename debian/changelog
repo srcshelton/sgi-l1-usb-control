@@ -1,3 +1,36 @@
+sgi-l1-usb-control (0.1.56) unstable; urgency=medium
+
+  * Updated components since 0.1.55: user-space sgil1ctl only; kernel module
+    source is unchanged.
+  * Fold only immediately adjacent duplicate log messages, preserving
+    repeated messages separated by other L1 log entries.
+  * Keep short TUI panes fully visible by bounding scrollback to content that
+    actually extends beyond the viewport.
+  * Render the Help dialog with graphical borders, regularise its setting
+    columns, label automatic choices such as Auto (Fuel), and close it with
+    Escape, Return, or a context-sensitive q as well as h and ?; remove
+    ncurses' standalone-Escape recognition delay.
+  * Add Ctrl-L redraw plus k/j, Ctrl-B/Ctrl-F, and g/G navigation alternatives
+    for keyboards without labelled paging and End keys.
+  * Start automatic palette detection with an unaccented title, show palette
+    identity only at the right of the title bar, and retain reversible
+    monochrome mode.
+  * Expand SGI hardware palettes, including a distinct classic Onyx shade, in
+    chronological order; keep Personal IRIS last, retain the detected choice
+    as a no-redetection automatic cycle entry, and collapse equivalent shades
+    on basic-colour terminals.
+  * Show each TUI pane's unpadded rendered-history position at the bottom
+    right, reaching 100% at live output and moving backwards with scrollback.
+  * Clear the complete TUI footer through curses before leaving screen mode,
+    including default watch --tui when GNU Screen ignores alternate-screen
+    requests; test default and primary modes, Screen alternate-screen support,
+    and q, SIGINT, and SIGTERM exits with a screen-256color hardstatus layout.
+  * Refresh same-version GitHub releases when their generated notes or target
+    commit differ, allowing amended tags to rebuild and replace all package
+    assets.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 15 Sep 2026 15:06:24 +0100
+
 sgi-l1-usb-control (0.1.55) unstable; urgency=medium
 
   * Updated components since 0.1.54: user-space sgil1ctl only; kernel module

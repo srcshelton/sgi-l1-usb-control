@@ -28,6 +28,7 @@ jobs:
             kmod \
             libncurses-dev \
             linux-headers-generic \
+            screen \
             sparse
 
       - name: Select kernel headers
@@ -64,6 +65,7 @@ jobs:
           test "$(tools/sgil1ctl --version)" = "$expected"
           ldd tools/sgil1ctl | grep -Fq libncurses
           python3 tests/tui_smoke.py
+          python3 tests/tui_terminal_smoke.py
           make -C tools clean
           make -C tools
 
@@ -168,6 +170,13 @@ jobs:
           set -euo pipefail
           current="$(dpkg-parsechangelog -S Version)"
           tag="v${current}"
+          {
+            printf 'Changes in %s\n\n' "$tag"
+            dpkg-parsechangelog -S Changes | awk '
+              seen { sub(/^  /, ""); print }
+              /^\.$/ { seen = 1 }
+            '
+          } > release-notes.txt
           before="${{ github.event.before }}"
           previous=""
           if [ -n "$before" ] &&
@@ -192,16 +201,21 @@ jobs:
           release_exists=false
           missing_assets=""
           stale_notes=false
+          stale_target=false
           if asset_names="$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null)"; then
             release_exists=true
             body="$(gh release view "$tag" --json body --jq '.body')"
+            target="$(gh release view "$tag" --json targetCommitish --jq '.targetCommitish')"
             for asset in "${expected_assets[@]}"; do
               if ! printf '%s\n' "$asset_names" | grep -Fxq "$asset"; then
                 missing_assets="${missing_assets}${missing_assets:+, }${asset}"
               fi
             done
-            if printf '%s\n' "$body" | grep -Fq "sgi-l1-usb-control (${current}) "; then
+            if ! printf '%s\n' "$body" | cmp -s - release-notes.txt; then
               stale_notes=true
+            fi
+            if [ "$target" != "$GITHUB_SHA" ]; then
+              stale_target=true
             fi
           else
             missing_assets="release $tag does not exist"
@@ -210,7 +224,8 @@ jobs:
           if [ "$version_changed" = false ] &&
              [ "$release_exists" = true ] &&
              [ -z "$missing_assets" ] &&
-             [ "$stale_notes" = false ]; then
+             [ "$stale_notes" = false ] &&
+             [ "$stale_target" = false ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "Debian version unchanged at $current and release $tag has all expected assets and notes"
             exit 0
@@ -227,18 +242,12 @@ jobs:
           elif [ "$release_exists" = false ]; then
             echo "Release $tag is missing; publishing current version"
           elif [ "$stale_notes" = true ]; then
-            echo "Release $tag notes contain Debian changelog metadata; refreshing release notes"
+            echo "Release $tag notes differ from the current changelog; refreshing release and assets"
+          elif [ "$stale_target" = true ]; then
+            echo "Release $tag targets an earlier commit; refreshing release and assets"
           else
             echo "Release $tag is missing expected asset(s): $missing_assets"
           fi
-
-          {
-            printf 'Changes in %s\n\n' "$tag"
-            dpkg-parsechangelog -S Changes | awk '
-              seen { sub(/^  /, ""); print }
-              /^\.$/ { seen = 1 }
-            '
-          } > release-notes.txt
 
       - name: Download package artifacts
         if: steps.version.outputs.release == 'true'
@@ -264,7 +273,8 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/*.deb --clobber
-            gh release edit "$TAG" --notes-file release-notes.txt
+            gh release edit "$TAG" --target "$GITHUB_SHA" \
+              --notes-file release-notes.txt
           else
             gh release create "$TAG" dist/*.deb \
               --target "$GITHUB_SHA" \

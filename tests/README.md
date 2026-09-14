@@ -25,13 +25,22 @@ make -C tools clean
 make -C tools WITH_TUI=1
 make -C tests mock_l1.so
 python3 tests/tui_smoke.py
+python3 tests/tui_terminal_smoke.py
 ```
 
 The smoke test runs the TUI in a 120x24 pseudo-terminal, forces small log and
 LED histories to wrap, and verifies the empty-filtered-state/sample-count
 distinction. It also checks filtered/All views, timestamp and Help toggles,
-automatic and cycled hardware palettes, reversible monochrome mode, `q`
-cancellation, and clean primary-screen teardown.
+scroll bounds, alternate navigation and redraw keys, automatic and cycled
+hardware palettes, restoration of cached automatic selection, reversible
+monochrome mode, context-sensitive `q`, zero-delay Escape handling, lower-case
+`g` navigation, explicit automatic-palette labels, unpadded rendered-history
+position markers, and targeted primary-screen teardown. The second test
+requires GNU Screen; it runs the default and explicit primary-screen modes with
+`TERM=screen-256color`, alternate-screen support both disabled and enabled, and
+a reserved hardstatus row. It exits each combination with `q`, `SIGINT`, and
+`SIGTERM`, then checks Screen's rendered state to ensure the footer is erased
+and the returning shell prompt has a clean row.
 
 Run the normal suite and then build Debian packages:
 
