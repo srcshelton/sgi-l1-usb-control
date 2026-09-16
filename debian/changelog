@@ -1,3 +1,19 @@
+sgi-l1-usb-control (0.1.57) unstable; urgency=medium
+
+  * Updated components since 0.1.56: Debian DKMS packaging and recovery
+    documentation only; driver and user-space source are unchanged.
+  * Use Debian's dh_dkms maintainer scripts to unregister the packaged
+    version on upgrades and removal, preserve removal errors, and build for
+    the kernels selected by the installed DKMS framework.
+  * Unregister legacy installations before unpacking removes their sources.
+    Repair missing legacy source links and preserve missing-source orphan
+    registrations in a reported recovery directory outside the DKMS tree.
+  * Document recovery state, retained module files, and commands for retrying
+    kernel configuration; exercise package lifecycle and orphan recovery in CI.
+  * Exclude repository scratch worktrees from Debian package build copies.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 16 Sep 2026 15:01:00 +0100
+
 sgi-l1-usb-control (0.1.56) unstable; urgency=medium
 
   * Updated components since 0.1.55: user-space sgil1ctl only; kernel module

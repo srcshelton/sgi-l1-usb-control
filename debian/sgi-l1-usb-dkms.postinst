@@ -1,20 +1,46 @@
 #!/bin/sh
 set -e
 
-PACKAGE_NAME="sgi-l1-usb"
-PACKAGE_VERSION="$(dpkg-query -W -f='${Version}' sgi-l1-usb-dkms 2>/dev/null | sed 's/-.*//; s/.*://')"
-
 case "$1" in
 	configure)
 		if ! getent group sgil1 >/dev/null; then
 			addgroup --system sgil1 >/dev/null
 		fi
-		if [ -n "$PACKAGE_VERSION" ] && command -v dkms >/dev/null 2>&1; then
-			dkms remove -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --all >/dev/null 2>&1 || true
-			dkms add -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
-			dkms build -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION"
-			dkms install -m "$PACKAGE_NAME" -v "$PACKAGE_VERSION" --force
-		fi
+		# Releases before 0.1.57 did not unregister modules on upgrade.
+		# Recover only those legacy registrations, leaving other versions alone.
+		for registration in /var/lib/dkms/sgi-l1-usb/*; do
+			[ -d "$registration" ] && [ ! -L "$registration" ] || continue
+			version=${registration##*/}
+			dpkg --validate-version "$version" >/dev/null 2>&1 || continue
+			dpkg --compare-versions "$version" lt 0.1.57 || continue
+			[ ! -d "$registration/source" ] || continue
+			source_dir=/usr/src/sgi-l1-usb-$version
+			if [ -d "$source_dir" ]; then
+				# DKMS can repair a missing link when the original source survives.
+				echo "sgi-l1-usb-dkms: restoring $registration/source from $source_dir"
+				dkms add -m sgi-l1-usb -v "$version"
+				continue
+			fi
+			recovery_root=/var/lib/sgi-l1-usb-dkms/recovery
+			install -d -m 0700 "$recovery_root"
+			recovery=$(mktemp -d "$recovery_root/sgi-l1-usb-$version.XXXXXXXX")
+			cat > "$recovery/README" <<EOF
+This registration was moved from $registration because its source link
+did not resolve to a directory and $source_dir was absent.
+The old package left it registered after removing its source files.
+
+No installed kernel modules or loaded drivers were removed by this recovery.
+The saved registration is in registration/ below this directory. Preserve it
+if old installed modules need to be identified or their sources restored.
+This recovery directory is intentionally retained on package removal/purge.
+See /usr/share/doc/sgi-l1-usb-dkms/dkms-recovery.md for further instructions.
+EOF
+			mv -- "$registration" "$recovery/registration"
+			echo "sgi-l1-usb-dkms: recovered obsolete sgi-l1-usb/$version registration"
+			echo "  Missing source: $source_dir (link: $registration/source)"
+			echo "  Registration saved in: $recovery/registration"
+			echo "  Existing .ko files and loaded drivers are unchanged by this recovery."
+		done
 		;;
 esac
 

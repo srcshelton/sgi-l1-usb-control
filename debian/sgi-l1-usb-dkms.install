@@ -1,3 +1,4 @@
 udev/99-sgi-l1-usb.rules lib/udev/rules.d/
 docs/usb-diagnostics.md usr/share/doc/sgi-l1-usb-dkms/
+docs/dkms-recovery.md usr/share/doc/sgi-l1-usb-dkms/
 scripts/usb-diagnostics.sh usr/share/doc/sgi-l1-usb-dkms/examples/

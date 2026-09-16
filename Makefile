@@ -73,6 +73,6 @@ container-apple:
 deb:
 	rm -rf $(BUILD_ROOT)
 	mkdir -p $(BUILD_DIR)
-	tar --exclude='./$(BUILD_ROOT)' --exclude='./.git' --exclude='./repo.git' -cf - . | tar -C $(BUILD_DIR) -xf -
+	tar --exclude='./$(BUILD_ROOT)' --exclude='./.git' --exclude='./.worktrees' --exclude='./repo.git' -cf - . | tar -C $(BUILD_DIR) -xf -
 	cd $(BUILD_DIR) && dpkg-buildpackage -us -uc -b
 	@echo "Debian packages are in $(BUILD_ROOT)"

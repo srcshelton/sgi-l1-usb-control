@@ -23,6 +23,7 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             debhelper \
+            dh-dkms \
             dkms \
             dpkg-dev \
             kmod \
@@ -93,6 +94,7 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             debhelper \
+            dh-dkms \
             dpkg-dev \
             file \
             libncurses-dev \
@@ -140,11 +142,43 @@ jobs:
             dist/sgil1ctl-tui_*_arm64.deb
           if-no-files-found: error
 
+  dkms-lifecycle:
+    name: DKMS lifecycle (Debian ${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        suite: [bookworm, trixie]
+    container: debian:${{ matrix.suite }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install package lifecycle test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential debhelper dh-dkms dkms dpkg-dev kmod \
+            libncurses-dev pkgconf python3 linux-headers-amd64 udev adduser
+
+      - name: Build and exercise real DKMS packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          make deb
+          kernel="$(find /lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -f "$kernel/build/Makefile"
+          python3 tests/dkms_package_smoke.py \
+            --package "_build/sgi-l1-usb-dkms_$(make --no-print-directory -s print-version)_all.deb" \
+            --kernel-version "${kernel##*/}" \
+            --work-dir "$PWD/.worktrees/dkms-lifecycle" \
+            --allow-system-changes
+
   release:
     name: Release versioned package
     needs:
       - test-and-package
       - sgil1ctl-arm64
+      - dkms-lifecycle
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
     permissions:

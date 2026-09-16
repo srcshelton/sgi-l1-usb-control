@@ -47,3 +47,24 @@ Run the normal suite and then build Debian packages:
 ```sh
 make test-deb
 ```
+
+The separate `dkms_package_smoke.py` test installs and removes real packages and
+kernel modules. Run it only as root in a disposable Linux container or CI runner
+with DKMS, debhelper, `dh-dkms`, udev, and kernel headers installed:
+
+```sh
+python3 tests/dkms_package_smoke.py \
+  --package _build/sgi-l1-usb-dkms_0.1.57_all.deb \
+  --kernel-version KERNEL_VERSION \
+  --work-dir "$PWD/.worktrees/dkms-lifecycle" \
+  --allow-system-changes
+```
+
+Replace `KERNEL_VERSION` with the full installed header release. The work
+directory must not already exist. The test requires a clean SGI DKMS state and
+does not load the driver or communicate with hardware. It exercises upgrade
+from a fixture with the old maintainer-script bug, missing sources, missing
+source links, unrelated registrations, reconfiguration, reinstall, a subsequent
+upgrade and downgrade, failed removal, purge, and reinstall after purge. The
+fixture uses the real driver source and all DKMS builds and removals are real.
+CI gates releases on this lifecycle test under both Debian bookworm and trixie.

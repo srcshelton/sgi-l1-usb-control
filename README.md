@@ -80,7 +80,7 @@ visible.
 Install build dependencies:
 
 ```sh
-sudo apt-get install build-essential debhelper dkms sparse linux-headers-$(uname -r)
+sudo apt-get install build-essential debhelper dh-dkms dkms sparse linux-headers-$(uname -r)
 ```
 
 Run the tests and build packages:
@@ -105,6 +105,11 @@ sudo apt install ./_build/sgi-l1-usb-dkms_*_all.deb \
 
 The two tool packages install the same `sgil1ctl` command and therefore
 replace one another.
+
+Version 0.1.57 also repairs stale DKMS registrations left by older package
+upgrades. It reports missing source paths and preserves orphaned registrations
+under `/var/lib/sgi-l1-usb-dkms/recovery/`. See [DKMS upgrade recovery](docs/dkms-recovery.md)
+for what was repaired, what is retained, and how to retry kernel configuration.
 
 Reload `udev` rules, load the module, and reconnect the L1 USB cable if needed:
 

@@ -17,7 +17,7 @@ endif
 export CC
 
 %:
-	dh $@
+	dh $@ --with dkms
 
 override_dh_auto_build:
 	$(MAKE) -C tools CC="$(CC)"
@@ -37,7 +37,6 @@ override_dh_install:
 	install -D -m 0755 tools/sgil1ctl-tui \
 		debian/sgil1ctl-tui/usr/bin/sgil1ctl
 	install -d $(DKMS_SRC)/include $(DKMS_SRC)/module
-	sed 's/@VERSION@/$(DEB_VERSION)/g' dkms.conf.in > $(DKMS_SRC)/dkms.conf
-	chmod 0644 $(DKMS_SRC)/dkms.conf
+	sed 's/@VERSION@/$(DEB_VERSION)/g' dkms.conf.in > dkms.conf
 	install -m 0644 include/sgi_l1_ioctl.h $(DKMS_SRC)/include/
 	install -m 0644 module/Makefile module/sgi_l1_usb.c $(DKMS_SRC)/module/

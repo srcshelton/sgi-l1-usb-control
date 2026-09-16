@@ -19,6 +19,7 @@
 /dkms.conf
 /tools/sgil1ctl
 /_build/
+/.worktrees/
 /contrib/l2-l3-container/_work/
 /contrib/l2-l3-container/downloads/
 /contrib/l2-l3-container/rootfs/
