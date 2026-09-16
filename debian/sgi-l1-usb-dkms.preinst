@@ -17,7 +17,9 @@ case "$1" in
 					dkms add -m sgi-l1-usb -v "$old_version"
 				fi
 				echo "sgi-l1-usb-dkms: unregistering legacy sgi-l1-usb/$old_version before unpacking"
-				if ! dkms remove -m sgi-l1-usb -v "$old_version" --all; then
+				if ! dkms remove -m sgi-l1-usb -v "$old_version" --all ||
+				   [ -d "$registration" ]; then
+					echo "sgi-l1-usb-dkms: could not completely remove $registration." >&2
 					echo "sgi-l1-usb-dkms: upgrade stopped before replacing the old source files." >&2
 					echo "Resolve the DKMS error above, then retry installing this package." >&2
 					exit 1

@@ -8,6 +8,8 @@ Purging a newer driver package did not remove those older registrations.
 Version 0.1.57 uses Debian's `dh_dkms` maintainer scripts to unregister the
 correct version on upgrade and removal, and to build for the kernels selected
 by the installed DKMS framework. Removal failures are no longer suppressed.
+The package also checks that the registration was actually removed, because
+older DKMS versions can print an error while returning a successful exit status.
 Driver and user-space behavior are unchanged.
 
 On an upgrade from an older package, the new pre-installation script removes

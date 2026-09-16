@@ -144,8 +144,10 @@ jobs:
 
   dkms-lifecycle:
     name: DKMS lifecycle (Debian ${{ matrix.suite }})
+    needs: test-and-package
     runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false
       matrix:
         suite: [bookworm, trixie]
     container: debian:${{ matrix.suite }}
@@ -160,11 +162,16 @@ jobs:
             build-essential debhelper dh-dkms dkms dpkg-dev kmod \
             libncurses-dev pkgconf python3 linux-headers-amd64 udev adduser
 
-      - name: Build and exercise real DKMS packages
+      - name: Download the DKMS release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: debian-packages
+          path: _build
+
+      - name: Exercise the DKMS release candidate
         shell: bash
         run: |
           set -euo pipefail
-          make deb
           kernel="$(find /lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           test -f "$kernel/build/Makefile"
           python3 tests/dkms_package_smoke.py \

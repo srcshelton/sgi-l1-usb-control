@@ -123,7 +123,6 @@ def main():
     # The exact reported failure: a registration outlives its source directory.
     shutil.rmtree(source("0.1.1"))
     (REGISTRY / "0.1.1/sentinel").write_text("preserve orphan evidence\n")
-    run("dkms", "remove", "-m", NAME, "-v", "0.1.1", "--all", success=False)
     # A missing source link with surviving sources should be repaired in place.
     (REGISTRY / "0.1.2/source").unlink()
 
@@ -165,7 +164,17 @@ def main():
     assert not (REGISTRY / "99.0").exists()
     check_installed(current, kernel)
 
-    # Removal failure must be visible and must not let dpkg erase the sources.
+    # DKMS 3.0 can print an error but return success when dkms.conf is missing.
+    current_config = source(current) / "dkms.conf"
+    shutil.copy2(current_config, saved_config)
+    current_config.unlink()
+    try:
+        run("dpkg", "--remove", PACKAGE, success=False)
+        assert source(current).is_dir()
+    finally:
+        shutil.copy2(saved_config, current_config)
+
+    # A missing source link must also prevent dpkg from erasing the sources.
     (REGISTRY / current / "source").unlink()
     run("dpkg", "--remove", PACKAGE, success=False)
     assert (source(current) / "dkms.conf").is_file()

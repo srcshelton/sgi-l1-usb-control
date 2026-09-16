@@ -67,4 +67,6 @@ from a fixture with the old maintainer-script bug, missing sources, missing
 source links, unrelated registrations, reconfiguration, reinstall, a subsequent
 upgrade and downgrade, failed removal, purge, and reinstall after purge. The
 fixture uses the real driver source and all DKMS builds and removals are real.
-CI gates releases on this lifecycle test under both Debian bookworm and trixie.
+CI gates releases on this lifecycle test of the exact DKMS release candidate
+under both Debian bookworm and trixie, including errors that older DKMS reports
+without a failing exit status.

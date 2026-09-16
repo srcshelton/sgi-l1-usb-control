@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+# This supplies the package's build-time DKMS_VERSION and removes it.
+#DEBHELPER#
+
+case "$1" in
+	remove|upgrade|deconfigure)
+		# Older DKMS can report success despite a removal error. Do not let
+		# dpkg erase the source tree while its registration still exists.
+		registration=/var/lib/dkms/sgi-l1-usb/${DKMS_VERSION:?dh_dkms did not supply the packaged version}
+		if [ -d "$registration" ]; then
+			echo "sgi-l1-usb-dkms: DKMS left $registration registered after removal." >&2
+			echo "Package removal/upgrade stopped before deleting source files." >&2
+			echo "Resolve the DKMS error above, then retry the package operation." >&2
+			exit 1
+		fi
+		;;
+esac
+
+exit 0
