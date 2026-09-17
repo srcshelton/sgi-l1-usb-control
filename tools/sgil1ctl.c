@@ -149,7 +149,7 @@ struct l1_firmware_version {
 	unsigned int major;
 	unsigned int minor;
 	unsigned int patch;
-	bool fuel_family;
+	bool qualified_command_image;
 };
 
 struct wait_options {
@@ -300,7 +300,7 @@ static void usage(FILE *out, bool full)
 			"  debug [OPTIONS]       show/decode L1 debug switches and l1dbg state\n"
 			"  power [check]         show L1 power data or state\n"
 			"  power up [-w|--follow]\n"
-			"                        power on workstation; confirms state afterward\n"
+			"                        power on system; confirms state afterward\n"
 			"  power down [-w|--follow]\n"
 			"                        send one power-down signal; confirms state\n"
 			"  power reset --force [-w|--follow]\n"
@@ -347,7 +347,7 @@ static void usage(FILE *out, bool full)
 		"                        to avoid shell expansion\n"
 		"                        direct USB text is limited to 72 bytes on\n"
 		"                        legacy or unknown firmware, and 279 bytes on\n"
-		"                        qualified Fuel 1.26.5 or newer firmware\n");
+		"                        qualified Fuel/PE/O300 images, L1 1.26.5 or newer\n");
 }
 
 static void command_usage_footer(FILE *out)
@@ -405,7 +405,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"                        default: host timezone with --set-time\n"
 			"  --drift-seconds SEC   set time only when drift is at least SEC\n"
 			"                        default: 60\n"
-			"  --power-up            power on if status reports workstation off\n"
+			"  --power-up            power on if status reports system off\n"
 			"  --power-down          power off after status checks\n"
 			"  --reset               issue host soft reset after status checks\n"
 			"  -w, --follow          follow LEDs after selected power action\n"
@@ -498,12 +498,12 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] power [SUBCOMMAND] [OPTIONS]\n"
 			"\n"
-			"Show L1 power data, power the workstation on/off, or issue a host\n"
+			"Show L1 power data, power the system on/off, or issue a host\n"
 			"soft reset. Use top-level 'reset' for an L1 controller reset.\n"
 			"\n"
 			"Subcommands:\n"
 			"  (none)                show L1 power data\n"
-			"  check                 show whether workstation appears on or off\n"
+			"  check                 show whether system appears on or off\n"
 			"  up                    power on; confirms eventual state\n"
 			"  down                  send one power-down signal; confirms eventual state\n"
 			"  reset|softreset|softrst  issue host soft reset using L1 softreset\n"
@@ -567,7 +567,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"Notes:\n"
 			"  Quote '*' to use SGI's broadcast-prefix form.\n"
 			"  Direct USB text is limited to 72 bytes on legacy or unknown\n"
-			"  firmware and 279 bytes on qualified Fuel 1.26.5 or newer.\n"
+			"  firmware and 279 bytes on qualified Fuel/PE/O300 images\n"
+			"  from L1 1.26.5 onward.\n"
 			"  Use 'l1cmd help' to ask the L1 for its own command list.\n");
 		command_usage_footer(out);
 		return true;
@@ -1087,7 +1088,8 @@ static bool parse_l1_firmware_version(const char *text,
 	while ((p = strstr(p, "L1 ")) != NULL) {
 		if (sscanf(p, "L1 %u.%u.%u", &version->major,
 			   &version->minor, &version->patch) == 3) {
-			version->fuel_family = contains_ci(text, "Fuel/PE");
+			/* Fuel/PE[/O300] is a shared image label, not a chassis model. */
+			version->qualified_command_image = contains_ci(text, "Fuel/PE");
 			return true;
 		}
 		p += 3;
@@ -1099,7 +1101,7 @@ static bool parse_l1_firmware_version(const char *text,
 static bool l1_firmware_supports_extended_commands(
 	const struct l1_firmware_version *version)
 {
-	if (!version->fuel_family || version->major != 1)
+	if (!version->qualified_command_image || version->major != 1)
 		return false;
 	if (version->minor > 26)
 		return true;
@@ -2266,7 +2268,7 @@ static int run_l1_command_core(const struct options *opts, const char *l1cmd,
 	}
 	if (destructive && !allow_destructive && !allow_unlisted) {
 		fprintf(stderr,
-			"refusing L1 command '%s': add --force to confirm workstation power/reset action\n",
+			"refusing L1 command '%s': add --force to confirm system power/reset action\n",
 			l1cmd);
 		return 2;
 	}
@@ -2903,7 +2905,7 @@ static int do_l1_pass_through_command(const struct options *opts,
 
 	if (!force && l1_command_is_destructive(lookup_cmd)) {
 		fprintf(stderr,
-			"refusing L1 command '%s': add --force to confirm workstation power/reset action\n",
+			"refusing L1 command '%s': add --force to confirm system power/reset action\n",
 			l1cmd);
 		free(command_word);
 		return 2;
@@ -3033,7 +3035,7 @@ static int do_build_l1cmd_args(const struct options *opts, int argc, char **argv
 	}
 	if (l1_command_is_destructive(l1cmd) && !force) {
 		fprintf(stderr,
-			"refusing L1 command '%s': add --force to confirm workstation power/reset action\n",
+			"refusing L1 command '%s': add --force to confirm system power/reset action\n",
 			l1cmd);
 		free(l1cmd);
 		return 2;
@@ -3800,7 +3802,7 @@ struct debug_name_value {
 	uint32_t value;
 };
 
-/* SGI L1/L2 Controller Software User's Guide, Table 3-2. */
+/* SGI L1/L2 Controller Software User's Guide, 007-3938-006, Table 3-2. */
 static const struct debug_value_name debug_test_modes[] = {
 	{ 0x0, "normal", "normal testing" },
 	{ 0x1, "none", "no testing" },
@@ -4023,7 +4025,7 @@ static void print_debug_switch_list(void)
 	printf("\nUse '--boot-stop none --force' to clear the boot stop bits.\n");
 }
 
-struct fuel_led_status {
+struct l1_led_status {
 	uint8_t code;
 	const char *description;
 };
@@ -4034,8 +4036,8 @@ struct text_builder {
 	size_t cap;
 };
 
-/* SGI Fuel Diagnostic Reference Manual, Table 3-6. */
-static const struct fuel_led_status fuel_led_statuses[] = {
+/* SGI Fuel Diagnostic Reference Manual, 108-0350-002, Table 3-6. */
+static const struct l1_led_status fuel_manual_led_statuses[] = {
 	{ 0x00, "In slave loop; 0x00/0x45=okay; solid; 0x00=possible hang (Power-on discovery; no failing component)" },
 	{ 0x01, "Initialize the processor, FPRs, and COP0 registers (Power-on discovery; no failing component)" },
 	{ 0x02, "Test processor COP1 registers (Power-on discovery; no failing component)" },
@@ -4139,14 +4141,14 @@ static const struct fuel_led_status fuel_led_statuses[] = {
 	{ 0xb5, "Error calculating backplane frequency (Hub; failing component: IP34 motherboard)" },
 };
 
-/* SGI L1 and L2 Controller Software User's Guide, Table 3-6. */
-static const struct fuel_led_status controller_led_statuses[] = {
+/* SGI L1 and L2 Controller Software User's Guide, 007-3938-001, Table 3-6. */
+static const struct l1_led_status controller_led_statuses[] = {
 	{ 0x08, "PLED_CHUBLOCAL" },
 	{ 0x09, "PLED_CKHUBCONFIG" },
 };
 
 /* Additive mappings recovered from the IP35 PROM and L1 1.48.1 tables. */
-static const struct fuel_led_status l1_1_48_1_led_statuses[] = {
+static const struct l1_led_status l1_1_48_1_led_statuses[] = {
 	{ 0x11, "PLED_INITICACHE" },
 	{ 0x12, "PLED_INITCOP0" },
 	{ 0x13, "PLED_FLUSHTLB" },
@@ -4207,13 +4209,13 @@ static const struct fuel_led_status l1_1_48_1_led_statuses[] = {
 	{ 0xff, "Console poll found data for reading" },
 };
 
-static const struct fuel_led_status *fuel_led_status_for_code(unsigned int code)
+static const struct l1_led_status *l1_led_status_for_code(unsigned int code)
 {
 	size_t i;
 
-	for (i = 0; i < ARRAY_SIZE(fuel_led_statuses); i++)
-		if (fuel_led_statuses[i].code == code)
-			return &fuel_led_statuses[i];
+	for (i = 0; i < ARRAY_SIZE(fuel_manual_led_statuses); i++)
+		if (fuel_manual_led_statuses[i].code == code)
+			return &fuel_manual_led_statuses[i];
 	for (i = 0; i < ARRAY_SIZE(controller_led_statuses); i++)
 		if (controller_led_statuses[i].code == code)
 			return &controller_led_statuses[i];
@@ -4223,7 +4225,7 @@ static const struct fuel_led_status *fuel_led_status_for_code(unsigned int code)
 	return NULL;
 }
 
-static const char *fuel_led_status_source_name(unsigned int code)
+static const char *l1_led_status_source_name(unsigned int code)
 {
 	size_t i;
 
@@ -4245,7 +4247,7 @@ static const char *fuel_led_status_source_name(unsigned int code)
 	return "SGI Fuel Diagnostic Reference Manual";
 }
 
-static bool fuel_led_status_replaces_firmware_text(unsigned int code)
+static bool l1_led_status_replaces_firmware_text(unsigned int code)
 {
 	return code == 0x10 || code == 0x3d || code == 0x3e || code == 0x49 ||
 	       code == 0xb1 || code == 0xfe;
@@ -4388,7 +4390,7 @@ static int text_builder_append_decoded_leds_line(struct text_builder *builder,
 						 const char *prefix,
 						 size_t prefix_len)
 {
-	const struct fuel_led_status *status;
+	const struct l1_led_status *status;
 	const char *code_start;
 	const char *code_end;
 	unsigned int code;
@@ -4398,7 +4400,7 @@ static int text_builder_append_decoded_leds_line(struct text_builder *builder,
 	if (!leds_line_find_code(line, len, &code_start, &code_end, &code))
 		return text_builder_append(builder, line, len);
 
-	status = fuel_led_status_for_code(code);
+	status = l1_led_status_for_code(code);
 	if (prefix) {
 		if (text_builder_append(builder, prefix, prefix_len))
 			return -1;
@@ -4407,7 +4409,7 @@ static int text_builder_append_decoded_leds_line(struct text_builder *builder,
 		return -1;
 	}
 
-	if (!status || (!fuel_led_status_replaces_firmware_text(code) &&
+	if (!status || (!l1_led_status_replaces_firmware_text(code) &&
 			!leds_line_contains_unknown_status(line, len)))
 		return text_builder_append(builder, code_start,
 					   len - (size_t)(code_start - line));
@@ -4528,7 +4530,7 @@ static void print_leds_mapping_provenance(const char *text)
 		size_t len = next ? (size_t)(next - line) : strlen(line);
 		const char *code_start;
 		const char *code_end;
-		const struct fuel_led_status *status;
+		const struct l1_led_status *status;
 		unsigned int code;
 
 		if (!leds_line_find_code(line, len, &code_start, &code_end, &code) ||
@@ -4539,10 +4541,10 @@ static void print_leds_mapping_provenance(const char *text)
 			printf("LED mapping 0x7F source: IP35 PROM input-wait pattern\n");
 			goto provenance_next;
 		}
-		status = fuel_led_status_for_code(code);
+		status = l1_led_status_for_code(code);
 		if (status)
 			printf("LED mapping 0x%02X source: %s\n", code,
-			       fuel_led_status_source_name(code));
+			       l1_led_status_source_name(code));
 		else
 			printf("LED mapping 0x%02X source: unmapped\n", code);
 
@@ -8210,7 +8212,7 @@ static void maybe_confirm_power_during_leds_follow(const struct options *opts,
 					  power_text_says_off(power_check);
 
 		if (matched) {
-			printf("\nPower-%s: confirmed workstation appears %s\n\n",
+			printf("\nPower-%s: confirmed system appears %s\n\n",
 			       leds_follow_confirm_action(confirm),
 			       leds_follow_confirm_state(confirm));
 			fflush(stdout);
@@ -8394,7 +8396,7 @@ static int do_reset_command(const struct options *opts, int argc, char **argv,
 		return 2;
 	if (!force) {
 		fprintf(stderr,
-			"refusing L1 command 'reset': add --force to confirm workstation power/reset action\n");
+			"refusing L1 command 'reset': add --force to confirm system power/reset action\n");
 		return 2;
 	}
 
@@ -8437,7 +8439,7 @@ static int wait_for_power_state(const struct options *opts, int timeout_ms,
 						 power_text_says_off(power_check);
 
 			if (matched) {
-				printf("Power-%s: confirmed workstation appears %s\n",
+				printf("Power-%s: confirmed system appears %s\n",
 				       want_on ? "up" : "down",
 				       want_on ? "on" : "off");
 				free(power_check);
@@ -8469,7 +8471,7 @@ static int wait_for_power_state(const struct options *opts, int timeout_ms,
 				elapsed_ms = (int)(now - start) * 1000;
 			if (elapsed_ms >= timeout_ms) {
 				fprintf(stderr,
-					"Power-%s: timed out waiting for workstation to appear %s\n",
+					"Power-%s: timed out waiting for system to appear %s\n",
 					want_on ? "up" : "down",
 					want_on ? "on" : "off");
 				return 1;
@@ -8558,7 +8560,7 @@ static int do_host_softreset_confirmed(const struct options *opts,
 
 	if (!allow_destructive) {
 		fprintf(stderr,
-			"power reset requires --force because it resets/restarts the workstation\n");
+			"power reset requires --force because it resets/restarts the system\n");
 		return 2;
 	}
 
@@ -8623,9 +8625,9 @@ static int maybe_power_up_from_wait(const struct options *opts, bool follow,
 	printf("\nPower-up check\n");
 	print_text_block(power_check);
 	if (power_text_says_on(power_check)) {
-		printf("Power-up: workstation already appears on; no action taken\n");
+		printf("Power-up: system already appears on; no action taken\n");
 	} else if (power_text_says_off(power_check)) {
-		printf("Power-up: workstation appears off; issuing power up\n");
+		printf("Power-up: system appears off; issuing power up\n");
 		ret = do_power_up_confirmed(cmd_opts, !follow);
 	} else {
 		fprintf(stderr,
@@ -8689,10 +8691,10 @@ static int validate_wait_power_action(const struct options *opts,
 
 	if (wait->power_down) {
 		fprintf(stderr,
-			"WARNING: wait --power-down is armed; when an L1 USB device connects, sgil1ctl will power off the workstation.\n");
+			"WARNING: wait --power-down is armed; when an L1 USB device connects, sgil1ctl will power off the system.\n");
 	} else if (wait->reset) {
 		fprintf(stderr,
-			"WARNING: wait --reset is armed; when an L1 USB device connects, sgil1ctl will reset/restart the workstation.\n");
+			"WARNING: wait --reset is armed; when an L1 USB device connects, sgil1ctl will reset/restart the system.\n");
 	}
 
 	if (force)
@@ -8700,13 +8702,13 @@ static int validate_wait_power_action(const struct options *opts,
 
 	if (wait->power_up)
 		fprintf(stderr,
-			"wait --power-up requires --force because it changes workstation power state\n");
+			"wait --power-up requires --force because it changes system power state\n");
 	else if (wait->power_down)
 		fprintf(stderr,
-			"wait --power-down requires --force because it will power off the workstation on connection\n");
+			"wait --power-down requires --force because it will power off the system on connection\n");
 	else
 		fprintf(stderr,
-			"wait --reset requires --force because it will reset/restart the workstation on connection\n");
+			"wait --reset requires --force because it will reset/restart the system on connection\n");
 
 	return 2;
 }

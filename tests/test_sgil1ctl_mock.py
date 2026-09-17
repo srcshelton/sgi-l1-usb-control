@@ -762,13 +762,13 @@ class Sgil1CtlMockTests(unittest.TestCase):
             seconds=2.2,
         )
 
-        self.assertIn("Power-up: workstation appears off; issuing power up", stdout)
+        self.assertIn("Power-up: system appears off; issuing power up", stdout)
         self.assertIn("Power-up: entering LED follow before power-state confirmation", stdout)
-        self.assertIn("Power-up: confirmed workstation appears on", stdout)
+        self.assertIn("Power-up: confirmed system appears on", stdout)
         self.assertIn("0x55: Global master in PROM", stdout)
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertLess(
-            stdout.index("Power-up: confirmed workstation appears on"),
+            stdout.index("Power-up: confirmed system appears on"),
             stdout.index("0x55: Global master in PROM"),
         )
         self.assertNotIn("LEDs follow: leds command failed", stderr)
@@ -782,11 +782,11 @@ class Sgil1CtlMockTests(unittest.TestCase):
 
         self.assertIn("Power-down: issuing power down from wait mode", stdout)
         self.assertIn("Power-down: entering LED follow before power-state confirmation", stdout)
-        self.assertIn("Power-down: confirmed workstation appears off", stdout)
+        self.assertIn("Power-down: confirmed system appears off", stdout)
         self.assertIn("0x55: Global master in PROM", stdout)
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertLess(
-            stdout.index("Power-down: confirmed workstation appears off"),
+            stdout.index("Power-down: confirmed system appears off"),
             stdout.index("0x55: Global master in PROM"),
         )
         self.assertNotIn("LEDs follow: leds command failed", stderr)
@@ -868,7 +868,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
             {"SGIL1_MOCK_POWER": "off", "SGIL1_MOCK_POWER_UP_TIMEOUT": "1"},
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("confirmed workstation appears on", proc.stdout)
+        self.assertIn("confirmed system appears on", proc.stdout)
         self.assertIn("CMD power up", log)
         self.assertIn("CMD power check", log)
 
@@ -879,7 +879,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("confirmed workstation appears on", proc.stdout)
+        self.assertIn("confirmed system appears on", proc.stdout)
         self.assertIn("CMD power up", log)
 
     def test_power_up_follow_starts_leds_follow(self):
@@ -894,11 +894,11 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
 
         self.assertIn("Power-up: entering LED follow before power-state confirmation", stdout)
-        self.assertIn("Power-up: confirmed workstation appears on", stdout)
+        self.assertIn("Power-up: confirmed system appears on", stdout)
         self.assertIn("0x55: Global master in PROM", stdout)
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertLess(
-            stdout.index("Power-up: confirmed workstation appears on"),
+            stdout.index("Power-up: confirmed system appears on"),
             stdout.index("0x55: Global master in PROM"),
         )
         self.assertNotIn("LEDs follow: leds command failed", stderr)
@@ -911,7 +911,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(log.count("CMD power down"), 1, log)
-        self.assertIn("Power-down: confirmed workstation appears off", proc.stdout)
+        self.assertIn("Power-down: confirmed system appears off", proc.stdout)
 
     def test_power_down_force_sends_two_signals_without_prompt(self):
         proc, log = self.run_with_log(
@@ -922,7 +922,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(log.count("CMD power down"), 2, log)
         self.assertIn("--force set; issuing second power-down signal", proc.stdout)
-        self.assertIn("Power-down: confirmed workstation appears off", proc.stdout)
+        self.assertIn("Power-down: confirmed system appears off", proc.stdout)
 
     def test_power_down_follow_starts_leds_follow(self):
         stdout, stderr, _returncode = self.run_follow_for(
@@ -932,11 +932,11 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
 
         self.assertIn("Power-down: entering LED follow before power-state confirmation", stdout)
-        self.assertIn("Power-down: confirmed workstation appears off", stdout)
+        self.assertIn("Power-down: confirmed system appears off", stdout)
         self.assertIn("0x55: Global master in PROM", stdout)
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertLess(
-            stdout.index("Power-down: confirmed workstation appears off"),
+            stdout.index("Power-down: confirmed system appears off"),
             stdout.index("0x55: Global master in PROM"),
         )
         self.assertNotIn("LEDs follow: leds command failed", stderr)
@@ -950,7 +950,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("requested second signal", proc.stdout)
         self.assertEqual(log.count("CMD power down"), 2, log)
-        self.assertIn("confirmed workstation appears off", proc.stdout)
+        self.assertIn("confirmed system appears off", proc.stdout)
 
     def test_power_reset_requires_force_and_sends_softreset(self):
         denied = self.run_ctl(["power", "reset"])
@@ -1067,7 +1067,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("CMD version", log)
         self.assertNotIn("CMD " + long_command, log)
 
-    def test_l1_command_length_guard_uses_extended_fuel_limit(self):
+    def test_l1_command_length_guard_uses_extended_shared_image_limit(self):
         version_env = {
             "SGIL1_MOCK_VERSION_RESPONSE": (
                 "L1 1.48.1 (Image B), Built 01/22/2007 11:34:20    "
@@ -1096,7 +1096,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
         )
         self.assertNotIn("CMD " + oversized_command, log)
 
-    def test_l1_command_length_guard_keeps_non_fuel_firmware_conservative(self):
+    def test_l1_command_length_guard_keeps_unqualified_images_conservative(self):
         long_command = "A" * 73
         proc, log = self.run_with_log(
             ["--force", "l1cmd", long_command],
