@@ -45,6 +45,17 @@ def redraw(proc, master, timeout=0.3):
     return output
 
 
+def check_reverse_palette_cycle(proc, master, output, automatic, last, previous, first):
+    # Begin and end on the first manual palette, crossing Auto in both directions.
+    for key, expected in [(b"C", automatic), (b"C", last), (b"C", previous),
+                          (b"c", last), (b"c", automatic), (b"c", first)]:
+        os.write(master, key)
+        rendered = redraw(proc, master)
+        output.extend(rendered)
+        if expected not in rendered:
+            raise AssertionError(f"palette {key!r} did not select {expected!r}")
+
+
 def run_basic_palette_smoke():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
@@ -110,7 +121,12 @@ def run_basic_palette_smoke():
         ):
             raise AssertionError("basic-colour cycling did not leave automatic mode first")
 
-        os.write(master, b"q")
+        check_reverse_palette_cycle(
+            proc, master, output, b"Red palette: SGI Crimson / Fuel (auto)",
+            b"Brown palette: SGI Personal IRIS", b"Green palette: SGI Octane",
+            b"Purple palette: SGI Indigo",
+        )
+        os.write(master, b"Q")
         deadline = time.monotonic() + 2.0
         while proc.poll() is None and time.monotonic() < deadline:
             drain(master, output, 0.1)
@@ -318,7 +334,7 @@ def main():
         if b"Observation view" in help_closed or proc.poll() is not None:
             raise AssertionError("q did not close Help without quitting")
 
-        os.write(master, b"h")
+        os.write(master, b"H")
         output.extend(redraw(proc, master))
         os.write(master, b"\x1b")
         escape_started = time.monotonic()
@@ -344,7 +360,7 @@ def main():
         if b"Observation view" in help_closed:
             raise AssertionError("Return did not close Help")
 
-        os.write(master, b"a")
+        os.write(master, b"A")
         all_view = redraw(proc, master)
         output.extend(all_view)
         expected_all = (
@@ -361,7 +377,7 @@ def main():
 
         os.write(master, b"\t")
         output.extend(redraw(proc, master))
-        for key in (b"k", b"\x02", b"g", b"j", b"\x06"):
+        for key in (b"k", b"K", b"\x02", b"g", b"G", b"j", b"J", b"\x06"):
             os.write(master, key)
             short_scrolled = redraw(proc, master)
             output.extend(short_scrolled)
@@ -380,13 +396,13 @@ def main():
         output.extend(annotated)
         if b"source:" not in annotated or b"controller]" not in annotated:
             raise AssertionError("TUI did not show LED description sources")
-        os.write(master, b"p")
+        os.write(master, b"P")
         unannotated = redraw(proc, master)
         output.extend(unannotated)
         if b"source:" in unannotated:
             raise AssertionError("TUI did not hide LED description sources")
 
-        os.write(master, b"t")
+        os.write(master, b"T")
         timestamped = redraw(proc, master)
         output.extend(timestamped)
         if not re.search(
@@ -463,7 +479,7 @@ def main():
         if b"\x1b[38;5;124m" in monochrome:
             raise AssertionError("monochrome mode retained colour output")
 
-        os.write(master, b"m")
+        os.write(master, b"M")
         restored = redraw(proc, master)
         output.extend(restored)
         if b"Fuel palette" not in restored or b"\x1b[38;5;124m" not in restored:
@@ -478,6 +494,11 @@ def main():
         ):
             raise AssertionError("colour cycling did not leave automatic mode first")
 
+        check_reverse_palette_cycle(
+            proc, master, output, b"Fuel palette: SGI Fuel (auto)",
+            b"Personal IRIS palette: SGI Personal IRIS", b"Tezro palette: SGI Tezro",
+            b"Indigo palette: SGI Indigo",
+        )
         os.write(master, b"c" * 15)
         drain(master, output, 2.0)
         automatic = redraw(proc, master)

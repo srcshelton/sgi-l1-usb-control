@@ -4,6 +4,13 @@ sgi-l1-usb-control (0.1.58) unstable; urgency=medium
     documentation; kernel module source is unchanged.
   * Add optional LED description sources with --show-annotations and the
     TUI p key, including retained observations.
+  * Add Left/Right and </> controls to resize the selected TUI pane,
+    adjusting width in side-by-side layouts and height in stacked layouts.
+    Stacked panes also accept ^/v; Up/Down keep their scrolling behaviour.
+  * Accept letter keys in either case, with C cycling palettes backwards
+    and c cycling forwards; keep the help entries concise.
+  * Place LED description sources below timestamps in TUI help, keeping
+    Redraw and Close as its final entries in both wide and compact layouts.
   * Decode complete LED byte values in CPU and history rows, including
     numeric-only replies, while preserving CPU labels and controller text.
   * Qualify LED descriptions and activity filtering by firmware image family.
@@ -16,7 +23,7 @@ sgi-l1-usb-control (0.1.58) unstable; urgency=medium
   * Extend mocked LED and terminal tests for parsing, firmware qualification,
     recovery and optional sources in retained history.
 
- -- Stuart Shelton <stuart@shelton.me>  Thu, 17 Sep 2026 13:42:18 +0100
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 17 Sep 2026 14:15:21 +0100
 
 sgi-l1-usb-control (0.1.57) unstable; urgency=medium
 

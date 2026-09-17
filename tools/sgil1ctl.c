@@ -468,9 +468,11 @@ static bool command_usage(FILE *out, const char *cmd)
 			"\n"
 			"TUI keys:\n"
 			"  Tab                   select log or LED pane\n"
+			"  Left/Right, </>       shrink or grow selected pane\n"
+			"  ^/v                   shrink/grow selected pane when stacked\n"
 			"  Up/Down, k/j          scroll selected pane by one line\n"
 			"  PgUp/PgDn, Ctrl-B/F   scroll selected pane by one page\n"
-			"  End, g/G              return selected pane to live output\n"
+			"  End, g                return selected pane to live output\n"
 			"  a                     toggle Filtered and All observations\n"
 			"  t                     show or hide LED timestamps\n"
 			"  p                     show or hide LED description sources\n"
@@ -5737,6 +5739,8 @@ struct watch_tui_state {
 	struct watch_tui_led_history led_history;
 	size_t log_scroll;
 	size_t led_scroll;
+	int led_width;
+	int led_height;
 	enum watch_tui_focus focus;
 	char status[256];
 	bool color_capable;
@@ -5909,7 +5913,8 @@ static int watch_next_failure_backoff(int current)
 }
 
 #ifdef SGIL1_WITH_TUI
-static void watch_tui_layout(struct watch_tui_rect *log_rect,
+static void watch_tui_layout(const struct watch_tui_state *state,
+			     struct watch_tui_rect *log_rect,
 			     struct watch_tui_rect *led_rect)
 {
 	int content_height = LINES - 2;
@@ -5920,6 +5925,12 @@ static void watch_tui_layout(struct watch_tui_rect *log_rect,
 
 		if (led_width > SGIL1_TUI_LED_CONTENT_MAX + 2)
 			led_width = SGIL1_TUI_LED_CONTENT_MAX + 2;
+		if (state->led_width)
+			led_width = state->led_width;
+		if (led_width < 24)
+			led_width = 24;
+		if (led_width > COLS - 24)
+			led_width = COLS - 24;
 		log_width = COLS - led_width;
 
 		*log_rect = (struct watch_tui_rect) {
@@ -5939,6 +5950,10 @@ static void watch_tui_layout(struct watch_tui_rect *log_rect,
 
 		if (led_height < 4)
 			led_height = 4;
+		if (state->led_height)
+			led_height = state->led_height;
+		if (led_height < 3)
+			led_height = 3;
 		if (led_height > content_height - 3)
 			led_height = content_height - 3;
 		*led_rect = (struct watch_tui_rect) {
@@ -6612,43 +6627,47 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 5, 60, "/", 1);
 	watch_tui_help_text(window, 5, 62, "LEDs", 4,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
-	mvwaddnstr(window, 6, 4, "Up/Down, k/j", 18);
-	mvwaddnstr(window, 6, 24, "Scroll by line", 30);
-	mvwaddnstr(window, 7, 4, "PgUp/PgDn, ^B/^F", 18);
-	mvwaddnstr(window, 7, 24, "Scroll by page", 30);
-	mvwaddnstr(window, 8, 4, "End, g/G", 18);
-	mvwaddnstr(window, 8, 24, "Return to live output", 30);
-	mvwaddnstr(window, 9, 4, "a", 18);
-	mvwaddnstr(window, 9, 24, "Observation view", 30);
-	watch_tui_help_text(window, 9, 56, "Filtered", 8, !state->all_mode);
-	mvwaddnstr(window, 9, 65, "/", 1);
-	watch_tui_help_text(window, 9, 67, "All", 3, state->all_mode);
-	mvwaddnstr(window, 10, 4, "t", 18);
-	mvwaddnstr(window, 10, 24, "LED timestamps", 30);
-	watch_tui_help_text(window, 10, 56, "Off", 3,
+	mvwaddnstr(window, 6, 4, "Left/Right, </>", 18);
+	if (COLS < 100)
+		mvwaddnstr(window, 6, 56, "Also ^/v when stacked", width - 60);
+	mvwaddnstr(window, 6, 24, "Shrink/grow selected pane", 30);
+	mvwaddnstr(window, 7, 4, "Up/Down, k/j", 18);
+	mvwaddnstr(window, 7, 24, "Scroll by line", 30);
+	mvwaddnstr(window, 8, 4, "PgUp/PgDn, ^B/^F", 18);
+	mvwaddnstr(window, 8, 24, "Scroll by page", 30);
+	mvwaddnstr(window, 9, 4, "End, g", 18);
+	mvwaddnstr(window, 9, 24, "Return to live output", 30);
+	mvwaddnstr(window, 10, 4, "a", 18);
+	mvwaddnstr(window, 10, 24, "Observation view", 30);
+	watch_tui_help_text(window, 10, 56, "Filtered", 8, !state->all_mode);
+	mvwaddnstr(window, 10, 65, "/", 1);
+	watch_tui_help_text(window, 10, 67, "All", 3, state->all_mode);
+	mvwaddnstr(window, 11, 4, "t", 18);
+	mvwaddnstr(window, 11, 24, "LED timestamps", 30);
+	watch_tui_help_text(window, 11, 56, "Off", 3,
 			    !state->show_led_timestamps);
-	mvwaddnstr(window, 10, 60, "/", 1);
-	watch_tui_help_text(window, 10, 62, "On", 2,
+	mvwaddnstr(window, 11, 60, "/", 1);
+	watch_tui_help_text(window, 11, 62, "On", 2,
 			    state->show_led_timestamps);
-	mvwaddnstr(window, 11, 4, "c", 18);
-	mvwaddnstr(window, 11, 24, "Cycle hardware palette", 30);
-	mvwaddnstr(window, 11, 56, palette_setting, width - 60);
-	mvwaddnstr(window, 12, 4, "m", 18);
-	mvwaddnstr(window, 12, 24, "Colour output", 30);
-	watch_tui_help_text(window, 12, 56, "Colour", 6,
+	mvwaddnstr(window, 12, 4, "p", 18);
+	mvwaddnstr(window, 12, 24, "LED description sources", 30);
+	watch_tui_help_text(window, 12, 56, "Off", 3, !state->show_annotations);
+	mvwaddnstr(window, 12, 60, "/", 1);
+	watch_tui_help_text(window, 12, 62, "On", 2, state->show_annotations);
+	mvwaddnstr(window, 13, 4, "c", 18);
+	mvwaddnstr(window, 13, 24, "Cycle hardware palette", 30);
+	mvwaddnstr(window, 13, 56, palette_setting, width - 60);
+	mvwaddnstr(window, 14, 4, "m", 18);
+	mvwaddnstr(window, 14, 24, "Colour output", 30);
+	watch_tui_help_text(window, 14, 56, "Colour", 6,
 			    !state->monochrome && state->color_capable);
-	mvwaddnstr(window, 12, 63, "/", 1);
-	watch_tui_help_text(window, 12, 65, "Mono", 4,
+	mvwaddnstr(window, 14, 63, "/", 1);
+	watch_tui_help_text(window, 14, 65, "Mono", 4,
 			    state->monochrome || !state->color_capable);
-	mvwaddnstr(window, 13, 4, "Ctrl-L", 18);
-	mvwaddnstr(window, 13, 24, "Redraw screen", 30);
-	mvwaddnstr(window, 14, 4, "h, ?, Esc, Return", 18);
-	mvwaddnstr(window, 14, 24, "Close Help", 30);
-	mvwaddnstr(window, 15, 4, "p", 18);
-	mvwaddnstr(window, 15, 24, "LED description sources", 30);
-	watch_tui_help_text(window, 15, 56, "Off", 3, !state->show_annotations);
-	mvwaddnstr(window, 15, 60, "/", 1);
-	watch_tui_help_text(window, 15, 62, "On", 2, state->show_annotations);
+	mvwaddnstr(window, 15, 4, "Ctrl-L", 18);
+	mvwaddnstr(window, 15, 24, "Redraw screen", 30);
+	mvwaddnstr(window, 16, 4, "h, ?, Esc, Return", 18);
+	mvwaddnstr(window, 16, 24, "Close Help", 30);
 }
 
 static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
@@ -6666,17 +6685,18 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 		 state->monochrome || !state->color_capable ? "Mono" : "Colour");
 	watch_tui_palette_setting(state, palette_setting,
 				  sizeof(palette_setting), true);
-	wattron(window, A_BOLD);
-	mvwaddnstr(window, 1, (width - 4) / 2, "Keys", 4);
-	wattroff(window, A_BOLD);
-	mvwaddnstr(window, 2, 2, "Tab pane  k/j line  g/G live", width - 4);
-	mvwprintw(window, 3, 2, "^B/^F page  p sources:%s",
-		  state->show_annotations ? "On" : "Off");
+	mvwaddnstr(window, 1, 2, "Tab select pane", width - 4);
+	mvwaddnstr(window, 2, 2, COLS >= 100 ?
+		   "Left/Right </> shrink/grow pane" :
+		   "L/R </> ^/v shrink/grow pane", width - 4);
+	mvwaddnstr(window, 3, 2, "U/D k/j line ^B/^F page g live", width - 4);
 	mvwprintw(window, 4, 2, "a view:%-8s t time:%s", view, timestamps);
-	mvwprintw(window, 5, 2, "c palette:%-13.13s m:%s",
+	mvwprintw(window, 5, 2, "p sources:%s",
+		  state->show_annotations ? "On" : "Off");
+	mvwprintw(window, 6, 2, "c palette:%-13.13s m:%s",
 		  palette_setting, colour);
-	mvwaddnstr(window, 6, 2,
-		   "h/?/Esc/Ret close  ^L redraw", width - 4);
+	mvwaddnstr(window, 7, 2, "^L redraw", width - 4);
+	mvwaddnstr(window, 8, 2, "h/?/Esc/Ret close", width - 4);
 }
 
 static void watch_tui_draw_help(const struct watch_tui_state *state)
@@ -6684,14 +6704,14 @@ static void watch_tui_draw_help(const struct watch_tui_state *state)
 	WINDOW *window;
 	bool wide = COLS >= 88 && LINES >= 21;
 	int width = wide ? 86 : COLS - 2;
-	int height = wide ? 19 : 8;
+	int height = wide ? 19 : 10;
 	int y;
 	int x;
 
 	if (!state->help_visible)
 		return;
-	if (height > LINES - 2)
-		height = LINES - 2;
+	if (height > LINES)
+		height = LINES;
 	if (width < 4 || height < 3)
 		return;
 	y = (LINES - height) / 2;
@@ -6748,7 +6768,7 @@ static void watch_tui_render(struct watch_display *display)
 		return;
 	}
 
-	watch_tui_layout(&log_rect, &led_rect);
+	watch_tui_layout(state, &log_rect, &led_rect);
 	watch_tui_content_for_focus(state, WATCH_TUI_FOCUS_LOG, &log_content);
 	watch_tui_content_for_focus(state, WATCH_TUI_FOCUS_LEDS, &led_content);
 	shown_log = state->all_mode ? &state->raw_log_history :
@@ -6816,7 +6836,6 @@ static void watch_tui_render(struct watch_display *display)
 	watch_tui_draw_pane(state, &led_rect, led_title, &led_content,
 			    state->led_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
-	watch_tui_draw_help(state);
 
 	snprintf(footer, sizeof(footer), " %s%s | h/? Help",
 		 state->status[0] ? state->status : "Monitoring L1",
@@ -6834,6 +6853,7 @@ static void watch_tui_render(struct watch_display *display)
 	mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
+	watch_tui_draw_help(state);
 	doupdate();
 }
 
@@ -6887,20 +6907,21 @@ static size_t watch_tui_rows_for_focus(const struct watch_tui_state *state,
 	struct watch_tui_content content;
 	const struct watch_tui_rect *rect;
 
-	watch_tui_layout(&log_rect, &led_rect);
+	watch_tui_layout(state, &log_rect, &led_rect);
 	watch_tui_content_for_focus(state, focus, &content);
 	rect = focus == WATCH_TUI_FOCUS_LOG ? &log_rect : &led_rect;
 	return rect->width > 2 ? watch_tui_content_rows(
 		&content, (size_t)(rect->width - 2)) : 0;
 }
 
-static size_t watch_tui_visible_rows(enum watch_tui_focus focus)
+static size_t watch_tui_visible_rows(const struct watch_tui_state *state,
+				     enum watch_tui_focus focus)
 {
 	struct watch_tui_rect log_rect;
 	struct watch_tui_rect led_rect;
 	int height;
 
-	watch_tui_layout(&log_rect, &led_rect);
+	watch_tui_layout(state, &log_rect, &led_rect);
 	height = focus == WATCH_TUI_FOCUS_LOG ? log_rect.height :
 						     led_rect.height;
 	return height > 2 ? (size_t)(height - 2) : 1;
@@ -6910,7 +6931,7 @@ static size_t watch_tui_max_scroll(const struct watch_tui_state *state,
 				   enum watch_tui_focus focus)
 {
 	size_t rows = watch_tui_rows_for_focus(state, focus);
-	size_t visible = watch_tui_visible_rows(focus);
+	size_t visible = watch_tui_visible_rows(state, focus);
 
 	return rows > visible ? rows - visible : 0;
 }
@@ -7117,11 +7138,6 @@ static int watch_tui_append_leds(struct watch_tui_state *state,
 	return 0;
 }
 
-static size_t watch_tui_page_size(enum watch_tui_focus focus)
-{
-	return watch_tui_visible_rows(focus);
-}
-
 static void watch_tui_adjust_scroll(struct watch_tui_state *state,
 				    bool upward, size_t amount)
 {
@@ -7143,7 +7159,51 @@ static void watch_tui_adjust_scroll(struct watch_tui_state *state,
 	}
 }
 
-static void watch_tui_cycle_palette(struct watch_tui_state *state)
+static void watch_tui_clamp_scroll(struct watch_tui_state *state)
+{
+	size_t maximum = watch_tui_max_scroll(state, WATCH_TUI_FOCUS_LOG);
+
+	if (state->log_scroll > maximum)
+		state->log_scroll = maximum;
+	maximum = watch_tui_max_scroll(state, WATCH_TUI_FOCUS_LEDS);
+	if (state->led_scroll > maximum)
+		state->led_scroll = maximum;
+}
+
+static void watch_tui_resize_pane(struct watch_tui_state *state, bool grow)
+{
+	struct watch_tui_rect log_rect;
+	struct watch_tui_rect led_rect;
+	bool wide = COLS >= 100;
+	int change = grow ? 1 : -1;
+	int size;
+	int minimum = wide ? 24 : 3;
+	int total = wide ? COLS : LINES - 2;
+
+	if (COLS < 40 || LINES < 10)
+		return;
+	watch_tui_layout(state, &log_rect, &led_rect);
+	size = wide ? led_rect.width : led_rect.height;
+	if (state->focus == WATCH_TUI_FOCUS_LOG)
+		change = -change;
+	size += change;
+	if (size < minimum)
+		size = minimum;
+	if (size > total - minimum)
+		size = total - minimum;
+	if (wide)
+		state->led_width = size;
+	else
+		state->led_height = size;
+	watch_tui_clamp_scroll(state);
+	snprintf(state->status, sizeof(state->status), "%s pane: %d %s",
+		 state->focus == WATCH_TUI_FOCUS_LOG ? "Log" : "LED",
+		 state->focus == WATCH_TUI_FOCUS_LOG ? total - size : size,
+		 wide ? "columns" : "rows");
+}
+
+static void watch_tui_cycle_palette(struct watch_tui_state *state,
+				    bool backward)
 {
 	const struct watch_palette_info *palettes;
 	size_t palette_count;
@@ -7163,15 +7223,18 @@ static void watch_tui_cycle_palette(struct watch_tui_state *state)
 		palettes = watch_basic_palettes;
 		palette_count = ARRAY_SIZE(watch_basic_palettes);
 	}
+	next = backward ? palette_count - 1 : 0;
 	if (state->palette_ready && !state->palette_automatic) {
 		for (i = 0; i < palette_count; i++) {
 			if (palettes[i].id != state->palette)
 				continue;
-			if (i + 1 == palette_count &&
+			if ((backward ? i == 0 : i + 1 == palette_count) &&
 			    state->automatic_palette_ready)
 				restore_automatic = true;
 			else
-				next = (i + 1) % palette_count;
+				next = backward ? (i + palette_count - 1) %
+						   palette_count :
+						   (i + 1) % palette_count;
 			break;
 		}
 	}
@@ -7211,6 +7274,14 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		state->focus = state->focus == WATCH_TUI_FOCUS_LOG ?
 			       WATCH_TUI_FOCUS_LEDS : WATCH_TUI_FOCUS_LOG;
 		break;
+	case KEY_LEFT:
+	case '<':
+		watch_tui_resize_pane(state, false);
+		break;
+	case KEY_RIGHT:
+	case '>':
+		watch_tui_resize_pane(state, true);
+		break;
 	case 'a':
 	case 'A':
 		state->all_mode = !state->all_mode;
@@ -7242,7 +7313,7 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		break;
 	case 'c':
 	case 'C':
-		watch_tui_cycle_palette(state);
+		watch_tui_cycle_palette(state, key == 'C');
 		break;
 	case 'm':
 	case 'M':
@@ -7257,6 +7328,12 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	case '\f':
 		clearok(stdscr, true);
 		break;
+	case '^':
+	case 'v':
+	case 'V':
+		if (COLS < 100)
+			watch_tui_resize_pane(state, key != '^');
+		break;
 	case KEY_UP:
 	case 'k':
 	case 'K':
@@ -7270,12 +7347,12 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	case KEY_PPAGE:
 	case 2: /* Ctrl-B */
 		watch_tui_adjust_scroll(state, true,
-					watch_tui_page_size(state->focus));
+					watch_tui_visible_rows(state, state->focus));
 		break;
 	case KEY_NPAGE:
 	case 6: /* Ctrl-F */
 		watch_tui_adjust_scroll(state, false,
-					watch_tui_page_size(state->focus));
+					watch_tui_visible_rows(state, state->focus));
 		break;
 	case KEY_END:
 	case 'g':
@@ -7286,6 +7363,8 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 			state->led_scroll = 0;
 		break;
 	case KEY_RESIZE:
+		if (COLS >= 40 && LINES >= 10)
+			watch_tui_clamp_scroll(state);
 		clearok(stdscr, true);
 		break;
 	default:
