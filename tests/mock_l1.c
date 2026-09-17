@@ -63,6 +63,8 @@ static int mock_power_down_count;
 static int mock_log_call_count;
 static int mock_leds_call_count;
 static int mock_command_failure_count;
+static int mock_leds_request_count;
+static bool mock_led_recovered;
 static int mock_command_count;
 static long mock_max_write;
 static char mock_debug_response_buf[64];
@@ -456,7 +458,11 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "date help"))
 		return "ERROR: command not found.\n";
 	if (!strcmp(cmd, "version") || !strcmp(cmd, "ver")) {
-		const char *response = getenv("SGIL1_MOCK_VERSION_RESPONSE");
+		const char *response = mock_led_recovered ?
+			getenv("SGIL1_MOCK_VERSION_AFTER_LED_FAILURE") : NULL;
+
+		if (!response)
+			response = getenv("SGIL1_MOCK_VERSION_RESPONSE");
 
 		if (response)
 			return response;
@@ -485,6 +491,10 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "fan"))
 		return "fan(s) are on.\nfan 0 EXHAUST  rpm 1298\n";
 	if (!strcmp(cmd, "leds")) {
+		const char *response = getenv("SGIL1_MOCK_LEDS_RESPONSE");
+
+		if (response)
+			return response;
 		if (getenv("SGIL1_MOCK_WATCH_ACTIVITY_ONLY"))
 			return "CPU  A: 0xff: Console poll found data for reading\n"
 			       "        0x7f: unknown LED status.\n"
@@ -655,7 +665,15 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 			return -1;
 		}
 	}
-	if (getenv("SGIL1_MOCK_FAIL_COMMANDS")) {
+	if (!strcmp(cmd, "leds") && getenv("SGIL1_MOCK_FAIL_LEDS_ONCE") &&
+	    mock_leds_request_count++ == 1) {
+		mock_led_recovered = true;
+		free(raw_cmd);
+		return (ssize_t)count;
+	}
+	if (getenv("SGIL1_MOCK_FAIL_COMMANDS") &&
+	    (!getenv("SGIL1_MOCK_FAIL_POLL_COMMANDS_ONLY") ||
+	     !strcmp(cmd, "leds") || !strcmp(cmd, "log"))) {
 		long failures = strtol(getenv("SGIL1_MOCK_FAIL_COMMANDS"), NULL,
 				       0);
 

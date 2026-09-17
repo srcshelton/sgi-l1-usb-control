@@ -136,6 +136,7 @@ struct options {
 	bool dest_auto_discovered;
 	bool skip_command_drain;
 	bool debug;
+	bool show_annotations;
 };
 
 struct status_options {
@@ -172,6 +173,7 @@ struct log_options {
 
 struct leds_options {
 	bool follow;
+	bool show_annotations;
 	int poll_interval_ms;
 };
 
@@ -198,6 +200,7 @@ enum watch_palette {
 
 struct watch_options {
 	bool tui;
+	bool show_annotations;
 	bool alternate_screen;
 	bool repeat_summary;
 	int log_interval_ms;
@@ -273,6 +276,7 @@ static void usage(FILE *out, bool full)
 			"  --timeout MS          poll timeout for reads (default 3000)\n"
 			"  --force               confirm guarded actions or unlisted pass-through\n"
 			"  --debug               show IRouter framing diagnostics\n"
+			"  --show-annotations    show sources of LED descriptions\n"
 			"  --version             show the installed sgil1ctl version\n"
 			"  -h, --help            show this help\n"
 			"  --help-all            show all commands and low-level options\n"
@@ -436,7 +440,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"\n"
 			"Options:\n"
 			"  -w, --follow          continue polling for changed LED output\n"
-			"  --poll-interval MS    steady follow poll interval; minimum: 50\n");
+			"  --poll-interval MS    steady follow poll interval; minimum: 50\n"
+			"  --show-annotations    show sources of LED descriptions\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -444,8 +449,8 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] watch [OPTIONS]\n"
 			"\n"
-			"Follow L1 logs and decoded LED states through one queue-aware USB\n"
-			"scheduler. Text output is used unless the optional TUI is selected.\n"
+			"Follow L1 logs and decoded LED states. Text output is used unless\n"
+			"the optional TUI is selected.\n"
 			"\n"
 			"Options:\n"
 			"  --tui                 use the optional ncurses split-pane interface\n"
@@ -458,6 +463,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  --led-history ENTRIES retained TUI LED responses; default 512\n"
 			"  --palette NAME        select TUI palette; default auto\n"
 			"                        hardware and colour aliases are accepted\n"
+			"  --show-annotations    show sources of LED descriptions\n"
 			"  --no-repeat-summary   print repeated log messages individually\n"
 			"\n"
 			"TUI keys:\n"
@@ -467,6 +473,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  End, g/G              return selected pane to live output\n"
 			"  a                     toggle Filtered and All observations\n"
 			"  t                     show or hide LED timestamps\n"
+			"  p                     show or hide LED description sources\n"
 			"  c, m                  cycle palettes or toggle monochrome\n"
 			"  h, ?                  show Help; Esc or Return closes it\n"
 			"  Ctrl-L                redraw the screen\n"
@@ -4247,10 +4254,45 @@ static const char *l1_led_status_source_name(unsigned int code)
 	return "SGI Fuel Diagnostic Reference Manual";
 }
 
-static bool l1_led_status_replaces_firmware_text(unsigned int code)
+/* These tables describe MIPS IP35 diagnostics, not every L1 platform. */
+struct led_profile {
+	bool ip35;
+	bool l1_1_48_1;
+};
+
+static struct led_profile led_profile_for_version(const char *text)
 {
-	return code == 0x10 || code == 0x3d || code == 0x3e || code == 0x49 ||
-	       code == 0xb1 || code == 0xfe;
+	struct led_profile profile = { 0 };
+	struct l1_firmware_version version;
+	const char *version_start;
+	int consumed = 0;
+
+	if (!text || !parse_l1_firmware_version(text, &version))
+		return profile;
+	version_start = strstr(text, "L1 ");
+	if (!version_start ||
+	    sscanf(version_start, "L1 %u.%u.%u%n", &version.major,
+		   &version.minor, &version.patch, &consumed) != 3 ||
+	    (version_start[consumed] &&
+	     !isspace((unsigned char)version_start[consumed])))
+		return profile;
+	profile.ip35 = version.major == 1 &&
+		(contains_ci(text, "[Fuel/PE 1MB image]") ||
+		 contains_ci(text, "[Fuel/PE/O300 1MB image]"));
+	profile.l1_1_48_1 = profile.ip35 && version.minor == 48 &&
+		version.patch == 1;
+	return profile;
+}
+
+static void read_led_profile(const struct options *opts,
+			     struct led_profile *profile)
+{
+	char *text = NULL;
+
+	memset(profile, 0, sizeof(*profile));
+	if (!l1_text_command_status(opts, "version", false, &text))
+		*profile = led_profile_for_version(text);
+	free(text);
 }
 
 static int text_builder_append(struct text_builder *builder, const char *text,
@@ -4310,20 +4352,6 @@ static void text_builder_flush_and_clear(struct text_builder *builder)
 		builder->buf[0] = '\0';
 }
 
-static bool leds_line_contains_unknown_status(const char *line, size_t len)
-{
-	static const char needle[] = "unknown LED status";
-	size_t needle_len = sizeof(needle) - 1;
-	size_t i;
-
-	if (len < needle_len)
-		return false;
-	for (i = 0; i <= len - needle_len; i++)
-		if (!strncasecmp(line + i, needle, needle_len))
-			return true;
-	return false;
-}
-
 static bool leds_code_is_console_activity(unsigned int code)
 {
 	return code == 0x7f || code == 0xff;
@@ -4345,89 +4373,184 @@ static int hex_digit_value(char c)
 	return -1;
 }
 
-static bool leds_line_find_code(const char *line, size_t len,
+/* Recognise CPU labels without imposing a processor count or rewriting them. */
+static const char *leds_cpu_value(const char *line, const char *end)
+{
+	const char *p = line;
+	const char *identifier;
+
+	while (p < end && isspace((unsigned char)*p))
+		p++;
+	if (end - p < 4 || strncasecmp(p, "CPU", 3) ||
+	    !isspace((unsigned char)p[3]))
+		return NULL;
+	p += 4;
+	while (p < end && isspace((unsigned char)*p))
+		p++;
+	identifier = p;
+	while (p < end && isalnum((unsigned char)*p))
+		p++;
+	if (p == identifier || p == end || *p++ != ':')
+		return NULL;
+	while (p < end && isspace((unsigned char)*p))
+		p++;
+	return p;
+}
+
+/* A code must occupy a complete byte token at the start of a CPU/history value. */
+static bool leds_line_find_code(const char *line, size_t len, bool in_cpu,
 				const char **code_start, const char **code_end,
 				unsigned int *code)
 {
-	size_t i;
+	const char *end = line + len;
+	const char *p = leds_cpu_value(line, end);
+	const char *start;
+	unsigned int value = 0;
+	size_t digits = 0;
 
-	for (i = 0; i + 2 < len; i++) {
-		unsigned int value = 0;
-		size_t digits = 0;
-
-		if (line[i] != '0' || (line[i + 1] != 'x' && line[i + 1] != 'X'))
-			continue;
-		while (i + 2 + digits < len && digits < 2) {
-			int digit = hex_digit_value(line[i + 2 + digits]);
-
-			if (digit < 0)
-				break;
-			value = (value << 4) | (unsigned int)digit;
-			digits++;
-		}
-		if (!digits)
-			continue;
-		*code_start = line + i;
-		*code_end = line + i + 2 + digits;
-		*code = value;
-		return true;
+	if (!p) {
+		if (!in_cpu || !len || !isspace((unsigned char)*line))
+			return false;
+		p = line;
+		while (p < end && isspace((unsigned char)*p))
+			p++;
 	}
-
-	return false;
+	start = p;
+	if (end - p < 3 || p[0] != '0' || (p[1] != 'x' && p[1] != 'X'))
+		return false;
+	p += 2;
+	while (p < end && hex_digit_value(*p) >= 0) {
+		if (++digits > 2)
+			return false;
+		value = (value << 4) | (unsigned int)hex_digit_value(*p++);
+	}
+	if (!digits || (p < end && *p != ':' && !isspace((unsigned char)*p)))
+		return false;
+	*code_start = start;
+	*code_end = p;
+	*code = value;
+	return true;
 }
 
-static bool leds_line_has_cpu_prefix(const char *line, const char *code_start)
+static bool leds_description_equals(const char *text, size_t len,
+				     const char *expected)
 {
-	const char *p = line;
-
-	while (p < code_start && isspace((unsigned char)*p))
-		p++;
-	return code_start - p >= 3 && !strncasecmp(p, "CPU", 3);
+	return len == strlen(expected) && !strncasecmp(text, expected, len);
 }
 
-static int text_builder_append_decoded_leds_line(struct text_builder *builder,
-						 const char *line, size_t len,
-						 const char *prefix,
-						 size_t prefix_len)
+static bool leds_description_missing(const char *text, size_t len)
 {
-	const struct l1_led_status *status;
-	const char *code_start;
-	const char *code_end;
-	unsigned int code;
+	return !len || leds_description_equals(text, len, "unknown LED status") ||
+		leds_description_equals(text, len, "unknown LED status.") ||
+		leds_description_equals(text, len, "(no description available)") ||
+		leds_description_equals(text, len, "no description available");
+}
+
+static bool leds_description_needs_correction(
+	const struct led_profile *profile, unsigned int code,
+	const char *text, size_t len)
+{
+	const char *symbol = NULL;
+	size_t symbol_len;
+
+	if (!profile->l1_1_48_1)
+		return false;
+	/* Exact symbols from the 1.48.1 table; 0x3e duplicates 0x3d there. */
+	switch (code) {
+	case 0x10:
+		symbol = "PLED_INITDCACHE";
+		break;
+	case 0x3d:
+	case 0x3e:
+		symbol = "PLED_JUMPRAMUOK";
+		break;
+	case 0x49:
+		symbol = "PLED_UARTBASE";
+		break;
+	case 0xb1:
+		symbol = "FLED_NO_MODULEID";
+		break;
+	default:
+		return false;
+	}
+	symbol_len = strlen(symbol);
+	if (len >= symbol_len && !strncasecmp(text, symbol, symbol_len) &&
+	    (len == symbol_len || text[symbol_len] == ':' ||
+	     isspace((unsigned char)text[symbol_len]))) {
+		text += symbol_len;
+		len -= symbol_len;
+		if (len && *text == ':') {
+			text++;
+			len--;
+		}
+		while (len && isspace((unsigned char)*text)) {
+			text++;
+			len--;
+		}
+		if (leds_description_missing(text, len))
+			return true;
+	}
+	return code == 0xb1 &&
+		leds_description_equals(text, len, "Moduleid arbitration failed.");
+}
+
+static int text_builder_append_decoded_leds_line(
+	struct text_builder *builder, const char *line, size_t len,
+	const char *code_start, const char *code_end, unsigned int code,
+	const char *prefix, size_t prefix_len, const struct led_profile *profile,
+	bool annotations)
+{
+	const struct l1_led_status *status = profile->ip35 ?
+		l1_led_status_for_code(code) : NULL;
+	const char *description = code_end;
+	const char *end = line + len;
+	const char *source = "controller";
+	bool replace;
 	char decoded[512];
 	int decoded_len;
 
-	if (!leds_line_find_code(line, len, &code_start, &code_end, &code))
-		return text_builder_append(builder, line, len);
-
-	status = l1_led_status_for_code(code);
-	if (prefix) {
-		if (text_builder_append(builder, prefix, prefix_len))
+	if (description < end && *description == ':')
+		description++;
+	while (description < end && isspace((unsigned char)*description))
+		description++;
+	while (end > description && isspace((unsigned char)end[-1]))
+		end--;
+	replace = status &&
+		(leds_description_missing(description, (size_t)(end - description)) ||
+		 leds_description_needs_correction(profile, code, description,
+						    (size_t)(end - description)));
+	if (text_builder_append(builder, prefix ? prefix : line,
+				 prefix ? prefix_len : (size_t)(code_start - line)))
+		return -1;
+	if (replace) {
+		decoded_len = snprintf(decoded, sizeof(decoded), "0x%02X: %s", code,
+				       status->description);
+		if (decoded_len < 0 || decoded_len >= (int)sizeof(decoded) ||
+		    text_builder_append(builder, decoded, (size_t)decoded_len))
 			return -1;
-	} else if (text_builder_append(builder, line,
-					(size_t)(code_start - line))) {
+		source = l1_led_status_source_name(code);
+	} else if (text_builder_append(builder, code_start,
+					len - (size_t)(code_start - line))) {
 		return -1;
 	}
-
-	if (!status || (!l1_led_status_replaces_firmware_text(code) &&
-			!leds_line_contains_unknown_status(line, len)))
-		return text_builder_append(builder, code_start,
-					   len - (size_t)(code_start - line));
-
-	decoded_len = snprintf(decoded, sizeof(decoded), "0x%02X: %s", code,
-			       status->description);
-	if (decoded_len < 0 || decoded_len >= (int)sizeof(decoded))
-		return -1;
-	return text_builder_append(builder, decoded, (size_t)decoded_len);
+	if (annotations) {
+		if (text_builder_append(builder, " [source: ", 10) ||
+		    text_builder_append(builder, source, strlen(source)) ||
+		    text_builder_append(builder, "]", 1))
+			return -1;
+	}
+	return 0;
 }
 
-static char *decode_leds_text(const char *text, bool include_filtered_codes)
+static char *decode_leds_text(const char *text, const struct led_profile *profile,
+			     bool include_filtered_codes, bool annotations)
 {
 	struct text_builder builder = { 0 };
 	const char *line = text ? text : "";
 	char *pending_cpu_prefix = NULL;
 	size_t pending_cpu_prefix_len = 0;
 	bool have_output = false;
+	bool in_cpu = false;
 
 	while (*line) {
 		const char *next = strchr(line, '\n');
@@ -4435,72 +4558,62 @@ static char *decode_leds_text(const char *text, bool include_filtered_codes)
 		const char *code_start = NULL;
 		const char *code_end = NULL;
 		unsigned int code = 0;
-		bool have_code = leds_line_find_code(line, len, &code_start,
+		bool cpu_prefix = leds_cpu_value(line, line + len) != NULL;
+		bool have_code = leds_line_find_code(line, len, in_cpu, &code_start,
 							&code_end, &code);
-		bool cpu_prefix = have_code &&
-				  leds_line_has_cpu_prefix(line, code_start);
 
-		(void)code_end;
-		if (have_code && !include_filtered_codes &&
+		/* A heading, absent CPU or unrecognised row ends a history group. */
+		in_cpu = have_code;
+		if (cpu_prefix || !have_code) {
+			free(pending_cpu_prefix);
+			pending_cpu_prefix = NULL;
+		}
+		if (have_code && profile->ip35 && !include_filtered_codes &&
 		    leds_code_is_filtered(code)) {
 			if (cpu_prefix) {
-				char *replacement = strndup(line,
-							(size_t)(code_start - line));
-
-				if (!replacement) {
-					perror("strndup");
-					free(pending_cpu_prefix);
-					free(builder.buf);
-					return NULL;
-				}
-				free(pending_cpu_prefix);
-				pending_cpu_prefix = replacement;
-				pending_cpu_prefix_len =
-					(size_t)(code_start - line);
+				pending_cpu_prefix_len = (size_t)(code_start - line);
+				pending_cpu_prefix = strndup(line, pending_cpu_prefix_len);
+				if (!pending_cpu_prefix)
+					goto fail;
 			}
 			goto next_line;
 		}
-
-		if (cpu_prefix) {
-			free(pending_cpu_prefix);
-			pending_cpu_prefix = NULL;
-			pending_cpu_prefix_len = 0;
-		}
 		if (have_output && text_builder_append(&builder, "\n", 1))
 			goto fail;
-
-		if (text_builder_append_decoded_leds_line(
-				&builder, line, len,
-				pending_cpu_prefix && have_code ?
-					pending_cpu_prefix : NULL,
-				pending_cpu_prefix_len))
+		if (have_code) {
+			if (text_builder_append_decoded_leds_line(
+				&builder, line, len, code_start, code_end, code,
+				pending_cpu_prefix, pending_cpu_prefix_len,
+				profile, annotations))
+				goto fail;
+		} else if (text_builder_append(&builder, line, len)) {
 			goto fail;
+		}
 		have_output = true;
 		free(pending_cpu_prefix);
 		pending_cpu_prefix = NULL;
-		pending_cpu_prefix_len = 0;
-
 next_line:
 		if (!next)
 			break;
 		line = next + 1;
 	}
-
 	if (!builder.buf && text_builder_append(&builder, "", 0))
 		goto fail;
 	free(pending_cpu_prefix);
 	return builder.buf;
-
 fail:
 	free(pending_cpu_prefix);
 	free(builder.buf);
 	return NULL;
 }
 
-static bool leds_text_has_current_console_activity(const char *text)
+static bool leds_text_has_current_console_activity(
+	const char *text, const struct led_profile *profile)
 {
 	const char *line = text ? text : "";
 
+	if (!profile->ip35)
+		return false;
 	while (*line) {
 		const char *next = strchr(line, '\n');
 		size_t len = next ? (size_t)(next - line) : strlen(line);
@@ -4508,56 +4621,20 @@ static bool leds_text_has_current_console_activity(const char *text)
 		const char *code_end;
 		unsigned int code;
 
-		if (leds_line_find_code(line, len, &code_start, &code_end, &code) &&
-		    leds_line_has_cpu_prefix(line, code_start) &&
+		if (leds_line_find_code(line, len, false, &code_start, &code_end, &code) &&
 		    leds_code_is_console_activity(code))
 			return true;
 		if (!next)
 			break;
 		line = next + 1;
 	}
-
 	return false;
 }
 
-static void print_leds_mapping_provenance(const char *text)
+static void print_leds_text_block(const char *text, const struct led_profile *profile,
+				 bool all, bool annotations)
 {
-	bool seen[256] = { false };
-	const char *line = text ? text : "";
-
-	while (*line) {
-		const char *next = strchr(line, '\n');
-		size_t len = next ? (size_t)(next - line) : strlen(line);
-		const char *code_start;
-		const char *code_end;
-		const struct l1_led_status *status;
-		unsigned int code;
-
-		if (!leds_line_find_code(line, len, &code_start, &code_end, &code) ||
-		    seen[code])
-			goto provenance_next;
-		seen[code] = true;
-		if (code == 0x7f) {
-			printf("LED mapping 0x7F source: IP35 PROM input-wait pattern\n");
-			goto provenance_next;
-		}
-		status = l1_led_status_for_code(code);
-		if (status)
-			printf("LED mapping 0x%02X source: %s\n", code,
-			       l1_led_status_source_name(code));
-		else
-			printf("LED mapping 0x%02X source: unmapped\n", code);
-
-provenance_next:
-		if (!next)
-			break;
-		line = next + 1;
-	}
-}
-
-static void print_leds_text_block(const char *text)
-{
-	char *decoded = decode_leds_text(text, false);
+	char *decoded = decode_leds_text(text, profile, all, annotations);
 
 	if (decoded && !*decoded)
 		printf("No diagnostic LED status available.\n");
@@ -5638,6 +5715,8 @@ struct watch_tui_line_history {
 struct watch_tui_led_snapshot {
 	struct log_line_list all_lines;
 	struct log_line_list filtered_lines;
+	struct log_line_list annotated_all_lines;
+	struct log_line_list annotated_filtered_lines;
 	char (*timestamps)[SGIL1_TUI_TIMESTAMP_SIZE];
 	size_t timestamp_capacity;
 	size_t timestamp_start;
@@ -5663,6 +5742,7 @@ struct watch_tui_state {
 	bool color_capable;
 	bool all_mode;
 	bool show_led_timestamps;
+	bool show_annotations;
 	bool help_visible;
 	bool alternate_screen;
 	bool initialized;
@@ -6014,7 +6094,9 @@ static const char *watch_tui_led_line_at(const void *context, size_t index,
 			}
 			if (index < snapshot->filtered_lines.count) {
 				*style = WATCH_TUI_LINE_NORMAL;
-				return snapshot->filtered_lines.lines[index];
+				return state->show_annotations ?
+					snapshot->annotated_filtered_lines.lines[index] :
+					snapshot->filtered_lines.lines[index];
 			}
 			index -= snapshot->filtered_lines.count;
 			continue;
@@ -6032,7 +6114,9 @@ static const char *watch_tui_led_line_at(const void *context, size_t index,
 			}
 			if (index < snapshot->all_lines.count) {
 				*style = WATCH_TUI_LINE_NORMAL;
-				return snapshot->all_lines.lines[index];
+				return state->show_annotations ?
+					snapshot->annotated_all_lines.lines[index] :
+					snapshot->all_lines.lines[index];
 			}
 			index -= snapshot->all_lines.count;
 		}
@@ -6560,6 +6644,11 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 13, 24, "Redraw screen", 30);
 	mvwaddnstr(window, 14, 4, "h, ?, Esc, Return", 18);
 	mvwaddnstr(window, 14, 24, "Close Help", 30);
+	mvwaddnstr(window, 15, 4, "p", 18);
+	mvwaddnstr(window, 15, 24, "LED description sources", 30);
+	watch_tui_help_text(window, 15, 56, "Off", 3, !state->show_annotations);
+	mvwaddnstr(window, 15, 60, "/", 1);
+	watch_tui_help_text(window, 15, 62, "On", 2, state->show_annotations);
 }
 
 static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
@@ -6581,7 +6670,8 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 1, (width - 4) / 2, "Keys", 4);
 	wattroff(window, A_BOLD);
 	mvwaddnstr(window, 2, 2, "Tab pane  k/j line  g/G live", width - 4);
-	mvwaddnstr(window, 3, 2, "PgUp/PgDn or ^B/^F page", width - 4);
+	mvwprintw(window, 3, 2, "^B/^F page  p sources:%s",
+		  state->show_annotations ? "On" : "Off");
 	mvwprintw(window, 4, 2, "a view:%-8s t time:%s", view, timestamps);
 	mvwprintw(window, 5, 2, "c palette:%-13.13s m:%s",
 		  palette_setting, colour);
@@ -6892,6 +6982,8 @@ static void watch_tui_free_led_snapshot(
 {
 	free_log_line_list(&snapshot->all_lines);
 	free_log_line_list(&snapshot->filtered_lines);
+	free_log_line_list(&snapshot->annotated_all_lines);
+	free_log_line_list(&snapshot->annotated_filtered_lines);
 	free(snapshot->timestamps);
 	memset(snapshot, 0, sizeof(*snapshot));
 }
@@ -6954,23 +7046,34 @@ static void watch_tui_drop_oldest_led_response(
 
 static int watch_tui_append_leds(struct watch_tui_state *state,
 				 const char *all_text,
-				 const char *filtered_text)
+				 const char *filtered_text, const char *raw,
+				 const struct led_profile *profile)
 {
 	struct watch_tui_led_history *history = &state->led_history;
 	struct watch_tui_led_snapshot replacement = { 0 };
+	char *annotated_all = decode_leds_text(raw, profile, true, true);
+	char *annotated_filtered = decode_leds_text(raw, profile, false, true);
 	size_t before_rows = state->led_scroll ?
 		watch_tui_rows_for_focus(state, WATCH_TUI_FOCUS_LEDS) : 0;
 	char timestamp[SGIL1_TUI_TIMESTAMP_SIZE];
 	struct watch_tui_led_snapshot *last = NULL;
 	size_t index;
 
-	if (split_log_lines(all_text ? all_text : "", &replacement.all_lines))
-		return -1;
-	if (split_log_lines(filtered_text ? filtered_text : "",
-			    &replacement.filtered_lines)) {
-		free_log_line_list(&replacement.all_lines);
+	if (!annotated_all || !annotated_filtered ||
+	    split_log_lines(all_text ? all_text : "", &replacement.all_lines) ||
+	    split_log_lines(filtered_text ? filtered_text : "",
+			    &replacement.filtered_lines) ||
+	    split_log_lines(annotated_all, &replacement.annotated_all_lines) ||
+	    split_log_lines(annotated_filtered, &replacement.annotated_filtered_lines) ||
+	    replacement.all_lines.count != replacement.annotated_all_lines.count ||
+	    replacement.filtered_lines.count != replacement.annotated_filtered_lines.count) {
+		free(annotated_all);
+		free(annotated_filtered);
+		watch_tui_free_led_snapshot(&replacement);
 		return -1;
 	}
+	free(annotated_all);
+	free(annotated_filtered);
 	watch_tui_format_snapshot_time(timestamp, sizeof(timestamp));
 	if (history->response_count == history->capacity)
 		watch_tui_drop_oldest_led_response(history);
@@ -6979,7 +7082,10 @@ static int watch_tui_append_leds(struct watch_tui_state *state,
 			history->start, history->run_count - 1,
 			history->capacity)];
 	if (last && log_line_lists_equal(
-			&last->all_lines, &replacement.all_lines)) {
+			&last->all_lines, &replacement.all_lines) &&
+	    log_line_lists_equal(&last->filtered_lines, &replacement.filtered_lines) &&
+	    log_line_lists_equal(&last->annotated_all_lines,
+				 &replacement.annotated_all_lines)) {
 		if (watch_tui_append_led_timestamp(last, timestamp)) {
 			watch_tui_free_led_snapshot(&replacement);
 			return -1;
@@ -7126,6 +7232,13 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	case 'H':
 	case '?':
 		state->help_visible = !state->help_visible;
+		break;
+	case 'p':
+	case 'P':
+		state->show_annotations = !state->show_annotations;
+		state->led_scroll = 0;
+		snprintf(state->status, sizeof(state->status), "LED sources %s",
+			 state->show_annotations ? "shown" : "hidden");
 		break;
 	case 'c':
 	case 'C':
@@ -7276,9 +7389,12 @@ static void watch_display_refresh(struct watch_display *display)
 static void watch_display_leds(struct watch_display *display,
 			       const char *all_text,
 			       const char *filtered_text,
-			       bool changed, bool console_activity)
+			       bool changed, bool console_activity,
+			       const char *raw, const struct led_profile *profile,
+			       bool annotations)
 {
 	const char *line = filtered_text;
+	char *annotated = NULL;
 
 	if (console_activity) {
 		display->console_activity_seen = true;
@@ -7287,7 +7403,7 @@ static void watch_display_leds(struct watch_display *display,
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
 		if (watch_tui_append_leds(&display->tui_state, all_text,
-					  filtered_text)) {
+					  filtered_text, raw, profile)) {
 			snprintf(display->tui_state.status,
 				 sizeof(display->tui_state.status),
 				 "Could not retain LED response");
@@ -7300,6 +7416,11 @@ static void watch_display_leds(struct watch_display *display,
 #endif
 	if (!changed || !filtered_text || !*filtered_text)
 		return;
+	if (annotations) {
+		annotated = decode_leds_text(raw, profile, false, true);
+		if (annotated)
+			line = annotated;
+	}
 	while (*line) {
 		const char *next = strchr(line, '\n');
 		size_t len = next ? (size_t)(next - line) : strlen(line);
@@ -7309,6 +7430,7 @@ static void watch_display_leds(struct watch_display *display,
 			break;
 		line = next + 1;
 	}
+	free(annotated);
 	fflush(stdout);
 }
 
@@ -7347,6 +7469,7 @@ static int watch_display_init(struct watch_display *display,
 					     watch->led_history))
 			return -1;
 		state->alternate_screen = watch->alternate_screen;
+		state->show_annotations = watch->show_annotations;
 		(void)setlocale(LC_CTYPE, "");
 		if (!initscr()) {
 			fprintf(stderr, "could not initialize ncurses TUI\n");
@@ -7398,17 +7521,22 @@ static int watch_display_init(struct watch_display *display,
 	return 0;
 }
 
-static void watch_display_autoselect_palette(
-	struct watch_display *display, const struct watch_options *watch,
-	const struct options *cmd_opts)
+static void watch_display_read_led_profile(
+	struct watch_display *display,
+	const struct options *cmd_opts, struct led_profile *profile)
 {
-#ifdef SGIL1_WITH_TUI
 	char *version = NULL;
+	int ret = l1_text_command_status(cmd_opts, "version", false, &version);
+
+	*profile = led_profile_for_version(ret ? NULL : version);
+#ifdef SGIL1_WITH_TUI
 	enum watch_palette palette;
 
-	if (!display->tui || watch->palette != WATCH_PALETTE_AUTO)
+	if (!display->tui || !display->tui_state.palette_automatic) {
+		free(version);
 		return;
-	if (l1_text_command_status(cmd_opts, "version", false, &version)) {
+	}
+	if (ret) {
 		display->tui_state.palette_detection_failed = true;
 		watch_tui_render(display);
 		free(version);
@@ -7416,6 +7544,7 @@ static void watch_display_autoselect_palette(
 	}
 	palette = watch_tui_palette_for_platform(version);
 	free(version);
+	display->tui_state.palette_detection_failed = false;
 	display->tui_state.automatic_palette_ready = true;
 	display->tui_state.automatic_palette = palette;
 	if (!display->tui_state.color_capable) {
@@ -7429,8 +7558,8 @@ static void watch_display_autoselect_palette(
 	watch_tui_render(display);
 #else
 	(void)display;
-	(void)watch;
-	(void)cmd_opts;
+
+	free(version);
 #endif
 }
 
@@ -7499,6 +7628,8 @@ static int parse_watch_args(int argc, char **argv, int start,
 	for (i = start; i < argc; i++) {
 		if (!strcmp(argv[i], "--tui")) {
 			watch->tui = true;
+		} else if (!strcmp(argv[i], "--show-annotations")) {
+			watch->show_annotations = true;
 		} else if (!strcmp(argv[i], "--no-alternate-screen")) {
 			watch->alternate_screen = false;
 		} else if (!strcmp(argv[i], "--log-interval")) {
@@ -7601,7 +7732,8 @@ static int parse_watch_args(int argc, char **argv, int start,
 static int run_watch_scheduler(const struct options *opts,
 			       struct options *cmd_opts,
 			       const struct watch_options *watch,
-			       struct watch_display *display)
+			       struct watch_display *display,
+			       struct led_profile *profile)
 {
 	const struct log_line_sink log_sink = {
 		.emit = watch_display_log_line,
@@ -7620,6 +7752,7 @@ static int run_watch_scheduler(const struct options *opts,
 	unsigned int queue_pressure = 0;
 	bool have_previous_log = false;
 	bool route_valid = true;
+	bool profile_valid = true;
 	bool last_was_led = false;
 	int ret = 0;
 
@@ -7685,6 +7818,10 @@ static int run_watch_scheduler(const struct options *opts,
 			bool console_activity;
 			int command_ret;
 
+			if (!profile_valid) {
+				watch_display_read_led_profile(display, cmd_opts, profile);
+				profile_valid = true;
+			}
 			command_ret = l1_text_command_status(cmd_opts, "leds", false,
 							     &raw);
 			if (command_ret) {
@@ -7696,6 +7833,7 @@ static int run_watch_scheduler(const struct options *opts,
 				    watch_stop_requested)
 					break;
 				consecutive_failures++;
+				profile_valid = false;
 				snprintf(message, sizeof(message),
 					 "LED request failed; retrying transport in %d ms",
 					 failure_backoff);
@@ -7717,15 +7855,15 @@ static int run_watch_scheduler(const struct options *opts,
 			consecutive_failures = 0;
 			failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
 			console_activity =
-				leds_text_has_current_console_activity(raw);
-			all_decoded = decode_leds_text(raw, true);
-			filtered = decode_leds_text(raw, false);
+				leds_text_has_current_console_activity(raw, profile);
+			all_decoded = decode_leds_text(raw, profile, true, false);
+			filtered = decode_leds_text(raw, profile, false, false);
 			if (!all_decoded)
 				all_decoded = strdup(raw ? raw : "");
 			if (!filtered)
 				filtered = strdup(raw ? raw : "");
-			free(raw);
 			if (!all_decoded || !filtered) {
+				free(raw);
 				perror("strdup");
 				free(all_decoded);
 				free(filtered);
@@ -7735,7 +7873,9 @@ static int run_watch_scheduler(const struct options *opts,
 
 			changed = !previous_leds || strcmp(previous_leds, filtered);
 			watch_display_leds(display, all_decoded, filtered, changed,
-					   console_activity);
+					   console_activity, raw, profile,
+					   watch->show_annotations);
+			free(raw);
 			free(all_decoded);
 			if (changed) {
 				free(previous_leds);
@@ -7773,6 +7913,7 @@ static int run_watch_scheduler(const struct options *opts,
 				    watch_stop_requested)
 					break;
 				consecutive_failures++;
+				profile_valid = false;
 				snprintf(message, sizeof(message),
 					 "log request failed; retrying transport in %d ms",
 					 failure_backoff);
@@ -7869,11 +8010,13 @@ static int do_watch_command(const struct options *opts, int argc, char **argv,
 	struct watch_signal_state signals;
 	struct watch_options watch;
 	struct watch_display display;
+	struct led_profile profile;
 	struct options cmd_opts;
 	int ret;
 
 	if (parse_watch_args(argc, argv, command_index + 1, &watch))
 		return 2;
+	watch.show_annotations |= opts->show_annotations;
 	watch_stop_requested = 0;
 	if (watch_display_init(&display, &watch))
 		return 1;
@@ -7888,8 +8031,8 @@ static int do_watch_command(const struct options *opts, int argc, char **argv,
 	if (prepare_command_options(opts, &cmd_opts))
 		ret = watch_stop_requested ? 0 : 1;
 	else {
-		watch_display_autoselect_palette(&display, &watch, &cmd_opts);
-		ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display);
+		watch_display_read_led_profile(&display, &cmd_opts, &profile);
+		ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display, &profile);
 	}
 	l1_wait_cancel_enabled = false;
 	l1_wait_input_hook = NULL;
@@ -8142,6 +8285,8 @@ static int parse_leds_args(int argc, char **argv, int start,
 	for (i = start; i < argc; i++) {
 		if (!strcmp(argv[i], "-w") || !strcmp(argv[i], "--follow")) {
 			leds->follow = true;
+		} else if (!strcmp(argv[i], "--show-annotations")) {
+			leds->show_annotations = true;
 		} else if (!strcmp(argv[i], "--poll-interval")) {
 			if (++i >= argc) {
 				fprintf(stderr, "--poll-interval needs milliseconds\n");
@@ -8233,6 +8378,7 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 	struct options route_opts = *opts;
 	struct options cmd_opts = *opts;
 	struct text_builder pending = { 0 };
+	struct led_profile profile = { 0 };
 	char *previous = NULL;
 	bool prepared = false;
 	bool power_confirmed = confirm_power == LEDS_FOLLOW_CONFIRM_NONE;
@@ -8266,6 +8412,7 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 					next_leds_follow_backoff_ms(backoff_ms);
 				continue;
 			}
+			read_led_profile(&cmd_opts, &profile);
 			prepared = true;
 		}
 
@@ -8287,7 +8434,8 @@ static int do_leds_follow(const struct options *opts, int poll_interval_ms,
 		}
 
 		backoff_ms = poll_interval_ms;
-		decoded = decode_leds_text(text, false);
+		decoded = decode_leds_text(text, &profile, opts->debug,
+					   opts->show_annotations);
 		if (decoded) {
 			free(text);
 			text = decoded;
@@ -8340,25 +8488,30 @@ static int do_leds_command(const struct options *opts, int argc, char **argv,
 			   int command_index)
 {
 	struct leds_options leds;
+	struct options cmd_opts;
+	struct led_profile profile;
 	char *text = NULL;
 	int ret;
 
 	if (parse_leds_args(argc, argv, command_index + 1, &leds))
 		return 2;
+	if (prepare_command_options(opts, &cmd_opts))
+		return 1;
+	cmd_opts.show_annotations |= leds.show_annotations;
 	if (leds.follow)
-		return do_leds_follow(opts, leds.poll_interval_ms,
+		return do_leds_follow(&cmd_opts, leds.poll_interval_ms,
 				      LEDS_FOLLOW_CONFIRM_NONE);
 
-	ret = run_l1_command_core(opts, "leds", false, opts->force, false,
+	read_led_profile(&cmd_opts, &profile);
+	ret = run_l1_command_core(&cmd_opts, "leds", false, opts->force, false,
 				  false, opts->debug, &text);
 	if (ret) {
 		free(text);
 		return ret;
 	}
-	if (opts->debug)
-		print_leds_mapping_provenance(text);
-	else
-		print_leds_text_block(text);
+	if (!opts->debug || cmd_opts.show_annotations)
+		print_leds_text_block(text, &profile, opts->debug,
+				     cmd_opts.show_annotations);
 	free(text);
 	return 0;
 }
@@ -8908,6 +9061,8 @@ static int parse_options(int argc, char **argv, struct options *opts,
 			opts->force = true;
 		} else if (!strcmp(argv[i], "--debug")) {
 			opts->debug = true;
+		} else if (!strcmp(argv[i], "--show-annotations")) {
+			opts->show_annotations = true;
 		} else if (!strcmp(argv[i], "--version")) {
 			printf("sgil1ctl %s\n", SGIL1CTL_VERSION);
 			exit(0);

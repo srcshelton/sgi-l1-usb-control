@@ -129,6 +129,67 @@ def run_basic_palette_smoke():
         )
 
 
+def run_led_annotation_smoke():
+    # Keep one observation while later requests fail: toggling must use history.
+    cases = [
+        ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x09\n",
+          "SGIL1_MOCK_FAIL_AFTER_COMMANDS": "3"}, [], b"PLED_CKHUBCONFIG"),
+        ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x09\n",
+          "SGIL1_MOCK_FAIL_AFTER_COMMANDS": "3"}, ["--show-annotations"], b"PLED_CKHUBCONFIG"),
+        ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0xff: platform status\n",
+          "SGIL1_MOCK_VERSION_RESPONSE": "L1 1.48.1 [Altix image]"}, [], b"0xff: platform status"),
+        ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0xff: platform status\n",
+          "SGIL1_MOCK_FAIL_LEDS_ONCE": "1",
+          "SGIL1_MOCK_VERSION_AFTER_LED_FAILURE": "L1 1.48.1 [Altix image]"}, [], b"0xff: platform status"),
+    ]
+    for extra_env, extra_args, expected in cases:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 160, 0, 0))
+        env = os.environ.copy()
+        env.update({"LD_PRELOAD": str(MOCK), "SGIL1_MOCK": "1",
+                    "TERM": "xterm-256color", **extra_env})
+        proc = subprocess.Popen(
+            [str(BIN), "--device", "/dev/sgi-l1/l1-0", "--status-device",
+             "/dev/sgi-l1/status", "--timeout", "10", "watch", "--tui",
+             "--led-interval", "100", *extra_args],
+            env=env, stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+        )
+        os.close(slave)
+        output = bytearray()
+        try:
+            drain(master, output, 1.0)
+            initial = plain_text(redraw(proc, master))
+            if expected not in initial:
+                raise AssertionError(f"retained/qualified LED missing: {initial!r}")
+            if b"Altix image" in extra_env.get("SGIL1_MOCK_VERSION_RESPONSE", "").encode():
+                if b"Console last active: never" not in initial:
+                    raise AssertionError("unqualified firmware affected console activity")
+            if extra_args:
+                if b"source:" not in initial:
+                    raise AssertionError("TUI ignored --show-annotations")
+                os.write(master, b"p")
+                initial = plain_text(redraw(proc, master))
+            if b"source:" in initial:
+                raise AssertionError("LED sources unexpectedly enabled")
+            os.write(master, b"p")
+            annotated = plain_text(redraw(proc, master))
+            if b"source:" not in annotated or expected not in annotated:
+                raise AssertionError("retained LED source was not shown")
+            os.write(master, b"p")
+            hidden = plain_text(redraw(proc, master))
+            if b"source:" in hidden or expected not in hidden:
+                raise AssertionError("retained LED source toggle changed the description")
+            os.write(master, b"q")
+            proc.wait(timeout=2)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
+        if proc.returncode:
+            raise AssertionError(f"LED annotation TUI exited with {proc.returncode}")
+
+
 def main():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
@@ -314,6 +375,17 @@ def main():
         os.write(master, b"\t")
         output.extend(redraw(proc, master))
 
+        os.write(master, b"p")
+        annotated = redraw(proc, master)
+        output.extend(annotated)
+        if b"source:" not in annotated or b"controller]" not in annotated:
+            raise AssertionError("TUI did not show LED description sources")
+        os.write(master, b"p")
+        unannotated = redraw(proc, master)
+        output.extend(unannotated)
+        if b"source:" in unannotated:
+            raise AssertionError("TUI did not hide LED description sources")
+
         os.write(master, b"t")
         timestamped = redraw(proc, master)
         output.extend(timestamped)
@@ -371,6 +443,7 @@ def main():
             or b"c palette:Auto(Fuel)" not in help_view
             or b"h/?/Esc/Ret close" not in help_view
             or b"^L redraw" not in help_view
+            or b"p sources:Off" not in help_view
             or b"q quit" in help_view
         ):
             raise AssertionError("minimum-size TUI key guide was incomplete")
@@ -433,6 +506,7 @@ def main():
     if b"\x1b[38;5;124m" not in output or b"\x1b[38;5;54m" not in output:
         raise AssertionError("TUI did not render its restrained colour accents")
     run_basic_palette_smoke()
+    run_led_annotation_smoke()
     return 0
 
 

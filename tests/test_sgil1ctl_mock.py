@@ -540,32 +540,131 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertNotIn("0xff", proc.stdout.lower())
         self.assertNotIn("unknown LED status", proc.stdout)
 
-    def test_leds_debug_preserves_raw_activity_and_reports_mapping_sources(self):
-        proc = self.run_ctl(
-            ["--debug", "leds"],
-            {"SGIL1_MOCK_LEDS_EXTENDED": "1"},
-        )
+    def test_led_sources_are_opt_in_and_describe_the_text_actually_shown(self):
+        env = {"SGIL1_MOCK_LEDS_EXTENDED": "1"}
+        plain = self.run_ctl(["leds"], env)
+        debug = self.run_ctl(["--debug", "leds"], env)
+        annotated = self.run_ctl(["leds", "--show-annotations"], env)
+        full = self.run_ctl(["--debug", "leds", "--show-annotations"], env)
+        for proc in [plain, debug, annotated, full]:
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("[source:", plain.stdout)
+        self.assertNotIn("[source:", debug.stdout)
+        self.assertIn("0xff: Console poll found data for reading", debug.stdout)
+        self.assertIn("[source: SGI Fuel Diagnostic Reference Manual]", annotated.stdout)
+        self.assertIn("[source: SGI L1/L2 Controller Software User's Guide]", annotated.stdout)
+        self.assertIn("[source: L1 1.48.1 firmware]", annotated.stdout)
+        self.assertIn("0xff: Console poll found data for reading [source: controller]", full.stdout)
+        self.assertIn("0xFE: raw PROM value", full.stdout)
 
+    def test_leds_decode_bare_bytes_and_complete_placeholders(self):
+        response = (
+            "Module 001c01:\n"
+            "CPU  A: 0x2\n"
+            "        0x03:\n"
+            "        0x04: (no description available)\n"
+            "CPU  B: < CPU not present >\n"
+            "CPU  0C: 0x05: UNKNOWN LED STATUS.\n"
+            "CPU  D: 0x06: Firmware-specific detail\n"
+        )
+        proc = self.run_ctl(["leds"], {"SGIL1_MOCK_LEDS_RESPONSE": response})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("0xff: Console poll found data for reading", proc.stdout)
-        self.assertIn("LED mapping 0x7F source: IP35 PROM input-wait", proc.stdout)
-        self.assertIn(
-            "LED mapping 0x09 source: SGI L1/L2 Controller Software",
-            proc.stdout,
+        self.assertIn("Module 001c01:", proc.stdout)
+        self.assertIn("CPU  A: 0x02: Test processor COP1", proc.stdout)
+        self.assertIn("        0x03: Switch to mapped mode", proc.stdout)
+        self.assertIn("        0x04: Test processor primary instruction cache", proc.stdout)
+        self.assertIn("CPU  B: < CPU not present >", proc.stdout)
+        self.assertIn("CPU  0C: 0x05: Test processor primary data cache", proc.stdout)
+        self.assertIn("CPU  D: 0x06: Firmware-specific detail", proc.stdout)
+
+    def test_leds_preserve_non_byte_tokens_and_unrelated_hexadecimal_text(self):
+        response = (
+            "Module address 0x02: unknown LED status.\n"
+            "        0x02: orphan row\n"
+            "CPU  A: 0x02ff: unknown LED status.\n"
+            "CPU  B: 0x7f00: unknown LED status.\n"
+            "CPU  C: 0x02_suffix\n"
+            "CPU  D: [0x02] disabled\n"
+            "CPU  E: < CPU not present >\n"
+            "        0x02: unknown LED status.\n"
+            "CPU  F: 0x\n"
+            "CPU  G: 0x02: report includes unknown LED status elsewhere\n"
         )
-        self.assertIn(
-            "LED mapping 0x10 source: SGI Fuel manual and L1 1.48.1 firmware",
-            proc.stdout,
+        proc = self.run_ctl(["leds"], {"SGIL1_MOCK_LEDS_RESPONSE": response})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, response)
+
+    def test_leds_preserve_unknown_families_and_unavailable_version(self):
+        response = "CPU  A: 0x02\n        0x7f: idle\n        0xfe: detail\nCPU  B: 0xff\n"
+        for version in ["L1 1.48.1 [Altix image]", "unavailable",
+                        "L1 1.48.1 [Fuel/PE-future 1MB image]",
+                        "L1 1.48.1custom [Fuel/PE/O300 1MB image]",
+                        "ERROR: command not found."]:
+            with self.subTest(version=version):
+                proc = self.run_ctl(["leds"], {
+                    "SGIL1_MOCK_LEDS_RESPONSE": response,
+                    "SGIL1_MOCK_VERSION_RESPONSE": version,
+                })
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stdout, response)
+
+    def test_led_corrections_require_the_version_and_exact_known_text(self):
+        response = (
+            "CPU  A: 0x3e: PLED_JUMPRAMUOK:  (no description available)\n"
+            "        0xb1: FLED_NO_MODULEID:  Moduleid arbitration failed.\n"
+            "CPU  B: 0x3e: New firmware explanation\n"
+            "        0x10: New cache operation\n"
+            "        0x49: Board-specific UART operation\n"
         )
-        self.assertIn(
-            "LED mapping 0x55 source: SGI Fuel Diagnostic Reference Manual",
-            proc.stdout,
+        for version in ["1.48.1", "1.48.2", "1.26.5"]:
+            with self.subTest(version=version):
+                proc = self.run_ctl(["leds"], {
+                    "SGIL1_MOCK_LEDS_RESPONSE": response,
+                    "SGIL1_MOCK_VERSION_RESPONSE": f"L1 {version} [Fuel/PE/O300 1MB image]",
+                })
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                if version == "1.48.1":
+                    self.assertIn("CPU  A: 0x3E: About to jump to cached space", proc.stdout)
+                    self.assertIn("0xB1: NASID/module ID arbitration failure", proc.stdout)
+                else:
+                    self.assertEqual(proc.stdout, response)
+                self.assertIn("CPU  B: 0x3e: New firmware explanation", proc.stdout)
+                self.assertIn("0x10: New cache operation", proc.stdout)
+                self.assertIn("0x49: Board-specific UART operation", proc.stdout)
+
+    def test_led_follow_reads_version_once_and_can_show_sources(self):
+        stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
+            ["leds", "--follow", "--show-annotations"],
+            {"SGIL1_MOCK_LEDS_FOLLOW": "1"}, seconds=0.5,
         )
-        self.assertIn("LED mapping 0x89 source: L1 1.48.1 firmware", proc.stdout)
-        self.assertIn(
-            "LED mapping 0xFE source: IP35 PROM; L1 1.48.1 has no description",
-            proc.stdout,
-        )
+        self.assertEqual(commands.count("CMD version"), 1, commands)
+        self.assertIn("[source: SGI Fuel Diagnostic Reference Manual]", stdout)
+        self.assertNotIn("failed", stderr)
+
+    def test_watch_annotation_option_preserves_changed_only_output(self):
+        for args in [["watch", "--show-annotations"], ["--show-annotations", "watch"]]:
+            with self.subTest(args=args):
+                stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
+                    args, {"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x02\n"}, seconds=0.5,
+                )
+                self.assertEqual(commands.count("CMD version"), 1, commands)
+                self.assertEqual(stdout.count("[source: SGI Fuel Diagnostic Reference Manual]"), 1)
+                self.assertNotIn("failed", stderr)
+
+    def test_monitor_refreshes_led_profile_after_transport_failure(self):
+        for args in [["leds", "--follow"], ["watch", "--led-interval", "100"]]:
+            with self.subTest(args=args):
+                stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
+                    args, {
+                        "SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x02\n        0xff: platform detail\n",
+                        "SGIL1_MOCK_FAIL_LEDS_ONCE": "1",
+                        "SGIL1_MOCK_VERSION_AFTER_LED_FAILURE": "L1 1.48.1 [Altix image]",
+                    }, seconds=1.0,
+                )
+                self.assertEqual(commands.count("CMD version"), 2, commands)
+                self.assertIn("Test processor COP1", stdout)
+                self.assertIn("0xff: platform detail", stdout)
+                self.assertIn("failed", stderr)
 
     def test_watch_serializes_logs_and_leds_and_uses_queue_feedback(self):
         stdout, stderr, _returncode, commands = self.run_follow_with_log_for(
@@ -674,6 +773,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
             {
                 "SGIL1_MOCK_WATCH": "1",
                 "SGIL1_MOCK_FAIL_COMMANDS": "2",
+                "SGIL1_MOCK_FAIL_POLL_COMMANDS_ONLY": "1",
             },
             seconds=0.9,
         )

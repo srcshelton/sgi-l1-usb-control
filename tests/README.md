@@ -15,7 +15,9 @@ The suite has two layers:
   `mock_l1.so`, an `LD_PRELOAD` mock of the L1 USB/status devices. The mock
   emits IRouter responses for discovery, status, date, power, reset, help,
   pass-through commands, and combined log/LED monitoring so guarded destructive
-  paths and queue-aware back-off can be tested without a connected workstation.
+  paths and queue-aware back-off can be tested without connected hardware.
+  LED cases cover bare codes, strict byte parsing, firmware-scoped corrections,
+  optional source labels and renewed firmware identification after a failure.
 
 The default build remains free of ncurses dependencies. To compile-check the
 optional TUI configuration locally:
@@ -30,7 +32,8 @@ python3 tests/tui_terminal_smoke.py
 
 The smoke test runs the TUI in a 120x24 pseudo-terminal, forces small log and
 LED histories to wrap, and verifies the empty-filtered-state/sample-count
-distinction. It also checks filtered/All views, timestamp and Help toggles,
+distinction. It also checks optional source labels on retained observations,
+firmware changes after reconnect, filtered/All views, timestamp and Help toggles,
 scroll bounds, alternate navigation and redraw keys, automatic and cycled
 hardware palettes, restoration of cached automatic selection, reversible
 monochrome mode, context-sensitive `q`, zero-delay Escape handling, lower-case
