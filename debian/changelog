@@ -1,3 +1,23 @@
+sgi-l1-usb-control (0.1.58) unstable; urgency=medium
+
+  * Updated components since 0.1.57: user-space sgil1ctl, tests and
+    documentation; kernel module source is unchanged.
+  * Add optional LED description sources with --show-annotations and the
+    TUI p key, including retained observations.
+  * Decode complete LED byte values in CPU and history rows, including
+    numeric-only replies, while preserving CPU labels and controller text.
+  * Qualify LED descriptions and activity filtering by firmware image family.
+    Apply known L1 1.48.1 corrections only to matching firmware text, and
+    refresh firmware identification after transport failures.
+  * Use system-neutral terminology outside SGI source references, retaining
+    the original diagnostic descriptions and hardware palette names.
+  * Reorganise installation, usage and troubleshooting documentation, with
+    hardware compatibility notes and model-specific diagnostic references.
+  * Extend mocked LED and terminal tests for parsing, firmware qualification,
+    recovery and optional sources in retained history.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 17 Sep 2026 13:42:18 +0100
+
 sgi-l1-usb-control (0.1.57) unstable; urgency=medium
 
   * Updated components since 0.1.56: Debian DKMS packaging and recovery
