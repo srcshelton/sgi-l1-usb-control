@@ -1,29 +1,40 @@
-# Software-First USB Diagnostics
+# USB troubleshooting
 
-Some hosts can fail to enumerate the SGI L1 USB device cleanly, or may
-disconnect and re-enumerate the controller after malformed or oversized
-transfers. A VID/PID driver cannot bind until the host USB stack has received a
-device descriptor, so these checks focus on host-side USB state before the
-`sgi_l1_usb` module can do useful work.
+If Linux does not detect the L1, or the connection repeatedly drops, first
+check whether the controller appears on the USB bus:
 
-Run the passive diagnostic script first:
+```sh
+lsusb -d 065e:1234
+```
+
+A detected controller appears with the ID `065e:1234`. If detection is
+unreliable, compare another USB port or cable, or a connection through a
+powered USB hub. The choice of host USB controller can matter, particularly
+on Raspberry Pi systems.
+
+## Collect connection details
+
+From the source directory, run:
 
 ```sh
 sudo ./scripts/usb-diagnostics.sh
 ```
 
-The script records:
+The script reads the host's USB state and prints a report containing:
 
-- kernel version and machine model, where available;
-- selected `usbcore` parameters;
-- `lsusb` output;
-- `/sys/kernel/debug/usb/devices`, when mounted and readable;
-- recent USB-related kernel log messages;
-- attached `ttyUSB` devices, which are useful when comparing USB transport
-  behaviour with a separate serial console.
+- the Linux kernel version and machine model, where available;
+- USB settings and the devices reported by `lsusb`;
+- detailed USB device information, when available through debugfs;
+- recent USB-related kernel messages;
+- attached USB serial devices, including any separate serial console.
 
-Runtime experiments that do not require a reboot, if the sysfs parameters are
-writable on the running kernel:
+Save the output when comparing connections or reporting a problem.
+
+## Try alternative USB detection settings
+
+Linux provides settings for older USB devices that need a different detection
+sequence or more time to respond. On kernels that expose writable settings,
+the following changes take effect for subsequent USB connections:
 
 ```sh
 echo Y | sudo tee /sys/module/usbcore/parameters/old_scheme_first
@@ -31,15 +42,17 @@ echo Y | sudo tee /sys/module/usbcore/parameters/use_both_schemes
 echo 10000 | sudo tee /sys/module/usbcore/parameters/initial_descriptor_timeout
 ```
 
-Then re-enumerate only the affected L1 USB path if possible, either by
-unplugging and reconnecting the L1 USB cable or by power-cycling only the
-affected managed-hub port.
+These settings apply to the Linux host's USB subsystem. Record their original
+values in the diagnostic report before changing them. Reconnect the L1 USB
+cable, then repeat `lsusb -d 065e:1234` and `sgil1ctl probe`. The runtime changes
+last until reboot; writing the original values restores them sooner.
 
-Experiments which require a reboot:
+The corresponding persistent settings go on the Linux kernel command line:
 
-1. Add `usbcore.old_scheme_first=Y usbcore.initial_descriptor_timeout=10000` to
-   the kernel command line;
-2. Reboot the host;
-3. Check whether `065e:1234` appears in `lsusb` and whether `sgi_l1_usb` binds;
-4. If the platform provides selectable USB host-controller modes, test those
-   separately and record the resulting controller driver in `dmesg`.
+```text
+usbcore.old_scheme_first=Y usbcore.use_both_schemes=Y usbcore.initial_descriptor_timeout=10000
+```
+
+After rebooting, check detection again with `lsusb` and `sgil1ctl probe`.
+Remove the added kernel parameters and reboot to restore the previous
+settings.

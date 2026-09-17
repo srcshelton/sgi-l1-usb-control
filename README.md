@@ -1,563 +1,223 @@
 # SGI L1 USB Control
 
-Modern Linux driver and tooling for the Silicon Graphics L1/L3 USB transport
-used by SGI L1 system controllers.
+This project lets you manage SGI systems with an L1 system controller from a
+modern Linux computer. It provides a USB driver and the `sgil1ctl` command-line
+tool, which can read system information, set the controller's clock and operate
+the system's power controls. You can also monitor the L1 log and diagnostic LED
+states, either as text or in an interactive terminal display.
 
-This project was developed to make it easier to power on an SGI Fuel
-workstation whose dead Dallas and Snaphat clock-chip batteries prevent the
-front-panel power button from working. It could also be useful with other
-L1-equipped SGI systems, including Origin 300x and Onyx 300x configurations,
-subject to the usual differences between L1 firmware revisions and brick types.
+The Linux computer connects to the SGI system's L1 USB port. The L1 runs from
+standby power, so its status information and controls remain available while
+the main system is switched off.
 
-> **Raspberry Pi USB compatibility note:** CI publishes a Linux arm64
-> `sgil1ctl` and `sgil1ctl-tui` Debian packages for arm64 hosts, but that does
-> not imply that every arm64 USB host can enumerate the SGI L1 USB device. Some
-> Raspberry Pi USB host stacks may be incompatible with the SGI L1 controller's
-> USB interface. If
-> `065e:1234` does not appear reliably in `lsusb` output, try a different
-> type/speed of USB port (if available) or see whether connecting the L1 cable
-> through a powered USB hub makes any difference.
+## Compatible hardware
 
-The L1 USB port is not a UART. SGI's original Linux software exposed it as a
-raw USB bulk transport carrying `IRouter` frames. This repository provides:
+The project targets the L1 USB interface found on SGI Fuel and the
+Chimera-generation systems: Tezro workstations in both tower and rack-mount
+forms, Origin 350, Onyx 350 and Onyx4. These machines share the L1 system-control
+interface, with commands appropriate to each model. Hardware testing of this
+project has so far used a Fuel.
 
-- `sgi_l1_usb`: an out-of-tree Linux kernel module with the legacy `/dev/sgil1*`
-  ABI as the compatibility target;
-- `sgil1ctl`: a small user-space tool for status, clock, power, log, and direct
-  L1 command operations, including a combined log and LED monitor;
-- Debian DKMS packaging and `udev` rules for easier installation;
-- a hardware-free test suite using a mocked L1 transport.
+SGI also documents L1 USB connections on Itanium-based Altix 350 and rack-mount
+Prism systems. The [hardware compatibility notes](docs/hardware.md) describe
+the individual models, firmware families and supporting SGI documentation.
 
-## Scope And Safety
+## Installation
 
-`sgil1ctl` is not a full replacement for SGI L2/L3 controller software. It
-focuses on the operations needed for single-system maintenance:
+The [latest release](https://github.com/srcshelton/sgi-l1-usb-control/releases/latest)
+provides packages for Debian and Raspberry Pi OS. Install the
+`sgi-l1-usb-dkms` driver package together with one of these tool packages:
 
-- read firmware, USB, clock, serial/MAC, power, fan, environment, and log
-  state;
-- set the L1 clock from the host;
-- wait for a newly bound L1 USB device, optionally setting time and powering
-  on;
-- issue workstation `power up`, `power down`, and guarded `power reset`;
-- reset the L1 controller with `reset --force`;
-- pass through live help-listed L1 commands with `sgil1ctl l1cmd ...`.
+- **`sgil1ctl`** provides the command-line interface, including text-based log
+  and LED monitoring.
+- **`sgil1ctl-tui`** provides the same commands and adds an interactive terminal
+  display for combined log and LED monitoring.
 
-Power-down and reset commands are deliberately explicit. High-level
-`power down` sends one power-down signal, `power down --force` sends the second
-signal, and reset commands remain guarded. Users who can open the L1 device can
-power-cycle attached hardware, so packaged installs restrict device nodes to
-group `sgil1` with mode `0660`.
+Both editions install the `sgil1ctl` command, and installing one replaces the
+other. The driver package is marked `all`; choose the tool package that matches
+your Linux computer's architecture. You can find that with:
 
-## Device Nodes
+```sh
+dpkg --print-architecture
+```
 
-The kernel device names are legacy-compatible with the old SGI driver. The
-`udev` links are the preferred stable names for local scripts and do not assume
-a specific SGI workstation or server model.
+Download the driver and your chosen tool package into a directory of their own.
+From that directory, install the packages and headers for your running kernel:
 
-- `/dev/sgil1_N`: legacy data device for L1 index `N`;
-- `/dev/sgi-l1/l1-N`: stable `udev` alias for `/dev/sgil1_N`;
-- `/dev/sgil1_cs`: legacy controller-status device;
-- `/dev/sgi-l1/status`: stable `udev` alias for `/dev/sgil1_cs`;
-- `/dev/usb/sgil1_N`: compatibility fallback path on systems that place USB
-  character devices under `/dev/usb`.
+```sh
+sudo apt update
+sudo apt install build-essential "linux-headers-$(uname -r)" ./*.deb
+```
 
-The data-node suffix is assigned by the host USB layer and may not match the
-status-device index shown by `sgil1ctl probe`. `sgil1ctl` auto mode scans the
-available `l1-*`/`sgil1_*` data nodes rather than assuming `0`.
+DKMS builds the driver for the installed kernel and rebuilds it during kernel
+upgrades. Load the driver and reload the device rules:
 
-The package creates the `sgil1` system group if needed. Add users who need
-remote-management access to SGI L1 controllers to that group:
+```sh
+sudo udevadm control --reload
+sudo modprobe sgi_l1_usb
+```
+
+The packages create an `sgil1` group for access to the controller. Membership
+includes permission to operate the power and reset controls. To give your
+account access, replace `USERNAME` with your login name:
 
 ```sh
 sudo usermod -aG sgil1 USERNAME
 ```
 
-The user must start a new login session before the new group membership will be
-visible.
+Log out and back in to apply the new group membership. Connect the L1 USB
+cable, or reconnect it if it was already attached during installation.
 
-## Debian Or DKMS Installation
+For other Linux distributions, or to build your own packages, see the
+[source build and manual installation guide](docs/installation.md).
 
-Install build dependencies:
+## Basic usage
 
-```sh
-sudo apt-get install build-essential debhelper dh-dkms dkms sparse linux-headers-$(uname -r)
-```
-
-Run the tests and build packages:
+You can check the connection and read an overview of the SGI system with:
 
 ```sh
-make test
-make deb
-```
-
-Install the driver and either the minimal command-line tool:
-
-```sh
-sudo apt install ./_build/sgi-l1-usb-dkms_*_all.deb ./_build/sgil1ctl_*_*.deb
-```
-
-or the edition with the optional ncurses interface:
-
-```sh
-sudo apt install ./_build/sgi-l1-usb-dkms_*_all.deb \
-  ./_build/sgil1ctl-tui_*_*.deb
-```
-
-The two tool packages install the same `sgil1ctl` command and therefore
-replace one another.
-
-Version 0.1.57 also repairs stale DKMS registrations left by older package
-upgrades. It reports missing source paths and preserves orphaned registrations
-under `/var/lib/sgi-l1-usb-dkms/recovery/`. See [DKMS upgrade recovery](docs/dkms-recovery.md)
-for what was repaired, what is retained, and how to retry kernel configuration.
-
-Reload `udev` rules, load the module, and reconnect the L1 USB cable if needed:
-
-```sh
-sudo udevadm control --reload
-sudo modprobe sgi_l1_usb
-```
-
-If a device is already connected and the old permissions are still visible,
-trigger `udev` for the existing nodes:
-
-```sh
-sudo udevadm trigger --subsystem-match=usbmisc
-sudo udevadm trigger --subsystem-match=misc
-```
-
-## Manual Installation
-
-Manual installation is supported for non-Debian systems, or on systems where
-DKMS is not available.
-
-Build the module and tool:
-
-```sh
-make -C module KDIR=/lib/modules/$(uname -r)/build
-make -C tools
-```
-
-The default tool has no terminal-library dependency. To include the optional
-split-pane monitor, install the wide-character ncurses development files and
-build with:
-
-```sh
-make -C tools WITH_TUI=1
-```
-
-The build uses `pkg-config ncursesw` by default. `NCURSES_CFLAGS` and
-`NCURSES_LIBS` may be supplied explicitly on systems without a suitable
-`pkg-config` file. Debian and CI builds produce alternative `sgil1ctl` and
-`sgil1ctl-tui` packages; the former remains the minimal build.
-
-The module build derives its version from `debian/changelog`. If Debian's
-`dpkg-parsechangelog` tool is unavailable, the build falls back to parsing the
-latest changelog entry directly, so source builds on non-Debian systems still
-produce a versioned module. If building a detached copy of `module/`, pass an
-explicit version with `SGI_L1_VERSION=...`.
-
-Both sgil1ctl editions embed the same changelog-derived package version. Run
-`sgil1ctl --version` to inspect an installed binary without contacting the L1.
-
-Install the module:
-
-```sh
-sudo install -D -m 0644 module/sgi_l1_usb.ko \
-  /lib/modules/$(uname -r)/extra/sgi_l1_usb.ko
-sudo depmod -a
-```
-
-Install the tool:
-
-```sh
-sudo install -D -m 0755 tools/sgil1ctl /usr/local/bin/sgil1ctl
-sudo install -D -m 0644 include/sgi_l1_ioctl.h \
-  /usr/local/include/sgi-l1/sgi_l1_ioctl.h
-```
-
-Install `udev` rules and create the access group:
-
-```sh
-sudo groupadd --system sgil1 2>/dev/null || true
-sudo install -D -m 0644 udev/99-sgi-l1-usb.rules \
-  /etc/udev/rules.d/99-sgi-l1-usb.rules
-sudo udevadm control --reload
-sudo modprobe sgi_l1_usb
-```
-
-On non-`udev` systems, create device nodes from `sysfs` after the module is
-loaded and an L1 has enumerated. The data-device major/minor can normally be
-read from `/sys/class/usbmisc/sgil1_0/dev` and the status device from
-`/sys/class/misc/sgil1_cs/dev`.
-
-```sh
-sudo mknod /dev/sgil1_0 c MAJOR MINOR
-sudo mknod /dev/sgil1_cs c MAJOR MINOR
-sudo chgrp sgil1 /dev/sgil1_0 /dev/sgil1_cs
-sudo chmod 0660 /dev/sgil1_0 /dev/sgil1_cs
-```
-
-## Basic Usage
-
-Confirm that Linux can see the USB device and that the driver is loaded:
-
-```sh
-lsusb -d 065e:1234
 sgil1ctl probe
+sgil1ctl status
 ```
 
-Run non-destructive status checks:
+`probe` shows the available controller devices. `status` gathers the firmware
+version, system identity, clock, power and environmental information into one
+report. Individual commands provide more focused output:
 
 ```sh
-sgil1ctl status
 sgil1ctl date
+sgil1ctl power check
+sgil1ctl env
 sgil1ctl log
+sgil1ctl leds
+```
+
+`sgil1ctl` finds the controller automatically. If you have more than one
+connected, you can select a device by placing `--device PATH` before the
+command:
+
+```sh
+sgil1ctl --device /dev/sgi-l1/l1-0 status
+```
+
+Run `sgil1ctl --help` for a command summary, or add `--help` to a command for
+its options, for example `sgil1ctl log --help`.
+
+### Monitoring logs and LEDs
+
+The `log` command displays the L1 log, while `leds` shows the current and recent
+diagnostic LED states with descriptions. Add `--follow` (or `-w`) to either
+command to keep displaying new information:
+
+```sh
 sgil1ctl log --follow
 sgil1ctl leds --follow
-sgil1ctl watch
-sgil1ctl debug
 ```
 
-`sgil1ctl log --follow` polls the L1 log buffer, prints only newly observed
-lines after the initial snapshot, and summarizes only immediately adjacent
-copies of the same message. Intervening messages end a repeat run, matching
-traditional syslog-style folding. The USB transport exposed by this driver
-does not provide a known log-change notification stream, so entries can still
-be missed if the L1 log buffer wraps completely between polls. Use
-`sgil1ctl log --follow --poll-interval MS` to tune the steady-state poll
-interval. Newly observed `USB_WQUE Q full` entries increase a bounded pressure
-level and slow polling; `Q full` and `Q avail` remain visible but do not by
-themselves trigger burst polling. Pressure recovers gradually after quiet
-periods.
+The `watch` command combines both displays:
 
-`sgil1ctl leds` prints every populated slot returned by the L1: the current
-front-panel value followed by up to four history values. `leds --follow`
-repeatedly samples that five-slot response and prints only changed output.
-After each changed response it immediately polls again to catch fast-moving
-boot diagnostics, then returns to the steady poll interval once the output
-repeats; it backs off when the L1 stops responding.
+```sh
+sgil1ctl watch
+```
 
-LED-only follow cannot observe log queue messages without adding a second
-stream of requests. Its response-failure back-off therefore remains the local
-protection mechanism; use `sgil1ctl watch` when queue-aware log and LED polling
-are both required.
+Press **Ctrl-C** to stop monitoring. Repeated log messages are summarised by
+default; `--no-repeat-summary` displays them individually in `log` and `watch`.
 
-Fuel LED descriptions from the SGI Fuel Diagnostic Reference Manual remain
-authoritative. Entries documented only by the SGI L1/L2 controller guide or
-found in the IP35 PROM and L1 1.48.1 firmware tables are added where the Fuel
-manual has no definition. High-level LED output suppresses the transient
-`0x7f` input-wait, `0xfe` raw PROM value, and `0xff`
-console-character-read markers. They remain visible in raw
-`sgil1ctl l1cmd leds` output and IRouter diagnostics under `--debug`; the TUI
-retains them for its All view. Only `0x7f` and `0xff` update the elapsed time
-since console input was last active in the bottom-right corner.
+With the `sgil1ctl-tui` edition installed, you can open the interactive display:
 
-`power up --follow`,
-`power down --force --follow`, `power reset --force --follow`,
-`wait --power-up --follow`, `wait --power-down --follow`,
-`wait --reset --follow`, and `reset --force --follow` enter the same
-LED-follow mode after the corresponding command path.
+```sh
+sgil1ctl watch --tui
+```
 
-`sgil1ctl watch` combines log and LED following under one process so only one
-scheduler owns the L1 USB command path. Changed LED output is sampled at a
-short burst interval, unchanged output backs off to 500 ms, and quiet log
-polling defaults to one second. The scheduler slows both streams when the log
-reports `USB_WQUE Q full`, decays that pressure after quiet periods, alternates
-streams when both are due, and uses a bounded 200-2000 ms transport-failure
-back-off. It retains the discovered command destination and attempts discovery
-again only after repeated transport failures. Queue-state log messages are
-still printed, including any L1-reported loss counters. As with `log --follow`,
-snapshot polling cannot recover entries if the entire L1 log buffer wraps
-between successful requests.
+The log and LED panes appear side by side in a wide terminal and one above the
+other in a narrower window. Press **Tab** to select a pane, then use the arrow
+keys or **PgUp/PgDn** to scroll through its history. **End** returns to live
+output, **h** opens help, and **q** quits.
 
-An ncurses-enabled build also accepts `sgil1ctl watch --tui`. Wide terminals
-show the log beside a smaller LED pane; narrow terminals put the LED pane above
-the larger log pane. `Tab` selects a pane. Up/Down or `k`/`j` scroll by line;
-Page Up/Page Down or `Ctrl-B`/`Ctrl-F` scroll by page; `End` or `G` returns the
-selected pane to live output. `Ctrl-L` redraws the screen, and `q` exits. Press
-`h` or `?` to show the complete Help view; `Esc` and Return also close it. The
-default Filtered view uses adjacent-message repeat summaries, hides
-transient/raw LED markers, and shows LED state changes rather than unchanged
-repeats. A line such as `previous message repeated 1 additional time` follows
-the first displayed copy, so it represents two raw occurrences in total.
-Press `a` to toggle the All view of every retained observation. LED timestamps
-are retained but hidden by default; `t` shows or hides them. The Help view
-highlights the active pane, Filtered/All mode, timestamp setting, and
-colour/monochrome setting.
+Some LED status lines are hidden by default. Press **a** to switch between
+the **Filtered** and **All** views. To see where LED descriptions come from,
+press **p**, or add `--show-annotations` to `leds` or `watch`.
+The [monitoring reference](docs/usage.md#interactive-terminal-display)
+covers the remaining keys, colour palettes, history sizes and polling options.
 
-The TUI normally uses the terminal's alternate screen;
-`--no-alternate-screen` opts into drawing on the primary screen. A restrained
-colour accent identifies the selected pane and queue pressure on capable
-terminals. Ncurses has no portable way to discover the terminal's actual
-background colour. `COLORFGBG`, when present, selects readable shades within
-the active palette. Startup remains in the terminal's unaccented default
-colours until automatic chassis detection succeeds. `c` then cycles through
-the cached automatic choice followed by the hardware palettes in chronological
-order, with Personal IRIS deliberately last. Returning to the automatic choice
-does not repeat the L1 `version` request. `m` toggles monochrome and restores
-the previous palette when pressed again. Palette identity and machine
-inspiration appear once, at the right of the title bar. The Help view labels
-an automatically detected palette explicitly, for example `Auto (Fuel)`.
+### Setting the clock
 
-The 256-colour sequence distinguishes Indigo, Crimson, Indy, Indigo2, Onyx,
-Challenge, Indigo2 IMPACT, O2/Origin, Octane, Onyx2, Octane2, O2+, Fuel,
-Tezro, and Personal IRIS shades. Basic-colour terminals collapse those into
-unique purple, red, blue, teal, green, and brown-inspired choices. Curses has
-no portable named brown; that fallback uses low-intensity yellow, which many
-terminals render as dark yellow or brown, while 256-colour terminals use an
-explicit brown shade. Early IRIS purple, teal, red, and blue top-hat colours
-are represented by these existing colour groups rather than duplicated as
-separate palettes; beige no-graphics top hats are not treated as a machine
-family.
-
-Use `--palette NAME` to choose a palette by its canonical name, a listed
-machine name, or a simple colour alias. Canonical names are `indigo`,
-`crimson`, `indy`, `indigo2`, `onyx`, `challenge`, `impact`, `o2`, `octane`,
-`onyx2`, `octane2`, `o2plus`, `fuel`, `tezro`, and `personal-iris`;
-`monochrome` starts without colour. The default `auto` mode makes one `version`
-request at startup and selects a palette from any chassis family named by the
-firmware. Shared image descriptions cannot always identify the enclosure; for
-example, `[Fuel/PE/O300]` selects Fuel red, so use `--palette o2` for an O300
-when desired. If detection fails, the TUI remains in its unaccented default.
-This startup request is not repeated while watching.
-
-Watch-mode reads check for `q` or an interrupt at most every 100 ms, including
-while waiting for an L1 response, then close the device normally without
-resetting its pipes solely because the user cancelled. Before leaving curses,
-the TUI resets terminal attributes and clears its complete final status row.
-This also leaves a clean prompt row when GNU Screen keeps the default TUI on
-its primary display instead of honouring the alternate-screen request.
-
-The TUI keeps process-local circular histories so information remains
-scrollable after it ages out of the L1 firmware buffers. Every retrieved log
-record is kept in a raw 4096-message history for All view, while a separate
-history holds the Filtered view and its repeat summaries. Use
-`--log-history ENTRIES` to change both limits; `--no-repeat-summary` makes the
-Filtered log view retain repeated messages individually as well.
-
-Every successful LED response, including an unchanged response, retains a
-host-local observation timestamp in a separate 512-response history; use
-`--led-history ENTRIES` to change it. Adjacent identical responses share one
-pair of raw and filtered decoded line sets but retain every observation
-timestamp, providing run-length encoding without discarding observation
-times. In Filtered view the LED pane title reports visible decoded states and
-retained samples separately, so `LEDs 0 states | 24/512 samples` means all 24
-samples contain only filtered activity markers. All view shows the retained
-sample count directly. Each history accepts up to one million entries. Storage
-is allocated for actual strings rather than a fixed byte allowance, and all
-histories are discarded on exit. Long lines wrap within each pane with
-indented continuation rows, and scrolling operates on those visual rows. Each
-pane's unpadded bottom-right percentage reports the position of the final
-displayed visual row within its rendered history after filtering, repeat
-collapse, and wrapping. Live view is therefore `100%`; scrolling backwards
-reduces the percentage. The side-by-side LED pane is capped at 129 terminal
-columns: 127 content columns plus its borders, matching the longest line
-generated by the current LED table.
-
-A minimal build keeps the `watch` text interface and reports how to enable the
-optional feature when `watch --tui` is requested. The history-size options
-apply only to the TUI.
-
-`sgil1ctl debug` shows the SGI virtual debug switch value from the L1 `debug`
-command, decodes the documented bitfields, and then prints the current `l1dbg`
-settings. Use `sgil1ctl debug --list-switches` to list wrapper switch names,
-values, and boot-stop choices.
-Use `sgil1ctl debug --enable SWITCH... --force`,
-`sgil1ctl debug --disable SWITCH... --force`, or
-`sgil1ctl debug --set SWITCHES --force` to update only the virtual debug
-switches. Expert `l1dbg` subcommands remain available through
-`sgil1ctl l1cmd ...`. `--boot-stop POINT` sets the documented PROM boot-stop
-bits in the virtual debug switches; clear them with
-`sgil1ctl debug --boot-stop none --force`.
-
-Set the L1 clock from the host when drift exceeds the default threshold:
+The L1 clock can be set from the Linux computer:
 
 ```sh
 sgil1ctl date --set-time
 ```
 
-Power-on and a single power-down signal are available directly. Use `--force`
-with `power down` to send the second signal used to cut power from a running
-system. Host and L1 reset actions require `--force`:
+By default, this updates the clock when the difference is at least 60 seconds
+and uses the Linux computer's timezone. `--drift-seconds SEC` changes the
+threshold, and `--timezone TZ` selects a timezone explicitly.
+
+### Power and reset controls
+
+`power up` turns on the SGI system. `power down` sends a single power-down
+signal, while `power down --force` sends the second signal used to force the
+system off:
 
 ```sh
-sgil1ctl power up --follow
-sgil1ctl power down --force --follow
-sgil1ctl power reset --force --follow
+sgil1ctl power up
+sgil1ctl power down
+sgil1ctl power down --force
+```
+
+There are separate commands to reset the SGI system and its L1 controller.
+Both require `--force`:
+
+```sh
+sgil1ctl power reset --force
 sgil1ctl reset --force
 ```
 
-`power up --follow`, `power down --follow`, and the matching `wait` power
-actions enter LED-follow mode as soon as the L1 command has been sent, before
-waiting for `power check` confirmation. Early LED samples are buffered until
-the confirmation line is printed, or until a short timeout expires, then normal
-LED-follow output continues. Plain `power up` and `power down` still wait for
-confirmation before returning.
+The first issues a soft reset to the SGI system; the second restarts the L1
+controller itself. Adding `--follow` to a power or reset command displays LED
+changes during the operation.
 
-`power reset` sends the L1 `softreset`/`softrst` host-reset command. The
-top-level `reset` command resets the L1 controller itself.
+### Waiting for a controller
 
-Wait for an L1 USB device to bind and then set time and power on if the system
-appears off:
+`sgil1ctl wait` waits for an L1 USB device to become available and then reads
+its status. With `--background`, it waits for the next connection event.
+Options are also available to set the clock, operate the power controls and
+monitor LEDs after connection. These are described in
+`sgil1ctl wait --help` and the [command reference](docs/usage.md#actions-on-connection).
 
-```sh
-sgil1ctl wait --set-time --power-up --force
-```
+### Debug settings and direct L1 commands
 
-Leave a process armed for the next future USB bind, ignoring any device that is
-already present:
+`sgil1ctl debug` displays and decodes the virtual debug switches, together
+with the L1's current debug settings. `sgil1ctl debug --list-switches` lists
+the available switch names, diagnostic modes and boot-stop points. Changes
+use explicit options and `--force`; see `sgil1ctl debug --help` for details.
 
-```sh
-sgil1ctl wait --background --set-time --power-up --force
-```
-
-Pass through an L1 command advertised by live `help` output:
+You can send commands directly to the L1 with `l1cmd`. For example:
 
 ```sh
 sgil1ctl l1cmd version
 sgil1ctl l1cmd flash status
-sgil1ctl l1cmd '*' version
 ```
 
-Use `sgil1ctl --help` for the normal command set, `sgil1ctl COMMAND --help` for
-command-specific options, and `sgil1ctl --help-all` for developer and
-protocol-inspection options.
+`sgil1ctl l1cmd help` lists the commands supplied by the connected controller's
+firmware. The [command reference](docs/usage.md#direct-l1-commands) also covers
+command arguments and the SGI broadcast prefix.
 
-## Legacy SGI L2/L3 Tools
+## Troubleshooting and further documentation
 
-The driver keeps the legacy `/dev/sgil1_0` and `/dev/sgil1_cs` ABI so SGI's
-prebuilt L2/L3 tools can be tested without patching those binaries. For those
-tools, the expected path is to run SGI's `l2` daemon against the USB device and
-then use `l2cmd`, `l2find`, or `l2term` against the daemon:
+For USB connection problems, `lsusb -d 065e:1234` checks whether Linux has
+detected the controller. The [USB troubleshooting guide](docs/usb-diagnostics.md)
+contains further checks, including host-controller and Raspberry Pi advice.
+For package upgrade errors, see [DKMS recovery](docs/dkms-recovery.md).
 
-```sh
-sudo modprobe sgi_l1_usb legacy_status_ioctl=1 legacy_reset_pipes=1
-l2 -usb -nodiscover
-l2cmd --l2 127.0.0.1 "l1 version"
-```
+The [installation reference](docs/installation.md) covers device permissions,
+manual installation and use with the original SGI L2/L3 tools. The
+[command reference](docs/usage.md) contains the full monitoring options and
+links to SGI's controller manuals.
 
-The compatibility parameters are disabled by default and should be enabled only
-when testing the prebuilt SGI tools:
-
-- `legacy_status_ioctl=1` accepts the original SGI status-revision ioctl number
-  used by L2/L3 startup probes.
-- `legacy_reset_pipes=1` enables the original endpoint set-halt, delay,
-  clear-halt sequence used by the SGI daemon when it opens and resets the USB
-  transport.
-
-Without these options, the driver keeps the smaller modern ioctl surface and
-the stricter kernel-standard `usb_clear_halt()` reset path.
-
-An optional container recipe is provided under `contrib/l2-l3-container/`.
-Supply an extracted `rootfs/`, a local `snxsc_l3-1.62.0-1.i386.rpm`, or an SGI
-CD-IST archive, then build with the runtime available on your host:
-
-```sh
-make container-podman SGI_L3_RPM=/path/to/snxsc_l3-1.62.0-1.i386.rpm
-make container-docker SGI_L3_ARCHIVE=/path/to/cd-ist-3.24.taz
-make container-apple SGI_L3_ARCHIVE=/path/to/cd-ist-3.24.taz
-```
-
-`container-apple` is limited to Apple Silicon macOS hosts with Apple's
-`container` CLI. It can package the SGI tools into an OCI image, but Docker or
-Podman with `linux/386` support remains the reference path for actually running
-the 32-bit SGI binaries.
-
-Direct SGI commands such as `l2cmd --scdev /dev/sgil1_0 version` or
-`l2cmd --scdev /dev/sgil1_0 --irtr version` may time out on a single L1 USB
-connection. In testing, those direct forms timed out both with this driver and
-with another modernized legacy `sgil1` driver, while the daemon-mediated
-`l2cmd --l2 127.0.0.1 ...` path successfully returned L1 `version`, `date`,
-`power`, `env`, `fan`, `usb`, and `log` output.
-
-## Tests
-
-Run the hardware-free test suite:
-
-```sh
-make test
-```
-
-The tests build the module with warning and sparse checks, validate driver
-metadata and source invariants, and run `sgil1ctl` against an `LD_PRELOAD`
-mock L1 USB/status transport. CI also compiles the optional TUI configuration.
-To run tests and then build packages:
-
-```sh
-make test-deb
-```
-
-The SGI L3 package examined for compatibility contains controller utilities
-and man pages, but no explicit validation suite. Treat the read-only L2 daemon
-probes above as functional compatibility checks rather than a vendor test
-harness.
-
-## USB Diagnostics
-
-If the host cannot enumerate the L1 as `065e:1234`, the kernel driver cannot
-bind yet. See [`docs/usb-diagnostics.md`](docs/usb-diagnostics.md) for
-host USB checks.
-
-For a gated end-to-end test from a Raspberry Pi connected to a Fuel, including
-follow timing, TUI, reconnect, and optional power-on checks, see
-[`docs/live-hardware-validation.md`](docs/live-hardware-validation.md).
-
-The L1 is sensitive to large USB transfers. Fuel firmware 1.24.11 was measured
-with a 72-byte command-text limit (a 109-byte IRouter transfer). Recovered Fuel
-images from 1.26.5 through 1.48.1 use a larger command buffer; live 1.48.1
-testing established a 279-byte text limit (a 316-byte transfer), while 280
-bytes reproducibly panics and reboots the controller.
-
-`sgil1ctl` uses the 72-byte limit for legacy, unknown, and non-Fuel firmware.
-For a longer pass-through command it first queries `version`, and raises the
-limit to 279 bytes only for qualified Fuel/PE/O300 firmware 1.26.5 or newer.
-The kernel module keeps the original 4096-byte raw transport limit by default,
-but also exposes a `max_write_size` parameter. An optional kernel-level limit
-can be set to match the applicable firmware generation:
-
-```sh
-# Fuel 1.24.11 and other unqualified firmware
-sudo modprobe sgi_l1_usb max_write_size=109
-
-# Qualified Fuel/PE/O300 1.26.5 or newer firmware
-sudo modprobe sgi_l1_usb max_write_size=316
-```
-
-The `reset_on_close=1` module parameter restores the original driver's
-reset-on-close behaviour for compatibility. It defaults to `0`.
-
-The `legacy_status_ioctl=1` module parameter enables the original SGI L2/L3
-status-revision ioctl encoding. It defaults to `0`, so modern callers use only
-the bounded ioctl ABI in `include/sgi_l1_ioctl.h`.
-
-The `legacy_reset_pipes=1` module parameter enables the original SGI L2/L3
-endpoint reset sequence for the `SGIL1_RESET_PIPES` ioctl. The default remains
-the kernel-standard `usb_clear_halt()` path; enable this only when testing
-prebuilt SGI L2/L3 binaries which expect the older set-halt, delay, clear-halt
-sequence.
-
-## References
-
-- SGI L1 and L2 Controller Software User's Guide, 007-3938-006:
-  <https://irix7.com/techpubs/007-3938-006.pdf>
-- SGI Origin 3000 Series Owner's Guide system-control chapter:
-  <https://techpubs.jurassic.nl/library/manuals/4000/007-4240-001/sgi_html/ch03.html>
-- `flashsc(1M)` manual page, covering SGI L1/L2 firmware update paths:
-  <https://help.graphica.com.au/irix-6.5.30/man/1M/flashsc>
-- System Controller Software 1.5 Update Guide, 007-4576-006, covering the
-  contemporary 1.26.x L1 firmware release:
-  <https://www.infania.net/misc1/sgi_techpubs/techpubs/007-4576-006.pdf>
-- System Controller Software 1.14 Update Guide, 007-4576-015, documenting the
-  original SGI system-controller software release and package names:
-  <https://www.infania.net/misc1/sgi_techpubs/techpubs/007-4576-015.pdf>
-- Notes on running SGI L2/L3 software on old Linux, with a link to archived
-  IST/L2/L3 software version 3.24:
-  <https://just.graphica.com.au/tips/creaky-old-fedora-core-linux/>
-- Direct archive link referenced by the article above:
-  <https://www.graphica.com.au/files/cd-ist-3.24.taz>
+`sgil1ctl --version` reports the installed tool version. `sgil1ctl --help-all`
+includes the additional device and protocol diagnostics, and `--debug` adds
+raw communication diagnostics when placed before a command.
 
 ## License
 
-The source is licensed under GPL-2.0-or-later. See [`COPYING`](COPYING). Source
-files carry SPDX license identifiers.
+The source is licensed under GPL-2.0-or-later. See [COPYING](COPYING).

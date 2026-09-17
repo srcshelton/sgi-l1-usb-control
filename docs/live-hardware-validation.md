@@ -1,8 +1,9 @@
-# Live Fuel USB Validation
+# Live hardware validation on Fuel
 
-Run these checks from the Raspberry Pi physically connected to the Fuel L1.
-Keep only one `sgil1ctl` follow/watch process running at a time: the tool's
-advisory lock intentionally serializes access to the USB command path.
+This procedure checks a new build on the project's tested hardware: a Fuel
+connected by L1 USB to a Raspberry Pi. It covers command output, monitoring,
+terminal behaviour and recovery after a disconnected cable. Run the checks
+from that Pi, ending each monitor before starting the next.
 
 Store the results somewhere persistent for comparison:
 
@@ -11,7 +12,7 @@ out="$HOME/sgil1-validation-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"
 ```
 
-## Read-Only Baseline
+## Read-only baseline
 
 These commands must complete without stale one-character responses, repeated
 32-frame drain warnings, or unexpected pipe resets:
@@ -25,14 +26,17 @@ sudo sgil1ctl l1cmd leds 2>&1 | tee "$out/05-leds-raw.txt"
 sudo sgil1ctl leds 2>&1 | tee "$out/06-leds-decoded.txt"
 sudo sgil1ctl --debug leds 2>&1 | tee "$out/07-leds-debug.txt"
 sudo sgil1ctl log 2>&1 | tee "$out/08-log.txt"
+sudo sgil1ctl leds --show-annotations 2>&1 | tee "$out/09-leds-sources.txt"
 ```
 
 Compare the LED captures. Raw `l1cmd leds` and `--debug leds` may contain
-`0x7f` or `0xff`; normal `leds` output should suppress them while retaining all
-other populated current/history slots. `--debug` should name the source used
-for every decoded value.
+`0x7f`, `0xfe` or `0xff`; normal `leds` output should hide these entries on
+recognised Fuel/PE firmware while retaining the other current/history slots.
+`--show-annotations` should identify descriptions supplied by the controller
+and those added from a reference. CPU identifiers and absent-CPU messages
+should agree with the raw response.
 
-## Bounded Follow Tests
+## Monitoring
 
 Run each test separately for five minutes. GNU `timeout` normally returns 124
 when it ends the otherwise successful follow process.
@@ -48,19 +52,16 @@ sudo timeout --signal=INT --kill-after=5s 300 \
   sgil1ctl watch 2>&1 | tee "$out/12-watch.txt"
 ```
 
-`log --follow` and `watch` should report increasing queue-pressure levels after
-new `USB_WQUE Q full` messages, avoid treating `Q full`/`Q avail` as burst
-activity, and recover levels gradually after ten-second quiet periods. LED-only
-follow cannot see log queue messages and should instead back off from failed
-responses up to 500 ms. Use `watch` when both streams and shared pressure
-control are required.
+`log --follow` and `watch` should report slower polling when new
+`USB_WQUE Q full` messages appear, then recover their polling rate after quiet
+periods. LED follow should report failed responses and retry after a delay.
 
 Do not deliberately flood the L1 to provoke `Q full`. If the messages occur
 naturally, retain the complete `Q avail - lost: ... repl: ...` lines. A
 non-overlap warning means the circular log advanced farther than snapshot
 polling could recover.
 
-## TUI Checks
+## Interactive display
 
 Install the `sgil1ctl-tui` package in place of `sgil1ctl`, then run:
 
@@ -69,14 +70,18 @@ sudo sgil1ctl watch --tui
 sudo sgil1ctl watch --tui --no-alternate-screen
 ```
 
-For each mode, verify `q`, `Tab`, Up/Down, Page Up/Page Down, and `End`. Resize
+For each mode, verify `q`, `Tab`, Up/Down, Page Up/Page Down, and `End`.
+Use `a` to compare Filtered and All views, `t` to toggle LED timestamps, and
+`p` to show and hide description sources. Check that `p` also updates retained
+observations when scrolling back. Open help with `h` and check the key list
+at both a normal terminal size and the minimum size of 40 columns by 10 rows. Resize
 the terminal above and below 100 columns: wide mode should place LEDs to the
 right of the larger log pane, while narrow mode should place the smaller LED
 pane above the log. If a harmless PROM-console character can be entered from an
 existing console, the bottom-right `Console last active` age should reset
-without adding `0x7f` or `0xff` to the LED pane.
+while the Filtered view continues to hide `0x7f` and `0xff`.
 
-## Transport Recovery
+## Connection recovery
 
 With the workstation otherwise stable, run `sgil1ctl watch`, disconnect only
 the Raspberry Pi-to-L1 USB management cable, and reconnect it. The monitor
@@ -94,7 +99,7 @@ diff -u "$out/04-usb-before.txt" "$out/20-usb-after.txt" \
   | tee "$out/23-usb-diff.txt" || true
 ```
 
-## Power And Boot Diagnostics
+## Power and boot diagnostics
 
 Run these only in a maintenance window. First confirm that the workstation is
 already off, then validate the unguarded power-up and LED capture path:
@@ -104,17 +109,19 @@ sudo sgil1ctl power check
 sudo sgil1ctl power up --follow 2>&1 | tee "$out/30-power-up-follow.txt"
 ```
 
-The output should retain `Power-up: confirmed workstation appears on` before
+The output should retain `Power-up: confirmed system appears on` before
 continuing LED follow. End it with Ctrl-C after PROM or IRIX has reached a
 stable state. Test `power down`, `power down --force`, or
 `power reset --force --follow` only when their shutdown/reset effects and any
 possible data loss have been explicitly accepted. Never use a forced action as
 a way to manufacture monitor traffic.
 
-## Acceptance Criteria
+## Acceptance criteria
 
 - Read-only commands consistently return complete framed responses.
-- Normal LED output has no `0x7f`/`0xff`; raw/debug evidence retains them.
+- The default LED filter hides `0x7f`, `0xfe` and `0xff` on recognised firmware;
+  raw/debug captures and the TUI All view retain them.
+- Source labels appear when requested and describe the text actually shown.
 - Follow output contains no isolated response characters or stale-frame loops.
 - Polling slows under observed queue pressure and later recovers gradually.
 - No unexplained increase appears in L1 USB errors, stalls, or timeouts.
