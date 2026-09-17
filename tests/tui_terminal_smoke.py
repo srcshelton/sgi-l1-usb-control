@@ -54,7 +54,7 @@ def check_pane_controls(capture, send, resize):
         lines = rendered.rstrip("\n").split("\n")
         entries = (["Tab select pane", "shrink/grow pane", "t time:",
                     "p sources:", "^L redraw", "h/?/Esc/Ret close"] if compact else
-                   ["Select pane", "Shrink/grow selected pane", "LED timestamps",
+                   ["Select pane", "Move divider left/right", "LED timestamps",
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
                 for entry in entries]
@@ -66,24 +66,25 @@ def check_pane_controls(capture, send, resize):
 
     wide_widths((80, 40))
     help_order()
-    send(b"<")
-    wide_widths((79, 41))
-    send(b"\033OC")  # Right, with application cursor keys enabled.
-    wide_widths((80, 40))
-    send(b"\t>")
-    wide_widths((79, 41))
-    send(b"\033OD")
-    wide_widths((80, 40))
+    for focus in ("log", "LEDs"):
+        for left, right in ((b"<", b">"), (b"\033OD", b"\033OC")):
+            # Every key moves the rendered divider in its own direction.
+            send(left)
+            wide_widths((79, 41))
+            send(right)
+            wide_widths((80, 40))
+        if focus == "log":
+            send(b"\t")
     send(b"^v\033OA\033OB")  # Vertical keys do not resize wide panes.
     wide_widths((80, 40))
-    send(b">" * 120)
-    wide_widths((24, 96))
     send(b"<" * 120)
+    wide_widths((24, 96))
+    send(b">" * 120)
     rendered = wide_widths((96, 24))
     led_text = " ".join(line[97:-1].strip() for line in rendered.rstrip("\n").split("\n")[2:-3])
     if "paneresizingpreserveseverywordofthislongLEDstatusmessage" not in "".join(led_text.split()):
         raise AssertionError(f"LED text was lost when rewrapped:\n{rendered}")
-    send(b">" * 16)
+    send(b"<" * 16)
     wide_widths((80, 40))
     resize(24, 160)
     wide_widths((120, 40))

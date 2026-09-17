@@ -65,16 +65,16 @@ sgil1ctl watch --tui
 ```
 
 The log and LED panes appear side by side in wide terminals and stacked in
-narrow terminals. Each pane has its own scroll position. Select a pane with
-**Tab**, then use **Left/Right** or **<**/**>** to shrink or grow it by one
-column. In stacked layouts, these keys adjust the height by one row instead.
-**^**/**v** also shrink or grow a stacked pane. The display keeps your width
-and height settings for the current session.
+narrow terminals. Each pane has its own scroll position. In side-by-side
+layouts, **Left/Right** or **<**/**>** move the divider one column to the left
+or right, whichever pane is selected. In stacked layouts, select a pane with
+**Tab**, then use these keys or **^**/**v** to shrink or grow its height by one
+row. The display keeps your width and height settings for the current session.
 
 | Key | Action |
 | --- | --- |
 | **Tab** | Select the log or LED pane |
-| **Left/Right**, **<**/**>** | Shrink or grow the selected pane |
+| **Left/Right**, **<**/**>** | Move the divider left/right; shrink/grow the selected pane when stacked |
 | **^**/**v** | Shrink or grow the selected pane when stacked |
 | **Up/Down**, **k/j** | Scroll one line |
 | **PgUp/PgDn**, **Ctrl-B/F** | Scroll one page |

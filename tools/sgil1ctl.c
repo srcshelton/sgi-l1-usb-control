@@ -468,7 +468,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"\n"
 			"TUI keys:\n"
 			"  Tab                   select log or LED pane\n"
-			"  Left/Right, </>       shrink or grow selected pane\n"
+			"  Left/Right, </>       move divider; resize pane when stacked\n"
 			"  ^/v                   shrink/grow selected pane when stacked\n"
 			"  Up/Down, k/j          scroll selected pane by one line\n"
 			"  PgUp/PgDn, Ctrl-B/F   scroll selected pane by one page\n"
@@ -6630,7 +6630,8 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 6, 4, "Left/Right, </>", 18);
 	if (COLS < 100)
 		mvwaddnstr(window, 6, 56, "Also ^/v when stacked", width - 60);
-	mvwaddnstr(window, 6, 24, "Shrink/grow selected pane", 30);
+	mvwaddnstr(window, 6, 24, COLS >= 100 ?
+		   "Move divider left/right" : "Shrink/grow selected pane", 30);
 	mvwaddnstr(window, 7, 4, "Up/Down, k/j", 18);
 	mvwaddnstr(window, 7, 24, "Scroll by line", 30);
 	mvwaddnstr(window, 8, 4, "PgUp/PgDn, ^B/^F", 18);
@@ -6687,7 +6688,7 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 				  sizeof(palette_setting), true);
 	mvwaddnstr(window, 1, 2, "Tab select pane", width - 4);
 	mvwaddnstr(window, 2, 2, COLS >= 100 ?
-		   "Left/Right </> shrink/grow pane" :
+		   "Left/Right </> move divider" :
 		   "L/R </> ^/v shrink/grow pane", width - 4);
 	mvwaddnstr(window, 3, 2, "U/D k/j line ^B/^F page g live", width - 4);
 	mvwprintw(window, 4, 2, "a view:%-8s t time:%s", view, timestamps);
@@ -7170,12 +7171,12 @@ static void watch_tui_clamp_scroll(struct watch_tui_state *state)
 		state->led_scroll = maximum;
 }
 
-static void watch_tui_resize_pane(struct watch_tui_state *state, bool grow)
+static void watch_tui_resize_pane(struct watch_tui_state *state, bool increase)
 {
 	struct watch_tui_rect log_rect;
 	struct watch_tui_rect led_rect;
 	bool wide = COLS >= 100;
-	int change = grow ? 1 : -1;
+	int change = increase ? 1 : -1;
 	int size;
 	int minimum = wide ? 24 : 3;
 	int total = wide ? COLS : LINES - 2;
@@ -7184,7 +7185,8 @@ static void watch_tui_resize_pane(struct watch_tui_state *state, bool grow)
 		return;
 	watch_tui_layout(state, &log_rect, &led_rect);
 	size = wide ? led_rect.width : led_rect.height;
-	if (state->focus == WATCH_TUI_FOCUS_LOG)
+	/* Horizontal keys move the divider; stacked panes resize by focus. */
+	if (wide || state->focus == WATCH_TUI_FOCUS_LOG)
 		change = -change;
 	size += change;
 	if (size < minimum)
