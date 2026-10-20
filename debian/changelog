@@ -1,3 +1,25 @@
+sgi-l1-usb-control (0.1.59) unstable; urgency=medium
+
+  * Updated components since 0.1.58: user-space sgil1ctl, tests and
+    documentation; kernel module source is unchanged.
+  * Show retained sample counts for repeated LED states in the Filtered
+    TUI view, with first and latest observation times when timestamps
+    are enabled. Keep counts accurate as retained history expires.
+  * Add a * operator-controls menu for power up, power down, host soft
+    reset and L1 controller reset, with YES plus Return confirmation for
+    each action and separate confirmation for a second power-down signal.
+  * Send confirmed actions between monitoring transactions, record commands
+    and responses in both log views, check power state after power actions,
+    and resume monitoring afterward. Report timed-out actions as having an
+    unknown outcome without automatically retrying them.
+  * Redraw the terminal after operator-command diagnostics to preserve a
+    clean display and shell prompt, including after response timeouts.
+  * Document operator controls and retained-sample semantics, and extend
+    TUI state and rendered GNU Screen tests for repeats, confirmation,
+    distinct host/controller resets, cancellation and timeout recovery.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 20 Oct 2026 18:03:28 +0100
+
 sgi-l1-usb-control (0.1.58) unstable; urgency=medium
 
   * Updated components since 0.1.57: user-space sgil1ctl, tests and
