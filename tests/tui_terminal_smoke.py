@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -140,8 +141,95 @@ def check_pane_controls(capture, send, resize):
     print("PASS pane controls: focus, aliases, limits, wrapping, resize and help order", flush=True)
 
 
-def run_case(screen, temporary, altscreen, primary, stop):
+def check_operator_controls(capture, send, resize, command_log):
+    actions = {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}
+
+    def sent():
+        return [line for line in command_log.read_text().splitlines() if line in actions]
+
+    def expect(text):
+        rendered = capture()
+        if text not in rendered:
+            raise AssertionError(f"missing {text!r}:\n{rendered}")
+        return rendered
+
+    # Repeats remain visible without timestamps; time mode includes the latest.
+    send(b"\f")
+    rendered = capture()
+    if not re.search(r"\b(?:[2-9]|[1-9][0-9]+) samples\b", rendered):
+        raise AssertionError(f"no rendered repeat count:\n{rendered}")
+    send(b"t")
+    expect("samples; last")
+    send(b"t")
+    send(b"uYES\r")  # Operator keys do nothing in monitoring mode.
+    if sent():
+        raise AssertionError("operator command was available outside the menu")
+    send(b"*")
+    expect("Operator controls")
+    expect("Reset/restart host (softreset)")
+    send(b"u\rYESno\r")
+    expect("Confirm:")
+    if sent():
+        raise AssertionError("empty/invalid confirmation sent an action")
+    send(b"YES\033")
+    if sent() or "Operator controls" in capture():
+        raise AssertionError("Escape did not cancel confirmation")
+    send(b"*UYES\r")
+    expect("Power check: host on")
+    if sent() != ["CMD power up"]:
+        raise AssertionError(f"power-up sent wrong commands: {sent()}")
+    send(b"*dYES\r")
+    expect("Second power-down signal")
+    expect("L1 requested a second power-down signal")
+    if sent() != ["CMD power up", "CMD power down"]:
+        raise AssertionError("power down was automatically repeated")
+    send(b"\r")  # Empty second confirmation does not send.
+    if len(sent()) != 2:
+        raise AssertionError("empty second confirmation sent power down")
+    send(b"YES\r")
+    expect("Power check: host off")
+    if sent().count("CMD power down") != 2:
+        raise AssertionError("second power-down confirmation did not send exactly once")
+    send(b"*rYES\r")
+    expect("softreset: command acknowledged")
+    send(b"*lYES\r")
+    expect("reset: command acknowledged")
+    if sent() != ["CMD power up", "CMD power down", "CMD power down",
+                  "CMD softreset", "CMD reset"]:
+        raise AssertionError(f"operator actions sent wrong commands: {sent()}")
+    send(b"a")
+    expect("reset: command acknowledged")  # Action receipts also exist in All view.
+    send(b"a")
+    resize(11, 40)
+    send(b"*l")
+    expect("Type YES, then Return to send once")
+    send(b"*")
+    if len(sent()) != 5:
+        raise AssertionError("compact menu cancel sent an action")
+    resize(24, 120)
+    print("PASS operator controls: rendered repeats, gating, confirmation, power and distinct resets", flush=True)
+
+
+def check_operator_timeout(capture, send, command_log):
+    send(b"*uYES\r")
+    rendered = capture()
+    if "outcome unknown" not in rendered:
+        raise AssertionError(f"timeout was not reported as uncertain:\n{rendered}")
+    send(b"\r\r")
+    commands = command_log.read_text().splitlines()
+    if commands.count("CMD power up") != 1:
+        raise AssertionError("uncertain power action was retried")
+    if "Operator controls" in capture():
+        raise AssertionError("operator menu remained open after timeout")
+    if commands[-1] not in ("CMD log", "CMD leds", "CMD version"):
+        raise AssertionError("monitoring did not resume after timeout")
+    print("PASS operator timeout: unknown outcome, one send and resumed monitoring", flush=True)
+
+
+def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False):
     name = f"altscreen-{altscreen}-{'primary' if primary else 'default'}-{stop}"
+    if operator_timeout:
+        name += "-operator-timeout"
     directory = temporary / name
     directory.mkdir()
     session = f"sgil1ctl-{os.getpid()}-{name}"
@@ -150,9 +238,13 @@ def run_case(screen, temporary, altscreen, primary, stop):
     screenrc = directory / "screenrc"
     child_state = directory / "child.json"
     result = directory / "result.txt"
-    exercise_controls = altscreen == "off" and not primary and stop == "q"
+    exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout
+    command_log = directory / "commands.log"
     extra_env = ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x09: pane resizing preserves every "
                   "word of this long LED status message\n"} if exercise_controls else {})
+    extra_env.update(SGIL1_MOCK_LOG=str(command_log), SGIL1_MOCK_POWER_DOWN_CONFIRM="1")
+    if operator_timeout:
+        extra_env["SGIL1_MOCK_POWER_UP_TIMEOUT"] = "1"
     command = [
         str(BIN), "--device", "/dev/sgi-l1/l1-0",
         "--status-device", "/dev/sgi-l1/status", "--timeout", "10",
@@ -252,7 +344,7 @@ def run_case(screen, temporary, altscreen, primary, stop):
             raise AssertionError(f"wrong terminal/hardstatus layout: {child}")
         if HARDSTATUS.encode() not in terminal_output:
             raise AssertionError("attached Screen did not render its hardstatus")
-        if exercise_controls:
+        if exercise_controls or operator_timeout:
             def send(keys):
                 os.write(master, keys)
                 drain(0.4 if len(keys) < 30 else 1.5)
@@ -263,7 +355,11 @@ def run_case(screen, temporary, altscreen, primary, stop):
                 os.kill(proc.pid, signal.SIGWINCH)
                 drain(0.4)
 
-            check_pane_controls(capture, send, resize)
+            if operator_timeout:
+                check_operator_timeout(capture, send, command_log)
+            else:
+                check_operator_controls(capture, send, resize, command_log)
+                check_pane_controls(capture, send, resize)
         if stop == "q":
             os.write(master, b"q")
         else:
@@ -308,6 +404,7 @@ def main():
             for primary in (False, True):
                 for stop in ("q", "SIGINT", "SIGTERM"):
                     run_case(screen, Path(temporary), altscreen, primary, stop)
+        run_case(screen, Path(temporary), "off", False, "q", operator_timeout=True)
     return 0
 
 

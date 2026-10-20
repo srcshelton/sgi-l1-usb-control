@@ -25,3 +25,5 @@
 /contrib/l2-l3-container/rootfs/
 /contrib/l2-l3-container/*.rpm
 __pycache__/
+
+/tests/tui_state_test

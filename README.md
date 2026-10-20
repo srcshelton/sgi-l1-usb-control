@@ -135,7 +135,11 @@ keys or **PgUp/PgDn** to scroll through its history. **End** returns to live
 output, **h** opens help, and **q** quits.
 
 Some LED status lines are hidden by default. Press **a** to switch between
-the **Filtered** and **All** views. To see where LED descriptions come from,
+the **Filtered** and **All** views. Filtered LED states show their retained
+sample count; **t** shows the first and latest observation times. Press **\***
+to open operator controls for power up, power down, host reset and L1 reset.
+Each action requires typing `YES` and pressing **Return**.
+To see where LED descriptions come from,
 press **p**, or add `--show-annotations` to `leds` or `watch`.
 The [monitoring reference](docs/usage.md#interactive-terminal-display)
 covers the remaining keys, colour palettes, history sizes and polling options.

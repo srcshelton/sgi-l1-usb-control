@@ -65,6 +65,10 @@ jobs:
           make -C tools WITH_TUI=1
           test "$(tools/sgil1ctl --version)" = "$expected"
           ldd tools/sgil1ctl | grep -Fq libncurses
+          cc -DSGIL1_WITH_TUI -Iinclude $(pkg-config --cflags ncursesw) \
+            -Wall -Wextra -Wpedantic -o tests/tui_state_test \
+            tests/tui_state_test.c $(pkg-config --libs ncursesw)
+          tests/tui_state_test
           python3 tests/tui_smoke.py
           python3 tests/tui_terminal_smoke.py
           make -C tools clean

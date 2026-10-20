@@ -86,11 +86,32 @@ row. The display keeps your width and height settings for the current session.
 | **m** | Toggle monochrome |
 | **h**, **?** | Show help |
 | **Esc**, **Return** | Close help |
+| **\*** | Open operator power/reset controls |
 | **Ctrl-L** | Redraw the screen |
 | **q** | Quit |
 
 The **Filtered** view summarises repeated log messages and LED states.
 The **All** view shows every retained observation, including hidden LED entries.
+Repeated filtered LED states show a sample count even when timestamps are off.
+With **t** enabled, the timestamp above the state is its first retained
+observation, and the repeat summary gives its latest observation. Counts and
+times cover retained samples, so they decrease or advance as history expires.
+These are observed snapshots, not a count of distinct firmware events.
+
+Press **\*** to open **Operator controls**, then select **u** (power up),
+**d** (power down), **r** (host soft reset/restart) or **l** (L1 controller reset,
+which can interrupt USB). Type `YES` and press **Return** to send the selected
+command once. **Esc** or **\*** cancels before confirmation; **q** quits
+monitoring. If the L1 requests a second power-down signal, the display asks
+for a separate `YES` confirmation. Commands and responses appear in both log
+views, and power actions also request the current power state. An acknowledgement
+does not mean a power transition or reboot has finished. Commands whose
+responses time out are reported as having an unknown outcome and are not retried.
+Monitoring resumes after each action.
+
+Operator controls are a guard against accidental input, not an authentication
+boundary. They use the same Linux device access and L1 protocol authority as
+the command-line controls.
 
 | Option | Meaning | Default |
 | --- | --- | --- |

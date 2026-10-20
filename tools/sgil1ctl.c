@@ -478,6 +478,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  p                     show or hide LED description sources\n"
 			"  c, m                  cycle palettes or toggle monochrome\n"
 			"  h, ?                  show Help; Esc or Return closes it\n"
+			"  *                     operator power/reset controls; type YES to confirm\n"
 			"  Ctrl-L                redraw the screen\n"
 			"  q                     quit\n");
 		command_usage_footer(out);
@@ -5733,6 +5734,15 @@ struct watch_tui_led_history {
 	size_t response_count;
 };
 
+enum watch_tui_action {
+	WATCH_TUI_ACTION_NONE,
+	WATCH_TUI_ACTION_POWER_UP,
+	WATCH_TUI_ACTION_POWER_DOWN,
+	WATCH_TUI_ACTION_POWER_DOWN_AGAIN,
+	WATCH_TUI_ACTION_HOST_RESET,
+	WATCH_TUI_ACTION_L1_RESET,
+};
+
 struct watch_tui_state {
 	struct watch_tui_line_history raw_log_history;
 	struct watch_tui_line_history log_history;
@@ -5748,6 +5758,11 @@ struct watch_tui_state {
 	bool show_led_timestamps;
 	bool show_annotations;
 	bool help_visible;
+	bool operator_visible;
+	bool action_busy;
+	enum watch_tui_action selected_action;
+	enum watch_tui_action pending_action;
+	char confirmation[4];
 	bool alternate_screen;
 	bool initialized;
 	bool monochrome;
@@ -6020,17 +6035,44 @@ static bool log_line_lists_equal(const struct log_line_list *left,
 	return true;
 }
 
+/* Match Filter's existing grouping, including hidden-only observations. */
+static size_t watch_tui_led_group_end(
+	const struct watch_tui_led_history *history, size_t start,
+	size_t *samples, const char **last_timestamp)
+{
+	const struct watch_tui_led_snapshot *first =
+		watch_tui_led_snapshot_at(history, start);
+	size_t end;
+
+	*samples = 0;
+	*last_timestamp = "";
+	for (end = start; end < history->run_count; end++) {
+		const struct watch_tui_led_snapshot *snapshot =
+			watch_tui_led_snapshot_at(history, end);
+
+		if (!snapshot->filtered_lines.count)
+			continue;
+		if (!log_line_lists_equal(&first->filtered_lines,
+					 &snapshot->filtered_lines))
+			break;
+		*samples += snapshot->timestamp_count;
+		*last_timestamp = watch_tui_led_timestamp_at(
+			snapshot, snapshot->timestamp_count - 1);
+	}
+	return end;
+}
+
 static size_t watch_tui_led_visible_line_count(
 	const struct watch_tui_state *state)
 {
 	const struct watch_tui_led_history *history = &state->led_history;
-	const struct log_line_list *previous = NULL;
 	size_t count = 0;
 	size_t i;
 
 	for (i = 0; i < history->run_count; i++) {
 		const struct watch_tui_led_snapshot *snapshot =
 			watch_tui_led_snapshot_at(history, i);
+		size_t added;
 
 		if (state->all_mode) {
 			size_t per_response = snapshot->all_lines.count +
@@ -6039,23 +6081,22 @@ static size_t watch_tui_led_visible_line_count(
 			if (snapshot->timestamp_count &&
 			    per_response > SIZE_MAX / snapshot->timestamp_count)
 				return SIZE_MAX;
-			if (snapshot->timestamp_count * per_response >
-			    SIZE_MAX - count)
-				return SIZE_MAX;
-			count += snapshot->timestamp_count * per_response;
-			continue;
-		}
+			added = snapshot->timestamp_count * per_response;
+		} else {
+			size_t samples;
+			const char *last_timestamp;
 
-		if (!snapshot->filtered_lines.count ||
-		    (previous && log_line_lists_equal(
-			previous, &snapshot->filtered_lines)))
-			continue;
-		previous = &snapshot->filtered_lines;
-		if (snapshot->filtered_lines.count +
-		    (state->show_led_timestamps ? 1U : 0U) > SIZE_MAX - count)
+			if (!snapshot->filtered_lines.count)
+				continue;
+			i = watch_tui_led_group_end(history, i, &samples,
+						    &last_timestamp) - 1;
+			added = snapshot->filtered_lines.count +
+				(state->show_led_timestamps ? 1U : 0U) +
+				(samples > 1 ? 1U : 0U);
+		}
+		if (added > SIZE_MAX - count)
 			return SIZE_MAX;
-		count += snapshot->filtered_lines.count +
-			 (state->show_led_timestamps ? 1U : 0U);
+		count += added;
 	}
 	return count;
 }
@@ -6086,7 +6127,7 @@ static const char *watch_tui_led_line_at(const void *context, size_t index,
 {
 	const struct watch_tui_state *state = context;
 	const struct watch_tui_led_history *history = &state->led_history;
-	const struct log_line_list *previous = NULL;
+	static char summary[128];
 	size_t i;
 
 	for (i = 0; i < history->run_count; i++) {
@@ -6095,11 +6136,13 @@ static const char *watch_tui_led_line_at(const void *context, size_t index,
 		size_t observation;
 
 		if (!state->all_mode) {
-			if (!snapshot->filtered_lines.count ||
-			    (previous && log_line_lists_equal(
-				previous, &snapshot->filtered_lines)))
+			size_t samples;
+			const char *last_timestamp;
+
+			if (!snapshot->filtered_lines.count)
 				continue;
-			previous = &snapshot->filtered_lines;
+			i = watch_tui_led_group_end(history, i, &samples,
+						    &last_timestamp) - 1;
 			if (state->show_led_timestamps) {
 				if (!index) {
 					*style = WATCH_TUI_LINE_TIMESTAMP;
@@ -6114,6 +6157,20 @@ static const char *watch_tui_led_line_at(const void *context, size_t index,
 					snapshot->filtered_lines.lines[index];
 			}
 			index -= snapshot->filtered_lines.count;
+			if (samples > 1) {
+				if (!index) {
+					*style = WATCH_TUI_LINE_TIMESTAMP;
+					if (state->show_led_timestamps)
+						snprintf(summary, sizeof(summary),
+							 "%zu samples; last %s", samples,
+							 last_timestamp);
+					else
+						snprintf(summary, sizeof(summary),
+							 "%zu samples", samples);
+					return summary;
+				}
+				index--;
+			}
 			continue;
 		}
 
@@ -6669,6 +6726,8 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 15, 24, "Redraw screen", 30);
 	mvwaddnstr(window, 16, 4, "h, ?, Esc, Return", 18);
 	mvwaddnstr(window, 16, 24, "Close Help", 30);
+	mvwaddnstr(window, 17, 4, "*", 18);
+	mvwaddnstr(window, 17, 24, "Operator controls", 30);
 }
 
 static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
@@ -6697,7 +6756,7 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 	mvwprintw(window, 6, 2, "c palette:%-13.13s m:%s",
 		  palette_setting, colour);
 	mvwaddnstr(window, 7, 2, "^L redraw", width - 4);
-	mvwaddnstr(window, 8, 2, "h/?/Esc/Ret close", width - 4);
+	mvwaddnstr(window, 8, 2, "h/?/Esc/Ret close  * controls", width - 4);
 }
 
 static void watch_tui_draw_help(const struct watch_tui_state *state)
@@ -6733,6 +6792,68 @@ static void watch_tui_draw_help(const struct watch_tui_state *state)
 		watch_tui_draw_wide_help(state, window, width);
 	else
 		watch_tui_draw_compact_help(state, window, width);
+	wnoutrefresh(window);
+	delwin(window);
+}
+
+static const char *watch_tui_action_command(enum watch_tui_action action)
+{
+	switch (action) {
+	case WATCH_TUI_ACTION_POWER_UP: return "power up";
+	case WATCH_TUI_ACTION_POWER_DOWN:
+	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN: return "power down";
+	case WATCH_TUI_ACTION_HOST_RESET: return "softreset";
+	case WATCH_TUI_ACTION_L1_RESET: return "reset";
+	default: return "";
+	}
+}
+
+static const char *watch_tui_action_label(enum watch_tui_action action)
+{
+	switch (action) {
+	case WATCH_TUI_ACTION_POWER_UP: return "Power up host";
+	case WATCH_TUI_ACTION_POWER_DOWN: return "Power down host";
+	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN: return "Second power-down signal";
+	case WATCH_TUI_ACTION_HOST_RESET: return "Reset/restart host";
+	case WATCH_TUI_ACTION_L1_RESET: return "Reset L1 controller (USB may drop)";
+	default: return "";
+	}
+}
+
+static void watch_tui_draw_operator(const struct watch_tui_state *state)
+{
+	WINDOW *window;
+	int width = COLS < 66 ? COLS : 66;
+	int height = 10;
+
+	if (!state->operator_visible)
+		return;
+	window = derwin(stdscr, height, width, (LINES - height) / 2,
+			(COLS - width) / 2);
+	if (!window)
+		return;
+	werase(window);
+	box(window, 0, 0);
+	wattron(window, A_BOLD);
+	mvwaddnstr(window, 0, 2, " Operator controls ", width - 4);
+	wattroff(window, A_BOLD);
+	if (state->action_busy) {
+		mvwaddnstr(window, 2, 2, "Command in progress; q stops monitoring", width - 4);
+	} else if (state->selected_action != WATCH_TUI_ACTION_NONE) {
+		mvwaddnstr(window, 2, 2,
+			   watch_tui_action_label(state->selected_action), width - 4);
+		mvwaddnstr(window, 3, 2, "Type YES, then Return to send once", width - 4);
+		mvwprintw(window, 5, 2, "Confirm: %s", state->confirmation);
+		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN)
+			mvwaddnstr(window, 6, 2, "L1 requested a second power-down signal", width - 4);
+	} else {
+		mvwaddnstr(window, 1, 2, "u  Power up host", width - 4);
+		mvwaddnstr(window, 2, 2, "d  Power down host", width - 4);
+		mvwaddnstr(window, 3, 2, "r  Reset/restart host (softreset)", width - 4);
+		mvwaddnstr(window, 4, 2, "l  Reset L1 controller", width - 4);
+		mvwaddnstr(window, 6, 2, "Each action needs a separate confirmation", width - 4);
+	}
+	mvwaddnstr(window, 8, 2, "Esc/* cancel, q quit monitoring", width - 4);
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -6838,7 +6959,7 @@ static void watch_tui_render(struct watch_display *display)
 			    state->led_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
 
-	snprintf(footer, sizeof(footer), " %s%s | h/? Help",
+	snprintf(footer, sizeof(footer), " %s%s | h/? Help | * Controls",
 		 state->status[0] ? state->status : "Monitoring L1",
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
@@ -6855,6 +6976,7 @@ static void watch_tui_render(struct watch_display *display)
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
 	watch_tui_draw_help(state);
+	watch_tui_draw_operator(state);
 	doupdate();
 }
 
@@ -7250,6 +7372,53 @@ static void watch_tui_cycle_palette(struct watch_tui_state *state,
 	}
 }
 
+/* Input only queues actions. The scheduler sends at transaction boundaries. */
+static void watch_tui_operator_key(struct watch_tui_state *state, int key)
+{
+	size_t length = strlen(state->confirmation);
+
+	if (key == 'q' || key == 'Q') {
+		watch_stop_requested = 1;
+		return;
+	}
+	if (state->action_busy || state->pending_action != WATCH_TUI_ACTION_NONE)
+		return;
+	if (key == 27 || key == '*') {
+		state->operator_visible = false;
+		state->selected_action = WATCH_TUI_ACTION_NONE;
+		state->confirmation[0] = '\0';
+		return;
+	}
+	if (state->selected_action != WATCH_TUI_ACTION_NONE) {
+		if (key == '\n' || key == '\r' || key == KEY_ENTER) {
+			if (!strcmp(state->confirmation, "YES")) {
+				state->pending_action = state->selected_action;
+				state->selected_action = WATCH_TUI_ACTION_NONE;
+				state->confirmation[0] = '\0';
+			} else {
+				state->confirmation[0] = '\0';
+			}
+		} else if (key == KEY_BACKSPACE || key == 127 || key == 8) {
+			if (length)
+				state->confirmation[length - 1] = '\0';
+		} else if (key >= 32 && key <= 126 && length < 3) {
+			state->confirmation[length] = (char)key;
+			state->confirmation[length + 1] = '\0';
+		} else if (key >= 32 && key <= 126) {
+			/* Reject extra input rather than accepting a YES prefix. */
+			state->confirmation[0] = '\0';
+		}
+		return;
+	}
+	switch (key) {
+	case 'u': case 'U': state->selected_action = WATCH_TUI_ACTION_POWER_UP; break;
+	case 'd': case 'D': state->selected_action = WATCH_TUI_ACTION_POWER_DOWN; break;
+	case 'r': case 'R': state->selected_action = WATCH_TUI_ACTION_HOST_RESET; break;
+	case 'l': case 'L': state->selected_action = WATCH_TUI_ACTION_L1_RESET; break;
+	default: break;
+	}
+}
+
 static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 {
 	struct watch_tui_state *state = &display->tui_state;
@@ -7260,6 +7429,14 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		timeout = 100;
 	wtimeout(stdscr, timeout);
 	key = wgetch(stdscr);
+	if (state->operator_visible) {
+		watch_tui_operator_key(state, key);
+		if (key == KEY_RESIZE)
+			clearok(stdscr, true);
+		if (key != ERR)
+			watch_tui_render(display);
+		return watch_stop_requested != 0;
+	}
 	if (state->help_visible &&
 	    (key == 27 || key == '\n' || key == '\r' || key == KEY_ENTER ||
 	     key == 'q' || key == 'Q')) {
@@ -7268,6 +7445,12 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		return watch_stop_requested != 0;
 	}
 	switch (key) {
+	case '*':
+		state->help_visible = false;
+		state->operator_visible = true;
+		state->selected_action = WATCH_TUI_ACTION_NONE;
+		state->confirmation[0] = '\0';
+		break;
 	case 'q':
 	case 'Q':
 		watch_stop_requested = 1;
@@ -7810,6 +7993,105 @@ static int parse_watch_args(int argc, char **argv, int start,
 	return 0;
 }
 
+#ifdef SGIL1_WITH_TUI
+static int watch_tui_record_action(struct watch_display *display, const char *text)
+{
+	struct log_line_list lines = { 0 };
+	size_t i;
+	int ret = 0;
+
+	if (split_log_lines(text ? text : "", &lines))
+		return -1;
+	for (i = 0; i < lines.count; i++) {
+		if (watch_display_raw_log_line(display, lines.lines[i]) ||
+		    watch_display_log_line(display, lines.lines[i])) {
+			ret = -1;
+			break;
+		}
+	}
+	free_log_line_list(&lines);
+	return ret;
+}
+
+static int watch_tui_run_action(struct watch_display *display,
+				const struct options *opts,
+				enum watch_tui_action action)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	const char *command = watch_tui_action_command(action);
+	char *text = NULL;
+	char message[256];
+	int command_ret;
+	int ret = 0;
+
+	state->action_busy = true;
+	snprintf(message, sizeof(message), "Operator confirmed: %s",
+		 watch_tui_action_label(action));
+	watch_display_status(display, message);
+	if (watch_tui_record_action(display, message)) {
+		ret = -1;
+		goto out;
+	}
+	/* Never retry a power/reset command: a timeout may follow delivery. */
+	command_ret = run_l1_command_core(opts, command, true, false, false,
+					 true, false, &text);
+	if (watch_tui_record_action(display, text)) {
+		ret = -1;
+		goto out;
+	}
+	if (command_ret == SGIL1_READ_CANCELLED && watch_stop_requested)
+		goto out;
+	if (command_ret == SGIL1_L1CMD_RESPONSE_TIMEOUT) {
+		snprintf(message, sizeof(message),
+			 "%s: response timed out; outcome unknown (not retried)", command);
+	} else if (command_ret || l1_text_indicates_failure(text)) {
+		snprintf(message, sizeof(message), "%s: failed; command not retried", command);
+	} else if (action == WATCH_TUI_ACTION_POWER_DOWN &&
+		   power_down_text_requests_second_command(text)) {
+		state->selected_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+		state->confirmation[0] = '\0';
+		snprintf(message, sizeof(message),
+			 "L1 requests second power-down signal; confirm again or cancel");
+	} else {
+		snprintf(message, sizeof(message), "%s: command acknowledged", command);
+	}
+	watch_display_status(display, message);
+	if (watch_tui_record_action(display, message)) {
+		ret = -1;
+		goto out;
+	}
+	if (!command_ret && !l1_text_indicates_failure(text) &&
+	    state->selected_action == WATCH_TUI_ACTION_NONE &&
+	    (action == WATCH_TUI_ACTION_POWER_UP ||
+	     action == WATCH_TUI_ACTION_POWER_DOWN ||
+	     action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN)) {
+		char *power_check = NULL;
+
+		if (!l1_text_command_status(opts, "power check", false, &power_check)) {
+			snprintf(message, sizeof(message), "Power check: %s",
+				 power_text_says_on(power_check) ? "host on" :
+				 power_text_says_off(power_check) ? "host off" : "state unknown");
+			watch_display_status(display, message);
+			if (watch_tui_record_action(display, power_check) ||
+			    watch_tui_record_action(display, message))
+				ret = -1;
+		} else {
+			watch_display_status(display,
+				"Command sent; power check unavailable, monitor for changes");
+		}
+		free(power_check);
+	}
+out:
+	free(text);
+	state->action_busy = false;
+	state->operator_visible = state->selected_action != WATCH_TUI_ACTION_NONE;
+	/* Transport diagnostics use stderr, which can move the real cursor. */
+	clearok(stdscr, true);
+	watch_tui_render(display);
+	return ret;
+}
+#endif
+
 static int run_watch_scheduler(const struct options *opts,
 			       struct options *cmd_opts,
 			       const struct watch_options *watch,
@@ -7852,6 +8134,32 @@ static int run_watch_scheduler(const struct options *opts,
 			watch_report_queue_pressure(display, queue_pressure, false);
 		}
 
+#ifdef SGIL1_WITH_TUI
+		if (display->tui && display->tui_state.pending_action !=
+					WATCH_TUI_ACTION_NONE) {
+			enum watch_tui_action action = display->tui_state.pending_action;
+
+			display->tui_state.pending_action = WATCH_TUI_ACTION_NONE;
+			if (!route_valid) {
+				display->tui_state.operator_visible = false;
+				watch_display_status(display,
+					"Action cancelled: L1 route unavailable; confirm again after recovery");
+			} else {
+				if (watch_tui_run_action(display, cmd_opts, action)) {
+					ret = 1;
+					break;
+				}
+				/* Re-read firmware and resume fast polling after an action. */
+				profile_valid = false;
+				led_delay = watch->led_interval_ms;
+				next_led = next_log = monotonic_milliseconds();
+				if (action == WATCH_TUI_ACTION_L1_RESET ||
+				    action == WATCH_TUI_ACTION_HOST_RESET)
+					route_valid = !cmd_opts->dest_auto_discovered;
+			}
+			continue;
+		}
+#endif
 		do_led = now >= next_led;
 		do_log = now >= next_log;
 		if (!do_led && !do_log) {

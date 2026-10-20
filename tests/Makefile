@@ -14,4 +14,4 @@ mock_l1.so: mock_l1.c ../include/sgi_l1_ioctl.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wall -Wextra -Wpedantic -fPIC -shared -o $@ $< -ldl
 
 clean:
-	rm -f mock_l1.so
+	rm -f mock_l1.so tui_state_test
