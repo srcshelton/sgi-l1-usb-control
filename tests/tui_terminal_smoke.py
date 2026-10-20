@@ -59,6 +59,9 @@ def check_pane_controls(capture, send, resize):
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
                 for entry in entries]
+        operator_row = next(i for i, line in enumerate(lines) if "Operator controls" in line)
+        if operator_row + 1 != rows[0]:
+            raise AssertionError(f"Operator controls is not first in Help:\n{rendered}")
         if rows != sorted(rows) or rows[1] != rows[0] + 1 or rows[3] != rows[2] + 1:
             raise AssertionError(f"wrong help order:\n{rendered}")
         if rows[-1] != rows[-2] + 1:
@@ -141,11 +144,14 @@ def check_pane_controls(capture, send, resize):
     print("PASS pane controls: focus, aliases, limits, wrapping, resize and help order", flush=True)
 
 
-def check_operator_controls(capture, send, resize, command_log):
+def check_operator_controls(capture, send, resize, command_log, power_file):
     actions = {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}
 
+    def commands():
+        return command_log.read_text().splitlines()
+
     def sent():
-        return [line for line in command_log.read_text().splitlines() if line in actions]
+        return [line for line in commands() if line in actions]
 
     def expect(text):
         rendered = capture()
@@ -153,7 +159,11 @@ def check_operator_controls(capture, send, resize, command_log):
             raise AssertionError(f"missing {text!r}:\n{rendered}")
         return rendered
 
-    # Repeats remain visible without timestamps; time mode includes the latest.
+    def select(key):
+        send(key)
+        expect("Type YES, then Return to send once")
+        expect("Blank input + Return aborts action")
+
     send(b"\f")
     rendered = capture()
     if not re.search(r"\b(?:[2-9]|[1-9][0-9]+) samples\b", rendered):
@@ -161,57 +171,122 @@ def check_operator_controls(capture, send, resize, command_log):
     send(b"t")
     expect("samples; last")
     send(b"t")
-    send(b"uYES\r")  # Operator keys do nothing in monitoring mode.
+    send(b"uYES\r")
     if sent():
         raise AssertionError("operator command was available outside the menu")
+    send(b"?")
+    help_title = next(line[17:103] for line in capture().splitlines() if " Help " in line)
     send(b"*")
-    expect("Operator controls")
-    expect("Reset/restart host (softreset)")
-    send(b"u\rYESno\r")
-    expect("Confirm:")
-    if sent():
-        raise AssertionError("empty/invalid confirmation sent an action")
-    send(b"YES\033")
-    if sent() or "Operator controls" in capture():
-        raise AssertionError("Escape did not cancel confirmation")
-    send(b"*UYES\r")
-    expect("Power check: host on")
-    if sent() != ["CMD power up"]:
-        raise AssertionError(f"power-up sent wrong commands: {sent()}")
-    send(b"*dYES\r")
-    expect("Second power-down signal")
-    expect("L1 requested a second power-down signal")
-    if sent() != ["CMD power up", "CMD power down"]:
-        raise AssertionError("power down was automatically repeated")
-    send(b"\r")  # Empty second confirmation does not send.
-    if len(sent()) != 2:
-        raise AssertionError("empty second confirmation sent power down")
-    send(b"YES\r")
-    expect("Power check: host off")
-    if sent().count("CMD power down") != 2:
-        raise AssertionError("second power-down confirmation did not send exactly once")
-    send(b"*rYES\r")
-    expect("softreset: command acknowledged")
-    send(b"*lYES\r")
-    expect("reset: command acknowledged")
-    if sent() != ["CMD power up", "CMD power down", "CMD power down",
-                  "CMD softreset", "CMD reset"]:
-        raise AssertionError(f"operator actions sent wrong commands: {sent()}")
-    send(b"a")
-    expect("reset: command acknowledged")  # Action receipts also exist in All view.
-    send(b"a")
+    menu = expect("Host: off")
+    operator_title = next(line[17:103] for line in menu.splitlines() if " Operator controls " in line)
+    if help_title[:3] != operator_title[:3] or help_title[-3:] != operator_title[-3:]:
+        raise AssertionError(f"Help/Operator border mismatch: {help_title!r} / {operator_title!r}")
+    if "q quit monitoring" in menu or "q stops monitoring" in menu:
+        raise AssertionError("ambiguous quit instruction remains in Operator controls")
+    expect("*d Power down")
+    expect("*r Reset/restart host")
+    expect("Unavailable due to current host state")
+    rows = menu.splitlines()
+    if next(i for i, row in enumerate(rows) if "l Reset L1" in row) != next(i for i, row in enumerate(rows) if "r Reset/restart host" in row) + 2:
+        raise AssertionError("missing blank row between host and L1 reset")
+    if "L1: " not in menu or "L1 behind by ~" not in menu:
+        raise AssertionError(f"operator clock information missing:\n{menu}")
+    footer = next(line for line in menu.splitlines() if "Console last active:" in line)
+    if "[out of sync]" not in footer or footer.index("L1 ") > footer.index("Console last active:"):
+        raise AssertionError(f"status clock missing or misplaced: {footer}")
     resize(11, 40)
-    send(b"*l")
-    expect("Type YES, then Return to send once")
-    send(b"*")
-    if len(sent()) != 5:
-        raise AssertionError("compact menu cancel sent an action")
+    send(b"\033")  # The minimum-height modal covers the status row.
+    expect("[out of sync]")
     resize(24, 120)
-    print("PASS operator controls: rendered repeats, gating, confirmation, power and distinct resets", flush=True)
+    send(b"*")
+    expect("Host: off")
+    checks = commands().count("CMD power check")
+    send(b"d")
+    expect("Action unavailable: host is off")
+    if "Confirm:" in capture() or commands().count("CMD power check") <= checks:
+        raise AssertionError("unavailable action was not rechecked/blocked")
+    select(b"u")
+    send(b"NO\r")
+    expect("Host: off")
+    if "Confirm:" in capture() or sent():
+        raise AssertionError("invalid confirmation did not abort to the menu")
+    select(b"u")
+    send(b"\r")
+    if "Confirm:" in capture() or sent():
+        raise AssertionError("blank confirmation did not abort to the menu")
+    select(b"u")
+    power_file.write_text("on")  # External state change while the prompt is open.
+    send(b"YES\r")
+    expect("Host: on")
+    if sent():
+        raise AssertionError("state change during confirmation did not cancel power up")
+    power_file.write_text("off")
+    send(b"\033*")
+    expect("Host: off")
+    select(b"U")
+    send(b"YES\r")
+    expect("power up: command acknowledged")
+    if sent() != ["CMD power up"]:
+        raise AssertionError(f"wrong power-up commands: {sent()}")
+    after_up = commands()[commands().index("CMD power up") + 1:]
+    if "CMD leds" not in after_up or after_up[0] != "CMD leds":
+        raise AssertionError(f"power-state confirmation delayed boot LEDs: {after_up}")
+    send(b"*")
+    expect("Host: on")
+    expect("*u Power up")
+    select(b"d")
+    send(b"YES\r")
+    expect("Second power-down signal")
+    if sent().count("CMD power down") != 1:
+        raise AssertionError("second signal was automatically sent")
+    send(b"YES\r")
+    expect("power down: command acknowledged")
+    if sent().count("CMD power down") != 2:
+        raise AssertionError("second signal was not sent exactly once")
+    send(b"*")
+    expect("Host: off")
+    send(b"r")
+    expect("Action unavailable: host is off")
+    power_file.write_text("unknown")
+    send(b"\033*")
+    expect("Host: unknown")
+    expect("*u Power up")
+    expect("*d Power down")
+    power_file.write_text("on")
+    send(b"\033*")
+    select(b"r")
+    send(b"YES\r")
+    expect("softreset: command acknowledged")
+    send(b"*")
+    select(b"l")
+    send(b"YES\r")
+    expect("reset: command acknowledged")
+    send(b"a")
+    expect("reset: command acknowledged")
+    send(b"a*")
+    select(b"s")
+    send(b"YES\r")
+    expect("Host: on")
+    if not any(line.startswith("CMD date tz ") for line in commands()) or not any(re.match(r"CMD date [0-9]", line) for line in commands()):
+        raise AssertionError("clock sync did not send timezone and date commands")
+    if "[out of sync]" in next(line for line in capture().splitlines() if "Console last active:" in line):
+        raise AssertionError("clock drift warning remained after clock sync")
+    send(b"\033")
+    resize(11, 40)
+    send(b"*")
+    expect("*u Power up")
+    select(b"l")
+    send(b"*")
+    if sent() != ["CMD power up", "CMD power down", "CMD power down", "CMD softreset", "CMD reset"]:
+        raise AssertionError(f"operator actions sent wrong commands: {sent()}")
+    resize(24, 120)
+    print("PASS operator controls: shared styling, host-state gating/rechecks, abort, clock sync and early LEDs", flush=True)
 
 
 def check_operator_timeout(capture, send, command_log):
-    send(b"*uYES\r")
+    send(b"*")
+    send(b"u")
+    send(b"YES\r")
     rendered = capture()
     if "outcome unknown" not in rendered:
         raise AssertionError(f"timeout was not reported as uncertain:\n{rendered}")
@@ -221,15 +296,79 @@ def check_operator_timeout(capture, send, command_log):
         raise AssertionError("uncertain power action was retried")
     if "Operator controls" in capture():
         raise AssertionError("operator menu remained open after timeout")
-    if commands[-1] not in ("CMD log", "CMD leds", "CMD version"):
+    if commands[-1] not in ("CMD log", "CMD leds", "CMD version", "CMD date", "CMD date tz"):
         raise AssertionError("monitoring did not resume after timeout")
     print("PASS operator timeout: unknown outcome, one send and resumed monitoring", flush=True)
 
 
-def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False):
+def check_usb_wait(capture, send, presence, command_log, mode):
+    def expect(text):
+        rendered = capture()
+        if text not in rendered:
+            raise AssertionError(f"missing {text!r}:\n{rendered}")
+        return rendered
+
+    def commands():
+        return command_log.read_text().splitlines() if command_log.exists() else []
+
+    send(b"\033*\r")
+    expect("Waiting for USB")
+    if any(line.startswith("CMD ") or line.startswith("LOCK ") for line in commands()):
+        raise AssertionError("missing device was probed or locked")
+    if mode == "quit":
+        return
+    if mode in ("up", "reset", "down", "unconfirmed"):
+        send({"up": b"u", "reset": b"r", "down": b"d", "unconfirmed": b"u"}[mode])
+        expect("Blank input + Return aborts action")
+        if mode != "unconfirmed":
+            send(b"YES\r")
+            expect({"up": "u [x]", "reset": "r [x]", "down": "d [x]"}[mode])
+        if mode == "up":
+            send(b"t")
+            expect("t [x]")
+    elif mode in ("cli", "skip"):
+        expect("u [x]")
+    presence.touch()
+    send(b"")
+    send(b"")  # Allow the bounded presence poll and initial requests to complete.
+    rendered = capture()
+    if "Waiting for USB" in rendered or "Confirm:" in rendered:
+        raise AssertionError(f"wait did not return to monitoring:\n{rendered}")
+    expected = {"up": "CMD power up", "cli": "CMD power up", "reset": "CMD softreset",
+                "down": "CMD power down"}.get(mode)
+    actions = [line for line in commands() if line in
+               {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}]
+    if actions != ([expected] if expected else []):
+        raise AssertionError(f"wrong reconnect actions: {actions}, mode {mode}")
+    if mode in ("up", "cli"):
+        trace = commands()
+        position = trace.index("CMD power up")
+        if trace[position + 1] != "CMD leds":
+            raise AssertionError(f"power-state wait delayed LEDs: {trace[position + 1:]}")
+        if not any(re.match(r"CMD date [0-9]", line) for line in trace[:position]):
+            raise AssertionError("armed clock sync did not run before power up")
+    if mode == "up":
+        presence.unlink()
+        send(b"")
+        expect("Waiting for USB")
+        expect("u [ ]")
+        expect("t [ ]")
+        presence.touch()
+        send(b"")
+        send(b"")
+        if commands().count("CMD power up") != 1:
+            raise AssertionError("reconnect action was rearmed on a later disconnect")
+    if "Console last active: never" in capture():
+        raise AssertionError("received log/LED output did not update activity")
+    print(f"PASS mandatory USB wait: {mode}", flush=True)
+
+
+def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False, wait_mode=None):
     name = f"altscreen-{altscreen}-{'primary' if primary else 'default'}-{stop}"
     if operator_timeout:
         name += "-operator-timeout"
+    if wait_mode:
+        name += f"-wait-{wait_mode}"
     directory = temporary / name
     directory.mkdir()
     session = f"sgil1ctl-{os.getpid()}-{name}"
@@ -238,19 +377,30 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     screenrc = directory / "screenrc"
     child_state = directory / "child.json"
     result = directory / "result.txt"
-    exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout
+    exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout and not wait_mode
     command_log = directory / "commands.log"
+    power_file = directory / "power.txt"
+    power_file.write_text("off" if exercise_controls or operator_timeout or wait_mode in ("up", "cli", "unconfirmed") else "on")
+    presence = directory / "usb-present"
     extra_env = ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x09: pane resizing preserves every "
                   "word of this long LED status message\n"} if exercise_controls else {})
-    extra_env.update(SGIL1_MOCK_LOG=str(command_log), SGIL1_MOCK_POWER_DOWN_CONFIRM="1")
+    extra_env.update(SGIL1_MOCK_LOG=str(command_log), SGIL1_MOCK_POWER_DOWN_CONFIRM="1",
+                     SGIL1_MOCK_POWER_FILE=str(power_file))
     if operator_timeout:
         extra_env["SGIL1_MOCK_POWER_UP_TIMEOUT"] = "1"
+    if wait_mode:
+        extra_env["SGIL1_MOCK_PRESENT_FILE"] = str(presence)
+        extra_env.pop("SGIL1_MOCK_POWER_DOWN_CONFIRM", None)
     command = [
         str(BIN), "--device", "/dev/sgi-l1/l1-0",
         "--status-device", "/dev/sgi-l1/status", "--timeout", "10",
         "watch", "--tui", "--log-interval", "100", "--led-interval", "100",
         "--log-history", "64", "--led-history", "32",
     ]
+    if wait_mode in ("cli", "skip"):
+        command = command[:command.index("watch")] + ["wait", "--tui", "--power-up", "--force"]
+        if wait_mode == "cli":
+            command.append("--set-time")
     if primary:
         command.append("--no-alternate-screen")
     screenrc.write_text(
@@ -332,7 +482,8 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             drain()
             if child_state.exists():
                 rendered = capture()
-                if "Fuel" in rendered and "Console last active:" in rendered:
+                if ("Waiting for USB" in rendered if wait_mode else
+                    "Fuel" in rendered and "Console last active:" in rendered):
                     break
             if proc.poll() is not None:
                 raise AssertionError(f"Screen exited during {name}: {terminal_output!r}")
@@ -344,7 +495,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             raise AssertionError(f"wrong terminal/hardstatus layout: {child}")
         if HARDSTATUS.encode() not in terminal_output:
             raise AssertionError("attached Screen did not render its hardstatus")
-        if exercise_controls or operator_timeout:
+        if exercise_controls or operator_timeout or wait_mode:
             def send(keys):
                 os.write(master, keys)
                 drain(0.4 if len(keys) < 30 else 1.5)
@@ -355,10 +506,12 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
                 os.kill(proc.pid, signal.SIGWINCH)
                 drain(0.4)
 
-            if operator_timeout:
+            if wait_mode:
+                check_usb_wait(capture, send, presence, command_log, wait_mode)
+            elif operator_timeout:
                 check_operator_timeout(capture, send, command_log)
             else:
-                check_operator_controls(capture, send, resize, command_log)
+                check_operator_controls(capture, send, resize, command_log, power_file)
                 check_pane_controls(capture, send, resize)
         if stop == "q":
             os.write(master, b"q")
@@ -405,6 +558,8 @@ def main():
                 for stop in ("q", "SIGINT", "SIGTERM"):
                     run_case(screen, Path(temporary), altscreen, primary, stop)
         run_case(screen, Path(temporary), "off", False, "q", operator_timeout=True)
+        for mode in ("up", "cli", "skip", "reset", "down", "unconfirmed", "quit"):
+            run_case(screen, Path(temporary), "off", False, "q", wait_mode=mode)
     return 0
 
 

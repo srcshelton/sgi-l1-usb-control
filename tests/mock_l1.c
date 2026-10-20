@@ -174,6 +174,11 @@ static int enqueue_text_response(struct mock_fd *m, const char *text,
 static bool is_data_path(const char *path)
 {
 	const char *index = getenv("SGIL1_MOCK_DATA_INDEX");
+	const char *presence = getenv("SGIL1_MOCK_PRESENT_FILE");
+	struct stat presence_stat;
+
+	if (presence && real_stat_fn(presence, &presence_stat))
+		return false;
 	char stable[64];
 	char legacy[64];
 	char usb[64];
@@ -399,6 +404,43 @@ static const char *mock_debug_response(const char *value_text)
 	return mock_debug_response_buf;
 }
 
+static char mock_date[128];
+static char mock_timezone[128];
+
+static void mock_store_power(bool on)
+{
+	const char *path = getenv("SGIL1_MOCK_POWER_FILE");
+	FILE *fp;
+
+	mock_power_on = on;
+	if (!path)
+		return;
+	fp = fopen(path, "w");
+	if (fp) {
+		fputs(on ? "on" : "off", fp);
+		fclose(fp);
+	}
+}
+
+static const char *mock_power_response(void)
+{
+	const char *path = getenv("SGIL1_MOCK_POWER_FILE");
+	char value[32] = { 0 };
+	FILE *fp = path ? fopen(path, "r") : NULL;
+
+	if (fp) {
+		(void)fgets(value, sizeof(value), fp);
+		fclose(fp);
+		if (!strncmp(value, "on", 2))
+			mock_power_on = true;
+		else if (!strncmp(value, "off", 3))
+			mock_power_on = false;
+		else
+			return "power state unavailable\n";
+	}
+	return mock_power_on ? "power appears on\n" : "power appears off\n";
+}
+
 static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
@@ -553,20 +595,32 @@ static const char *known_response_for_command(const char *cmd)
 	if (!strcmp(cmd, "serial") || !strcmp(cmd, "serial all"))
 		return "BSN: NCJ502    SSN: 08:00:69:10:6C:E3    Time: 05/27/2026 12:38:03 BST\n"
 		       "Public Key data in EEPROM is invalid\n";
+	if (!strcmp(cmd, "date") && mock_date[0])
+		return mock_date;
+	if (!strcmp(cmd, "date tz") && mock_timezone[0])
+		return mock_timezone;
 	if (!strcmp(cmd, "date"))
 		return getenv("SGIL1_MOCK_DATE") ? getenv("SGIL1_MOCK_DATE") :
 		       "05/27/2026 12:38:03 BST\n";
 	if (!strcmp(cmd, "date tz"))
 		return getenv("SGIL1_MOCK_TZ") ? getenv("SGIL1_MOCK_TZ") :
 		       "GMT0BST\n";
-	if (!strncmp(cmd, "date tz ", 8))
+	if (!strncmp(cmd, "date tz ", 8)) {
+		snprintf(mock_timezone, sizeof(mock_timezone), "%s\n", cmd + 8);
 		return "timezone set\n";
-	if (!strncmp(cmd, "date ", 5))
+	}
+	if (!strncmp(cmd, "date ", 5)) {
+		unsigned int month, day, hour, minute, year, second;
+
+		if (sscanf(cmd + 5, "%2u%2u%2u%2u%4u.%2u", &month, &day,
+			   &hour, &minute, &year, &second) == 6)
+			snprintf(mock_date, sizeof(mock_date), "%02u/%02u/%04u %02u:%02u:%02u\n",
+				 month, day, year, hour, minute, second);
 		return "date set\n";
+	}
 	if (!strcmp(cmd, "power") || !strcmp(cmd, "power check") ||
 	    !strcmp(cmd, "pwr") || !strcmp(cmd, "pwr check"))
-		return mock_power_on ? "power appears on\n" :
-				       "power appears off\n";
+		return mock_power_response();
 	if (!strcmp(cmd, "power vrm") || !strcmp(cmd, "pwr vrm"))
 		return "";
 	if (!strcmp(cmd, "log"))
@@ -685,7 +739,7 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 
 	if (!strcmp(cmd, "power up") || !strcmp(cmd, "pwr up") ||
 	    !strcmp(cmd, "pwr u")) {
-		mock_power_on = true;
+		mock_store_power(true);
 		if (mock_power_up_timeout) {
 			free(raw_cmd);
 			return (ssize_t)count;
@@ -696,7 +750,7 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 		if (mock_power_down_confirm && mock_power_down_count++ == 0) {
 			response = "Type power down again to confirm: pwr d\n";
 		} else {
-			mock_power_on = false;
+			mock_store_power(false);
 			response = "power appears off\n";
 		}
 	} else {

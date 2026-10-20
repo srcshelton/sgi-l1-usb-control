@@ -86,7 +86,7 @@ row. The display keeps your width and height settings for the current session.
 | **m** | Toggle monochrome |
 | **h**, **?** | Show help |
 | **Esc**, **Return** | Close help |
-| **\*** | Open operator power/reset controls |
+| **\*** | Open operator power/reset/clock controls |
 | **Ctrl-L** | Redraw the screen |
 | **q** | Quit |
 
@@ -98,16 +98,50 @@ observation, and the repeat summary gives its latest observation. Counts and
 times cover retained samples, so they decrease or advance as history expires.
 These are observed snapshots, not a count of distinct firmware events.
 
-Press **\*** to open **Operator controls**, then select **u** (power up),
-**d** (power down), **r** (host soft reset/restart) or **l** (L1 controller reset,
-which can interrupt USB). Type `YES` and press **Return** to send the selected
-command once. **Esc** or **\*** cancels before confirmation; **q** quits
-monitoring. If the L1 requests a second power-down signal, the display asks
-for a separate `YES` confirmation. Commands and responses appear in both log
-views, and power actions also request the current power state. An acknowledgement
-does not mean a power transition or reboot has finished. Commands whose
-responses time out are reported as having an unknown outcome and are not retried.
-Monitoring resumes after each action.
+Press **\*** (also the first Help entry) to open **Operator controls**.
+The menu reads the host power state and the L1 date and timezone on entry and
+on return. It checks again when an action is selected, before asking for
+confirmation, and rechecks host power state immediately before sending a
+power/reset command. Unavailable host actions remain visible, dimmed or italic
+and marked with `*`: **u** (power up) requires an off host, while **d** (power
+down) and **r** (host soft reset/restart) require an on host. If host state is
+unknown, those actions are unavailable. **l** resets the L1 controller and can
+interrupt USB; **s** sets the L1 clock and timezone from the machine running
+`sgil1ctl`. The menu shows the L1 date and its approximate difference from
+that machine's time, using years/days or smaller units as appropriate.
+
+Type `YES` and press **Return** to send the selected command once. Blank or
+other input followed by **Return** aborts the action and returns to the menu.
+**Esc** or **\*** closes Operator controls; **q** still quits the application.
+If the L1 requests a second power-down signal, that signal needs a separate
+`YES` confirmation. Commands and responses appear in both log views. An
+acknowledgement does not mean a power transition or reboot has finished.
+Timed-out commands are reported as having an unknown outcome and are not
+retried. Power actions resume LED/log monitoring without waiting for a
+power-state confirmation, so early boot diagnostics can be captured.
+
+The status bar shows the L1 clock immediately before console activity. Clock
+readings refresh in idle polling slots, approximately every five seconds;
+the displayed time advances between readings. Automatic clock reads pause
+for five seconds after power/reset requests to preserve early LED capture,
+and use a short response timeout. `[out of sync]` means the
+estimated difference from the `sgil1ctl` host exceeds five seconds. Controller
+timezone is used for comparison. Date replies with whole seconds cannot
+provide a precise subsecond measurement, so differences are approximate.
+Unavailable readings are labelled accordingly. Any non-empty LED response,
+including hidden entries, and each newly received log line refreshes
+**Console last active**; folding or hiding messages does not suppress activity.
+
+If USB is absent at startup or disappears while monitoring, the TUI opens a
+mandatory **Waiting for USB** dialog. **t** toggles clock sync on connection;
+**u**, **d** and **r** select power up, power down or host reset, each requiring
+`YES` plus **Return** to arm. **n** clears the armed power action; selecting a replacement disarms the
+previous action until the new choice is confirmed. **Esc** and
+**Return** cannot dismiss the waiting dialog; **q** quits the application.
+Unconfirmed input is discarded if USB appears. Confirmed actions run once,
+with inapplicable host actions skipped, then normal LED/log following resumes.
+A later disconnect starts a fresh wait with no actions armed. The controller
+lock is held only while connected, and queued power actions are never retried.
 
 Operator controls are a guard against accidental input, not an authentication
 boundary. They use the same Linux device access and L1 protocol authority as
@@ -175,6 +209,19 @@ select further actions:
 
 The default wait has no time limit. `--keepalive` defaults to `0`, which ends
 the command after the requested work completes.
+
+With the TUI edition, `sgil1ctl wait --tui` opens the same mandatory waiting
+dialog and then follows logs and LEDs. Existing `--set-time`, `--timezone`,
+`--drift-seconds` and guarded power options can preselect connection actions:
+
+```sh
+sgil1ctl wait --tui --set-time --power-up --force
+```
+
+`--background` waits for a disconnect/reconnect even if USB is already present.
+TUI waiting has no timeout and automatically returns to waiting on disconnect;
+`--wait-timeout` and `--keepalive` apply only to text mode. No `--follow` flag is
+needed in TUI mode.
 
 ## Debug settings
 

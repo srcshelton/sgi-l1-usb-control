@@ -137,8 +137,16 @@ output, **h** opens help, and **q** quits.
 Some LED status lines are hidden by default. Press **a** to switch between
 the **Filtered** and **All** views. Filtered LED states show their retained
 sample count; **t** shows the first and latest observation times. Press **\***
-to open operator controls for power up, power down, host reset and L1 reset.
-Each action requires typing `YES` and pressing **Return**.
+to open operator controls for power up, power down, host reset, L1 reset and
+clock sync. The menu shows host state and clock difference; unavailable actions
+stay visible and marked. Each action requires typing `YES` and pressing
+**Return**; blank input aborts it. The status bar also shows L1 time and warns
+when it differs by more than five seconds from this machine.
+
+If USB is absent, the TUI waits in a dialog where you can arm clock or power
+actions for connection. `sgil1ctl wait --tui --set-time --power-up --force`
+preselects clock sync and power up; following starts immediately after the
+commands, without waiting for the SGI system to report that it is on.
 To see where LED descriptions come from,
 press **p**, or add `--show-annotations` to `leds` or `watch`.
 The [monitoring reference](docs/usage.md#interactive-terminal-display)

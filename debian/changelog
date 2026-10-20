@@ -1,3 +1,32 @@
+sgi-l1-usb-control (0.1.60) unstable; urgency=medium
+
+  * Updated components since 0.1.59: user-space sgil1ctl, tests and
+    documentation; kernel module source is unchanged.
+  * Put Operator controls first in Help and use shared dialog styling.
+    Separate host and L1 reset choices, remove the ambiguous quit label,
+    and return to the menu after blank or invalid confirmation input.
+  * Refresh host power state on menu entry, return and action selection,
+    and recheck it before sending commands. Keep unavailable choices
+    visible and marked, including when host state is unknown.
+  * Show L1 time and a readable clock difference in Operator controls,
+    with a confirmed option to set the L1 clock from the sgil1ctl host.
+    Add L1 time to the status bar and warn when its estimated difference
+    from host time exceeds five seconds. Bound background clock requests
+    and defer them briefly after power/reset requests for early LED capture.
+  * Start or return to a mandatory USB-wait dialog when the device is
+    absent. Add wait --tui and confirmed, one-shot clock/power actions on
+    connection; discard unconfirmed input and skip inapplicable actions.
+    Release the controller lock while disconnected and do not rearm actions
+    on subsequent reconnects.
+  * Resume LED/log following directly after power requests, without waiting
+    for host power-state confirmation, to capture early boot diagnostics.
+  * Refresh Console last active for every non-empty LED response and new
+    log line, including hidden and folded output.
+  * Extend state, CLI, PTY and GNU Screen regression tests for dialogs,
+    state changes, clock offsets, activity and USB reconnect behavior.
+
+ -- Stuart Shelton <stuart@shelton.me>  Tue, 20 Oct 2026 19:29:14 +0100
+
 sgi-l1-usb-control (0.1.59) unstable; urgency=medium
 
   * Updated components since 0.1.58: user-space sgil1ctl, tests and

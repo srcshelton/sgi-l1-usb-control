@@ -154,6 +154,7 @@ struct l1_firmware_version {
 };
 
 struct wait_options {
+	bool tui;
 	struct status_options status;
 	bool power_up;
 	bool power_down;
@@ -402,6 +403,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"power action.\n"
 			"\n"
 			"Options:\n"
+			"  --tui                 wait in an interactive dialog, then follow logs/LEDs\n"
 			"  --background          wait for next bind event, ignoring existing device\n"
 			"  --wait-timeout SEC    maximum seconds to wait; default: none\n"
 			"  --set-time            set the L1 clock from the host after discovery\n"
@@ -453,7 +455,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"the optional TUI is selected.\n"
 			"\n"
 			"Options:\n"
-			"  --tui                 use the optional ncurses split-pane interface\n"
+			"  --tui                 interactive panes; wait for USB if absent\n"
 			"  --no-alternate-screen keep the TUI on the terminal's primary screen\n"
 			"  --log-interval MS     quiet log polling interval; minimum 100,\n"
 			"                        default 1000\n"
@@ -478,7 +480,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  p                     show or hide LED description sources\n"
 			"  c, m                  cycle palettes or toggle monochrome\n"
 			"  h, ?                  show Help; Esc or Return closes it\n"
-			"  *                     operator power/reset controls; type YES to confirm\n"
+			"  *                     operator power/reset/clock controls; YES confirms\n"
 			"  Ctrl-L                redraw the screen\n"
 			"  q                     quit\n");
 		command_usage_footer(out);
@@ -3681,7 +3683,9 @@ static int parse_wait_args(int argc, char **argv, int start,
 	wait->keepalive_seconds = SGIL1_DEFAULT_KEEPALIVE_SEC;
 
 	for (i = start; i < argc; i++) {
-		if (!strcmp(argv[i], "--set-time")) {
+		if (!strcmp(argv[i], "--tui")) {
+			wait->tui = true;
+		} else if (!strcmp(argv[i], "--set-time")) {
 			wait->status.set_time = true;
 		} else if (!strcmp(argv[i], "--timezone")) {
 			if (++i >= argc) {
@@ -3752,7 +3756,11 @@ static int parse_wait_args(int argc, char **argv, int start,
 	}
 	if (wait->status.set_time && !wait->status.timezone)
 		set_status_host_timezone(&wait->status);
-	if (wait->follow &&
+	if (wait->tui && (wait->wait_timeout_seconds != -1 || wait->keepalive_seconds)) {
+		fprintf(stderr, "wait --tui waits until connection or quit; --wait-timeout and --keepalive apply to text mode\n");
+		return -1;
+	}
+	if (wait->follow && !wait->tui &&
 	    (!wait->power_up && !wait->power_down && !wait->reset)) {
 		fprintf(stderr,
 			"wait --follow requires --power-up, --power-down, or --reset\n");
@@ -5741,6 +5749,13 @@ enum watch_tui_action {
 	WATCH_TUI_ACTION_POWER_DOWN_AGAIN,
 	WATCH_TUI_ACTION_HOST_RESET,
 	WATCH_TUI_ACTION_L1_RESET,
+	WATCH_TUI_ACTION_SYNC_TIME,
+};
+
+enum watch_tui_host_state {
+	WATCH_TUI_HOST_UNKNOWN,
+	WATCH_TUI_HOST_ON,
+	WATCH_TUI_HOST_OFF,
 };
 
 struct watch_tui_state {
@@ -5759,7 +5774,23 @@ struct watch_tui_state {
 	bool show_annotations;
 	bool help_visible;
 	bool operator_visible;
+	bool operator_refresh;
 	bool action_busy;
+	bool waiting_for_usb;
+	bool wait_device_present;
+	bool wait_set_time;
+	enum watch_tui_action wait_action;
+	enum watch_tui_action requested_action;
+	enum watch_tui_host_state host_state;
+	char l1_clock[80];
+	char clock_delta[96];
+	char l1_timezone[SGIL1_TZ_MAX];
+	bool clock_valid;
+	time_t clock_epoch;
+	double clock_fraction;
+	uint64_t clock_sample_ms;
+	uint64_t clock_poll_not_before;
+	char operator_notice[128];
 	enum watch_tui_action selected_action;
 	enum watch_tui_action pending_action;
 	char confirmation[4];
@@ -6677,117 +6708,130 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 	mvwaddnstr(window, 4, 56, "Setting", width - 60);
 	wattroff(window, A_BOLD);
 
-	mvwaddnstr(window, 5, 4, "Tab", 18);
-	mvwaddnstr(window, 5, 24, "Select pane", 30);
-	watch_tui_help_text(window, 5, 56, "Log", 3,
+	mvwaddnstr(window, 5, 4, "*", 18);
+	mvwaddnstr(window, 5, 24, "Operator controls", 30);
+	mvwaddnstr(window, 6, 4, "Tab", 18);
+	mvwaddnstr(window, 6, 24, "Select pane", 30);
+	watch_tui_help_text(window, 6, 56, "Log", 3,
 			    state->focus == WATCH_TUI_FOCUS_LOG);
-	mvwaddnstr(window, 5, 60, "/", 1);
-	watch_tui_help_text(window, 5, 62, "LEDs", 4,
+	mvwaddnstr(window, 6, 60, "/", 1);
+	watch_tui_help_text(window, 6, 62, "LEDs", 4,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
-	mvwaddnstr(window, 6, 4, "Left/Right, </>", 18);
+	mvwaddnstr(window, 7, 4, "Left/Right, </>", 18);
 	if (COLS < 100)
-		mvwaddnstr(window, 6, 56, "Also ^/v when stacked", width - 60);
-	mvwaddnstr(window, 6, 24, COLS >= 100 ?
+		mvwaddnstr(window, 7, 56, "Also ^/v when stacked", width - 60);
+	mvwaddnstr(window, 7, 24, COLS >= 100 ?
 		   "Move divider left/right" : "Shrink/grow selected pane", 30);
-	mvwaddnstr(window, 7, 4, "Up/Down, k/j", 18);
-	mvwaddnstr(window, 7, 24, "Scroll by line", 30);
-	mvwaddnstr(window, 8, 4, "PgUp/PgDn, ^B/^F", 18);
-	mvwaddnstr(window, 8, 24, "Scroll by page", 30);
-	mvwaddnstr(window, 9, 4, "End, g", 18);
-	mvwaddnstr(window, 9, 24, "Return to live output", 30);
-	mvwaddnstr(window, 10, 4, "a", 18);
-	mvwaddnstr(window, 10, 24, "Observation view", 30);
-	watch_tui_help_text(window, 10, 56, "Filtered", 8, !state->all_mode);
-	mvwaddnstr(window, 10, 65, "/", 1);
-	watch_tui_help_text(window, 10, 67, "All", 3, state->all_mode);
-	mvwaddnstr(window, 11, 4, "t", 18);
-	mvwaddnstr(window, 11, 24, "LED timestamps", 30);
-	watch_tui_help_text(window, 11, 56, "Off", 3,
+	mvwaddnstr(window, 8, 4, "Up/Down, k/j", 18);
+	mvwaddnstr(window, 8, 24, "Scroll by line", 30);
+	mvwaddnstr(window, 9, 4, "PgUp/PgDn, ^B/^F", 18);
+	mvwaddnstr(window, 9, 24, "Scroll by page", 30);
+	mvwaddnstr(window, 10, 4, "End, g", 18);
+	mvwaddnstr(window, 10, 24, "Return to live output", 30);
+	mvwaddnstr(window, 11, 4, "a", 18);
+	mvwaddnstr(window, 11, 24, "Observation view", 30);
+	watch_tui_help_text(window, 11, 56, "Filtered", 8, !state->all_mode);
+	mvwaddnstr(window, 11, 65, "/", 1);
+	watch_tui_help_text(window, 11, 67, "All", 3, state->all_mode);
+	mvwaddnstr(window, 12, 4, "t", 18);
+	mvwaddnstr(window, 12, 24, "LED timestamps", 30);
+	watch_tui_help_text(window, 12, 56, "Off", 3,
 			    !state->show_led_timestamps);
-	mvwaddnstr(window, 11, 60, "/", 1);
-	watch_tui_help_text(window, 11, 62, "On", 2,
-			    state->show_led_timestamps);
-	mvwaddnstr(window, 12, 4, "p", 18);
-	mvwaddnstr(window, 12, 24, "LED description sources", 30);
-	watch_tui_help_text(window, 12, 56, "Off", 3, !state->show_annotations);
 	mvwaddnstr(window, 12, 60, "/", 1);
-	watch_tui_help_text(window, 12, 62, "On", 2, state->show_annotations);
-	mvwaddnstr(window, 13, 4, "c", 18);
-	mvwaddnstr(window, 13, 24, "Cycle hardware palette", 30);
-	mvwaddnstr(window, 13, 56, palette_setting, width - 60);
-	mvwaddnstr(window, 14, 4, "m", 18);
-	mvwaddnstr(window, 14, 24, "Colour output", 30);
-	watch_tui_help_text(window, 14, 56, "Colour", 6,
+	watch_tui_help_text(window, 12, 62, "On", 2,
+			    state->show_led_timestamps);
+	mvwaddnstr(window, 13, 4, "p", 18);
+	mvwaddnstr(window, 13, 24, "LED description sources", 30);
+	watch_tui_help_text(window, 13, 56, "Off", 3, !state->show_annotations);
+	mvwaddnstr(window, 13, 60, "/", 1);
+	watch_tui_help_text(window, 13, 62, "On", 2, state->show_annotations);
+	mvwaddnstr(window, 14, 4, "c", 18);
+	mvwaddnstr(window, 14, 24, "Cycle hardware palette", 30);
+	mvwaddnstr(window, 14, 56, palette_setting, width - 60);
+	mvwaddnstr(window, 15, 4, "m", 18);
+	mvwaddnstr(window, 15, 24, "Colour output", 30);
+	watch_tui_help_text(window, 15, 56, "Colour", 6,
 			    !state->monochrome && state->color_capable);
-	mvwaddnstr(window, 14, 63, "/", 1);
-	watch_tui_help_text(window, 14, 65, "Mono", 4,
+	mvwaddnstr(window, 15, 63, "/", 1);
+	watch_tui_help_text(window, 15, 65, "Mono", 4,
 			    state->monochrome || !state->color_capable);
-	mvwaddnstr(window, 15, 4, "Ctrl-L", 18);
-	mvwaddnstr(window, 15, 24, "Redraw screen", 30);
-	mvwaddnstr(window, 16, 4, "h, ?, Esc, Return", 18);
-	mvwaddnstr(window, 16, 24, "Close Help", 30);
-	mvwaddnstr(window, 17, 4, "*", 18);
-	mvwaddnstr(window, 17, 24, "Operator controls", 30);
+	mvwaddnstr(window, 16, 4, "Ctrl-L", 18);
+	mvwaddnstr(window, 16, 24, "Redraw screen", 30);
+	mvwaddnstr(window, 17, 4, "h, ?, Esc, Return", 18);
+	mvwaddnstr(window, 17, 24, "Close Help", 30);
 }
 
 static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 					WINDOW *window, int width)
 {
-	char view[16];
-	char timestamps[8];
-	char colour[16];
+	int height = getmaxy(window);
+	int redraw = height - 3;
 	char palette_setting[24];
+	char text[96];
 
-	snprintf(view, sizeof(view), "%s", state->all_mode ? "All" : "Filtered");
-	snprintf(timestamps, sizeof(timestamps), "%s",
-		 state->show_led_timestamps ? "On" : "Off");
-	snprintf(colour, sizeof(colour), "%s",
-		 state->monochrome || !state->color_capable ? "Mono" : "Colour");
-	watch_tui_palette_setting(state, palette_setting,
-				  sizeof(palette_setting), true);
-	mvwaddnstr(window, 1, 2, "Tab select pane", width - 4);
-	mvwaddnstr(window, 2, 2, COLS >= 100 ?
+	watch_tui_palette_setting(state, palette_setting, sizeof(palette_setting), true);
+	mvwaddnstr(window, 1, 2, "* Operator controls", width - 4);
+	mvwaddnstr(window, 2, 2, "Tab select pane", width - 4);
+	mvwaddnstr(window, 3, 2, COLS >= 100 ?
 		   "Left/Right </> move divider" :
 		   "L/R </> ^/v shrink/grow pane", width - 4);
-	mvwaddnstr(window, 3, 2, "U/D k/j line ^B/^F page g live", width - 4);
-	mvwprintw(window, 4, 2, "a view:%-8s t time:%s", view, timestamps);
-	mvwprintw(window, 5, 2, "p sources:%s",
-		  state->show_annotations ? "On" : "Off");
-	mvwprintw(window, 6, 2, "c palette:%-13.13s m:%s",
-		  palette_setting, colour);
-	mvwaddnstr(window, 7, 2, "^L redraw", width - 4);
-	mvwaddnstr(window, 8, 2, "h/?/Esc/Ret close  * controls", width - 4);
+	mvwaddnstr(window, 4, 2, "U/D k/j line ^B/^F page g live", width - 4);
+	snprintf(text, sizeof(text), "a view:%s t time:%s m mono",
+		 state->all_mode ? "All" : "Filtered",
+		 state->show_led_timestamps ? "On" : "Off");
+	mvwaddnstr(window, 5, 2, text, width - 4);
+	snprintf(text, sizeof(text), "p sources:%s%s%s",
+		 state->show_annotations ? "On" : "Off",
+		 height < 11 ? " c palette:" : "", height < 11 ? palette_setting : "");
+	mvwaddnstr(window, 6, 2, text, width - 4);
+	if (height >= 11) {
+		snprintf(text, sizeof(text), "c palette:%s", palette_setting);
+		mvwaddnstr(window, 7, 2, text, width - 4);
+	}
+	mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
+	mvwaddnstr(window, redraw + 1, 2, "h/?/Esc/Ret close", width - 4);
+}
+
+/* All modal views share Help's geometry, double border and palette. */
+static WINDOW *watch_tui_dialog(const struct watch_tui_state *state,
+				const char *title, int requested_height,
+				int *width, int *height)
+{
+	WINDOW *window;
+	bool wide = COLS >= 88 && LINES >= 21;
+
+	*width = wide ? 86 : COLS - 2;
+	*height = requested_height > LINES ? LINES : requested_height;
+	if (*width < 4 || *height < 3)
+		return NULL;
+	window = derwin(stdscr, *height, *width, (LINES - *height) / 2,
+			(COLS - *width) / 2);
+	if (!window)
+		return NULL;
+	werase(window);
+	if (watch_tui_colors_enabled(state))
+		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
+	watch_tui_draw_help_border(window);
+	wattron(window, A_BOLD);
+	mvwaddnstr(window, 0, 3, title, *width - 6);
+	wattroff(window, A_BOLD);
+	if (watch_tui_colors_enabled(state))
+		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
+	return window;
 }
 
 static void watch_tui_draw_help(const struct watch_tui_state *state)
 {
 	WINDOW *window;
 	bool wide = COLS >= 88 && LINES >= 21;
-	int width = wide ? 86 : COLS - 2;
-	int height = wide ? 19 : 10;
-	int y;
-	int x;
+	int width;
+	int height;
 
 	if (!state->help_visible)
 		return;
-	if (height > LINES)
-		height = LINES;
-	if (width < 4 || height < 3)
-		return;
-	y = (LINES - height) / 2;
-	x = (COLS - width) / 2;
-	window = derwin(stdscr, height, width, y, x);
+	window = watch_tui_dialog(state, " Help ", wide ? 19 : 11, &width, &height);
 	if (!window)
 		return;
-	werase(window);
-	if (watch_tui_colors_enabled(state))
-		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
-	watch_tui_draw_help_border(window);
-	wattron(window, A_BOLD);
-	mvwaddnstr(window, 0, 3, " Help ", width - 6);
-	wattroff(window, A_BOLD);
-	if (watch_tui_colors_enabled(state))
-		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
 	if (wide)
 		watch_tui_draw_wide_help(state, window, width);
 	else
@@ -6816,46 +6860,162 @@ static const char *watch_tui_action_label(enum watch_tui_action action)
 	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN: return "Second power-down signal";
 	case WATCH_TUI_ACTION_HOST_RESET: return "Reset/restart host";
 	case WATCH_TUI_ACTION_L1_RESET: return "Reset L1 controller (USB may drop)";
+	case WATCH_TUI_ACTION_SYNC_TIME: return "Set L1 clock from this machine";
 	default: return "";
+	}
+}
+
+static bool watch_tui_action_available(const struct watch_tui_state *state,
+				       enum watch_tui_action action)
+{
+	switch (action) {
+	case WATCH_TUI_ACTION_POWER_UP:
+		return state->host_state == WATCH_TUI_HOST_OFF;
+	case WATCH_TUI_ACTION_POWER_DOWN:
+	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN:
+	case WATCH_TUI_ACTION_HOST_RESET:
+		return state->host_state == WATCH_TUI_HOST_ON;
+	case WATCH_TUI_ACTION_L1_RESET:
+	case WATCH_TUI_ACTION_SYNC_TIME:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static const char *watch_tui_host_label(const struct watch_tui_state *state)
+{
+	return state->host_state == WATCH_TUI_HOST_ON ? "on" :
+		state->host_state == WATCH_TUI_HOST_OFF ? "off" : "unknown";
+}
+
+static void watch_tui_operator_option(const struct watch_tui_state *state,
+				      WINDOW *window, int row, int column,
+				      int width, const char *label,
+				      enum watch_tui_action action)
+{
+	bool available = watch_tui_action_available(state, action);
+	char text[96];
+
+	snprintf(text, sizeof(text), "%s%s", available ? "" : "*", label);
+	if (!available) {
+		wattron(window, A_DIM);
+#ifdef A_ITALIC
+		wattron(window, A_ITALIC);
+#endif
+	}
+	mvwaddnstr(window, row, column, text, width);
+	if (!available) {
+		wattroff(window, A_DIM);
+#ifdef A_ITALIC
+		wattroff(window, A_ITALIC);
+#endif
 	}
 }
 
 static void watch_tui_draw_operator(const struct watch_tui_state *state)
 {
 	WINDOW *window;
-	int width = COLS < 66 ? COLS : 66;
-	int height = 10;
+	int width;
+	int height;
+	bool confirming = state->selected_action != WATCH_TUI_ACTION_NONE;
 
-	if (!state->operator_visible)
+	if (!state->operator_visible && !state->waiting_for_usb)
 		return;
-	window = derwin(stdscr, height, width, (LINES - height) / 2,
-			(COLS - width) / 2);
+	window = watch_tui_dialog(state, state->waiting_for_usb ?
+		" Waiting for USB " : " Operator controls ",
+		confirming ? 12 : state->waiting_for_usb ? 12 : 17, &width, &height);
 	if (!window)
 		return;
-	werase(window);
-	box(window, 0, 0);
-	wattron(window, A_BOLD);
-	mvwaddnstr(window, 0, 2, " Operator controls ", width - 4);
-	wattroff(window, A_BOLD);
-	if (state->action_busy) {
-		mvwaddnstr(window, 2, 2, "Command in progress; q stops monitoring", width - 4);
-	} else if (state->selected_action != WATCH_TUI_ACTION_NONE) {
-		mvwaddnstr(window, 2, 2,
-			   watch_tui_action_label(state->selected_action), width - 4);
+	if (state->action_busy || state->operator_refresh ||
+	    state->requested_action != WATCH_TUI_ACTION_NONE) {
+		mvwaddnstr(window, 2, 2, state->action_busy ?
+			   "Command in progress" : "Reading host status and L1 clock...", width - 4);
+	} else if (confirming) {
+		mvwaddnstr(window, 1, 2, watch_tui_action_label(state->selected_action), width - 4);
 		mvwaddnstr(window, 3, 2, "Type YES, then Return to send once", width - 4);
-		mvwprintw(window, 5, 2, "Confirm: %s", state->confirmation);
+		mvwaddnstr(window, 4, 2, "Blank input + Return aborts action", width - 4);
+		mvwprintw(window, 6, 2, "Confirm: %s", state->confirmation);
 		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN)
-			mvwaddnstr(window, 6, 2, "L1 requested a second power-down signal", width - 4);
+			mvwaddnstr(window, 7, 2, "L1 requests second power-down signal", width - 4);
+	} else if (state->waiting_for_usb) {
+		mvwaddnstr(window, 1, 2, state->wait_device_present ?
+			"USB present; preparing L1 connection" :
+			"No SGI L1 USB device present", width - 4);
+		mvwaddnstr(window, 2, 2, "On connection:", width - 4);
+		char sync_label[64];
+
+		snprintf(sync_label, sizeof(sync_label), "t [%c] Set L1 clock from this machine",
+			 state->wait_set_time ? 'x' : ' ');
+		mvwaddnstr(window, 3, 2, sync_label, width - 4);
+		mvwprintw(window, 4, 2, "u [%c] Power up host", state->wait_action == WATCH_TUI_ACTION_POWER_UP ? 'x' : ' ');
+		mvwprintw(window, 5, 2, "d [%c] Power down host", state->wait_action == WATCH_TUI_ACTION_POWER_DOWN ? 'x' : ' ');
+		mvwprintw(window, 6, 2, "r [%c] Reset/restart host", state->wait_action == WATCH_TUI_ACTION_HOST_RESET ? 'x' : ' ');
+		mvwaddnstr(window, 7, 2, "n Clear power action", width - 4);
 	} else {
-		mvwaddnstr(window, 1, 2, "u  Power up host", width - 4);
-		mvwaddnstr(window, 2, 2, "d  Power down host", width - 4);
-		mvwaddnstr(window, 3, 2, "r  Reset/restart host (softreset)", width - 4);
-		mvwaddnstr(window, 4, 2, "l  Reset L1 controller", width - 4);
-		mvwaddnstr(window, 6, 2, "Each action needs a separate confirmation", width - 4);
+		bool compact = height < 16;
+
+		mvwprintw(window, 1, 2, "Host: %s", watch_tui_host_label(state));
+		mvwaddnstr(window, 2, 2, state->l1_clock, width - 4);
+		mvwaddnstr(window, 3, 2, state->clock_delta, width - 4);
+		watch_tui_operator_option(state, window, compact ? 4 : 5, 2,
+			compact ? 15 : width - 4, "u Power up", WATCH_TUI_ACTION_POWER_UP);
+		watch_tui_operator_option(state, window, compact ? 4 : 6, compact ? 18 : 2,
+			compact ? width - 20 : width - 4, "d Power down", WATCH_TUI_ACTION_POWER_DOWN);
+		watch_tui_operator_option(state, window, compact ? 5 : 7, 2,
+			width - 4, "r Reset/restart host", WATCH_TUI_ACTION_HOST_RESET);
+		/* Keep a blank row between host reset and controller reset. */
+		watch_tui_operator_option(state, window, compact ? 7 : 9, 2,
+			compact ? 16 : width - 4, "l Reset L1", WATCH_TUI_ACTION_L1_RESET);
+		watch_tui_operator_option(state, window, compact ? 7 : 10, compact ? 19 : 2,
+			compact ? width - 21 : width - 4, "s Sync L1 clock", WATCH_TUI_ACTION_SYNC_TIME);
+		if (compact)
+			mvwaddnstr(window, height - 2, 2, "* unavailable (host); Esc/* back", width - 4);
+		else {
+			mvwaddnstr(window, 12, 2, "* Unavailable due to current host state (including unknown)", width - 4);
+			mvwaddnstr(window, 13, 2, state->operator_notice, width - 4);
+		}
 	}
-	mvwaddnstr(window, 8, 2, "Esc/* cancel, q quit monitoring", width - 4);
+	if (height >= 16 || confirming || state->waiting_for_usb)
+		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ?
+			"q Quit application" : "Esc/* Back", width - 4);
 	wnoutrefresh(window);
 	delwin(window);
+}
+
+static bool watch_tui_clock_status(const struct watch_tui_state *state,
+				    uint64_t now_ms, const struct timespec *host,
+				    bool compact, char *text, size_t size)
+{
+	char formatted[40];
+	char *saved = NULL;
+	bool had_tz;
+	bool out_of_sync;
+	struct tm tm;
+	double elapsed;
+	double drift;
+	time_t current;
+
+	if (!state->clock_valid || now_ms < state->clock_sample_ms) {
+		snprintf(text, size, "L1 unavailable");
+		return false;
+	}
+	elapsed = (double)(now_ms - state->clock_sample_ms) / 1000.0;
+	current = state->clock_epoch + (time_t)(state->clock_fraction + elapsed);
+	drift = difftime(host->tv_sec, state->clock_epoch) +
+		(double)host->tv_nsec / 1e9 - state->clock_fraction - elapsed;
+	out_of_sync = drift > 5.0 || drift < -5.0;
+	if (save_tz(&saved, &had_tz)) {
+		snprintf(text, size, "L1 unavailable");
+		return false;
+	}
+	if (set_tz_for_probe(state->l1_timezone) || !localtime_r(&current, &tm) ||
+	    !strftime(formatted, sizeof(formatted), compact ? "%H:%M:%S" :
+		      "%m/%d/%Y %H:%M:%S", &tm))
+		snprintf(formatted, sizeof(formatted), "unavailable");
+	restore_tz(saved, had_tz);
+	snprintf(text, size, "L1 %s%s", formatted, out_of_sync ? " [out of sync]" : "");
+	return out_of_sync;
 }
 
 static void watch_tui_render(struct watch_display *display)
@@ -6871,6 +7031,10 @@ static void watch_tui_render(struct watch_display *display)
 	char header_right_short[80];
 	char footer[320];
 	char activity[64];
+	char clock_text[96];
+	struct timespec host_now = { 0 };
+	bool clock_warning;
+	int clock_x;
 	char log_title[80];
 	char led_title[80];
 	size_t filtered_led_states;
@@ -6964,14 +7128,35 @@ static void watch_tui_render(struct watch_display *display)
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
 	watch_tui_format_console_activity(display, activity, sizeof(activity));
+	if (COLS < 70) {
+		const char *value = strchr(activity, ':');
+		char compact_activity[64];
+
+		snprintf(compact_activity, sizeof(compact_activity), "Console:%s", value ? value + 1 : " never");
+		snprintf(activity, sizeof(activity), "%s", compact_activity);
+	}
+	clock_gettime(CLOCK_REALTIME, &host_now);
+	clock_warning = watch_tui_clock_status(state, monotonic_milliseconds(),
+		&host_now, COLS < 110, clock_text, sizeof(clock_text));
+	if (COLS < 70 && strlen(clock_text) >= 11 && clock_text[5] == ':' &&
+	    clock_text[8] == ':')
+		memmove(clock_text + 8, clock_text + 11, strlen(clock_text + 11) + 1);
 	activity_x = COLS - (int)strlen(activity) - 1;
 	if (activity_x < 0)
 		activity_x = 0;
-	footer_width = activity_x > 1 ? activity_x - 1 : 0;
+	clock_x = activity_x - (int)strlen(clock_text) - 1;
+	if (clock_x < 0)
+		clock_x = 0;
+	footer_width = clock_x > 1 ? clock_x - 1 : 0;
 	attron(A_REVERSE);
 	mvhline(LINES - 1, 0, ' ', COLS);
 	if (footer_width)
 		mvaddnstr(LINES - 1, 0, footer, footer_width);
+	if (clock_warning)
+		attron(A_BOLD);
+	mvaddnstr(LINES - 1, clock_x, clock_text, activity_x - clock_x - 1);
+	if (clock_warning)
+		attroff(A_BOLD);
 	mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
@@ -7372,10 +7557,22 @@ static void watch_tui_cycle_palette(struct watch_tui_state *state,
 	}
 }
 
-/* Input only queues actions. The scheduler sends at transaction boundaries. */
+static void watch_tui_operator_menu(struct watch_tui_state *state)
+{
+	state->operator_visible = true;
+	state->operator_notice[0] = '\0';
+	state->selected_action = WATCH_TUI_ACTION_NONE;
+	state->requested_action = WATCH_TUI_ACTION_NONE;
+	state->confirmation[0] = '\0';
+	state->operator_refresh = true;
+	state->host_state = WATCH_TUI_HOST_UNKNOWN;
+}
+
+/* Input only queues requests. The scheduler owns every USB transaction. */
 static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 {
 	size_t length = strlen(state->confirmation);
+	enum watch_tui_action action = WATCH_TUI_ACTION_NONE;
 
 	if (key == 'q' || key == 'Q') {
 		watch_stop_requested = 1;
@@ -7384,19 +7581,34 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 	if (state->action_busy || state->pending_action != WATCH_TUI_ACTION_NONE)
 		return;
 	if (key == 27 || key == '*') {
-		state->operator_visible = false;
-		state->selected_action = WATCH_TUI_ACTION_NONE;
-		state->confirmation[0] = '\0';
+		if (state->waiting_for_usb) {
+			state->selected_action = WATCH_TUI_ACTION_NONE;
+			state->confirmation[0] = '\0';
+		} else {
+			state->operator_visible = false;
+			state->selected_action = WATCH_TUI_ACTION_NONE;
+			state->requested_action = WATCH_TUI_ACTION_NONE;
+			state->operator_refresh = false;
+			state->confirmation[0] = '\0';
+		}
 		return;
 	}
+	if (state->operator_refresh || state->requested_action != WATCH_TUI_ACTION_NONE)
+		return;
 	if (state->selected_action != WATCH_TUI_ACTION_NONE) {
 		if (key == '\n' || key == '\r' || key == KEY_ENTER) {
 			if (!strcmp(state->confirmation, "YES")) {
-				state->pending_action = state->selected_action;
+				if (state->waiting_for_usb)
+					state->wait_action = state->selected_action;
+				else
+					state->pending_action = state->selected_action;
+				state->selected_action = WATCH_TUI_ACTION_NONE;
+				state->confirmation[0] = '\0';
+			} else if (state->waiting_for_usb) {
 				state->selected_action = WATCH_TUI_ACTION_NONE;
 				state->confirmation[0] = '\0';
 			} else {
-				state->confirmation[0] = '\0';
+				watch_tui_operator_menu(state);
 			}
 		} else if (key == KEY_BACKSPACE || key == 127 || key == 8) {
 			if (length)
@@ -7405,17 +7617,36 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 			state->confirmation[length] = (char)key;
 			state->confirmation[length + 1] = '\0';
 		} else if (key >= 32 && key <= 126) {
-			/* Reject extra input rather than accepting a YES prefix. */
 			state->confirmation[0] = '\0';
 		}
 		return;
 	}
+	if (state->waiting_for_usb) {
+		if (key == 't' || key == 'T')
+			state->wait_set_time = !state->wait_set_time;
+		if (key == 'n' || key == 'N')
+			state->wait_action = WATCH_TUI_ACTION_NONE;
+	}
 	switch (key) {
-	case 'u': case 'U': state->selected_action = WATCH_TUI_ACTION_POWER_UP; break;
-	case 'd': case 'D': state->selected_action = WATCH_TUI_ACTION_POWER_DOWN; break;
-	case 'r': case 'R': state->selected_action = WATCH_TUI_ACTION_HOST_RESET; break;
-	case 'l': case 'L': state->selected_action = WATCH_TUI_ACTION_L1_RESET; break;
+	case 'u': case 'U': action = WATCH_TUI_ACTION_POWER_UP; break;
+	case 'd': case 'D': action = WATCH_TUI_ACTION_POWER_DOWN; break;
+	case 'r': case 'R': action = WATCH_TUI_ACTION_HOST_RESET; break;
+	case 'l': case 'L': action = WATCH_TUI_ACTION_L1_RESET; break;
+	case 's': case 'S': action = WATCH_TUI_ACTION_SYNC_TIME; break;
 	default: break;
+	}
+	if (action == WATCH_TUI_ACTION_NONE)
+		return;
+	if (state->waiting_for_usb) {
+		if (action == WATCH_TUI_ACTION_POWER_UP ||
+		    action == WATCH_TUI_ACTION_POWER_DOWN ||
+		    action == WATCH_TUI_ACTION_HOST_RESET) {
+			state->wait_action = WATCH_TUI_ACTION_NONE;
+			state->selected_action = action;
+		}
+	} else {
+		state->requested_action = action;
+		state->host_state = WATCH_TUI_HOST_UNKNOWN;
 	}
 }
 
@@ -7429,7 +7660,7 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		timeout = 100;
 	wtimeout(stdscr, timeout);
 	key = wgetch(stdscr);
-	if (state->operator_visible) {
+	if (state->operator_visible || state->waiting_for_usb) {
 		watch_tui_operator_key(state, key);
 		if (key == KEY_RESIZE)
 			clearok(stdscr, true);
@@ -7447,9 +7678,7 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	switch (key) {
 	case '*':
 		state->help_visible = false;
-		state->operator_visible = true;
-		state->selected_action = WATCH_TUI_ACTION_NONE;
-		state->confirmation[0] = '\0';
+		watch_tui_operator_menu(state);
 		break;
 	case 'q':
 	case 'Q':
@@ -7608,10 +7837,19 @@ static void watch_display_status(struct watch_display *display,
 	fflush(stderr);
 }
 
+static void watch_display_activity(struct watch_display *display, const char *text)
+{
+	if (text && *text) {
+		display->console_activity_seen = true;
+		display->console_activity_last_seen = monotonic_milliseconds();
+	}
+}
+
 static int watch_display_log_line(void *context, const char *line)
 {
 	struct watch_display *display = context;
 
+	watch_display_activity(display, line);
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
 		if (watch_tui_append_log(&display->tui_state, line, false))
@@ -7630,6 +7868,7 @@ static int watch_display_log_line(void *context, const char *line)
 static int watch_display_raw_log_line(struct watch_display *display,
 				      const char *line)
 {
+	watch_display_activity(display, line);
 #ifdef SGIL1_WITH_TUI
 	if (display->tui)
 		return watch_tui_append_log(&display->tui_state, line, true);
@@ -7660,10 +7899,9 @@ static void watch_display_leds(struct watch_display *display,
 	const char *line = filtered_text;
 	char *annotated = NULL;
 
-	if (console_activity) {
-		display->console_activity_seen = true;
-		display->console_activity_last_seen = monotonic_milliseconds();
-	}
+	watch_display_activity(display, raw);
+	if (console_activity)
+		watch_display_activity(display, "hidden LED activity");
 #ifdef SGIL1_WITH_TUI
 	if (display->tui) {
 		if (watch_tui_append_leds(&display->tui_state, all_text,
@@ -8013,6 +8251,201 @@ static int watch_tui_record_action(struct watch_display *display, const char *te
 	return ret;
 }
 
+static enum watch_tui_host_state watch_tui_read_host_state(const struct options *opts)
+{
+	char *text = NULL;
+	enum watch_tui_host_state result = WATCH_TUI_HOST_UNKNOWN;
+
+	if (!l1_text_command_status(opts, "power check", false, &text) &&
+	    !l1_text_indicates_failure(text)) {
+		bool on = power_text_says_on(text);
+		bool off = power_text_says_off(text);
+
+		if (on != off)
+			result = on ? WATCH_TUI_HOST_ON : WATCH_TUI_HOST_OFF;
+	}
+	free(text);
+	return result;
+}
+
+static void watch_tui_format_delta(double delta, char *buf, size_t size)
+{
+	bool behind = delta >= 0;
+	double magnitude = behind ? delta : -delta;
+	uint64_t seconds = (uint64_t)magnitude;
+	char amount[64];
+
+	if (seconds >= 365U * 86400U)
+		snprintf(amount, sizeof(amount), "%" PRIu64 "y %" PRIu64 "d",
+			 seconds / (365U * 86400U), seconds / 86400U % 365U);
+	else if (seconds >= 86400U)
+		snprintf(amount, sizeof(amount), "%" PRIu64 "d %" PRIu64 "h",
+			 seconds / 86400U, seconds / 3600U % 24U);
+	else if (seconds >= 3600U)
+		snprintf(amount, sizeof(amount), "%" PRIu64 "h %" PRIu64 "m",
+			 seconds / 3600U, seconds / 60U % 60U);
+	else if (seconds >= 60U)
+		snprintf(amount, sizeof(amount), "%" PRIu64 "m %.1fs",
+			 seconds / 60U, magnitude - (double)(seconds / 60U * 60U));
+	else
+		snprintf(amount, sizeof(amount), "%.3fs", magnitude);
+	snprintf(buf, size, "L1 %s by ~%s", behind ? "behind" : "ahead", amount);
+}
+
+static int watch_tui_parse_clock(const char *date, const char *timezone,
+				 time_t *when, double *fraction)
+{
+	char zone[SGIL1_TZ_MAX];
+	char *saved = NULL;
+	bool had_tz;
+	int used = 0;
+	int ret;
+
+	if (!date || !timezone || sscanf(timezone, "%127s", zone) != 1 ||
+	    l1_text_indicates_failure(timezone) || save_tz(&saved, &had_tz))
+		return -1;
+	ret = set_tz_for_probe(zone);
+	if (!ret)
+		ret = parse_l1_time(date, when);
+	restore_tz(saved, had_tz);
+	*fraction = 0;
+	if (!ret && sscanf(date, "%*u/%*u/%*u %*u:%*u:%*u%n", &used) == 0 &&
+	    used && date[used] == '.') {
+		double value = strtod(date + used, NULL);
+
+		if (value >= 0 && value < 1)
+			*fraction = value;
+	}
+	return ret;
+}
+
+static void watch_tui_refresh_clock(struct watch_display *display,
+				     const struct options *opts, bool refresh_zone)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	struct timespec before = { 0 }, after = { 0 };
+	uint64_t before_ms = monotonic_milliseconds();
+	char *date = NULL;
+	char *timezone = NULL;
+	time_t l1_time;
+	double fraction;
+
+	clock_gettime(CLOCK_REALTIME, &before);
+	(void)l1_text_command_status(opts, "date", false, &date);
+	clock_gettime(CLOCK_REALTIME, &after);
+	state->clock_sample_ms = before_ms + (monotonic_milliseconds() - before_ms) / 2;
+	if (refresh_zone || !state->l1_timezone[0]) {
+		(void)l1_text_command_status(opts, "date tz", false, &timezone);
+		state->l1_timezone[0] = '\0';
+		if (timezone && !l1_text_indicates_failure(timezone))
+			(void)sscanf(timezone, "%127s", state->l1_timezone);
+	}
+	state->clock_valid = false;
+	snprintf(state->l1_clock, sizeof(state->l1_clock), "L1: %.*s",
+		 date ? (int)strcspn(date, "\r\n") : 11,
+		 date ? date : "unavailable");
+	snprintf(state->clock_delta, sizeof(state->clock_delta), "Clock difference unavailable");
+	if (before.tv_sec && after.tv_sec &&
+	    !watch_tui_parse_clock(date, state->l1_timezone, &l1_time, &fraction)) {
+		double delta = (difftime(before.tv_sec, l1_time) +
+				difftime(after.tv_sec, l1_time)) / 2.0 +
+			((double)before.tv_nsec + (double)after.tv_nsec) / 2e9 - fraction;
+
+		state->clock_valid = true;
+		state->clock_epoch = l1_time;
+		state->clock_fraction = fraction;
+		watch_tui_format_delta(delta, state->clock_delta, sizeof(state->clock_delta));
+	}
+	free(date);
+	free(timezone);
+}
+
+static void watch_tui_refresh_operator(struct watch_display *display,
+				        const struct options *opts)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	enum watch_tui_action selection = state->requested_action;
+
+	state->action_busy = true;
+	watch_tui_render(display);
+	state->host_state = watch_tui_read_host_state(opts);
+	watch_tui_refresh_clock(display, opts, true);
+	state->action_busy = false;
+	state->operator_refresh = false;
+	state->requested_action = WATCH_TUI_ACTION_NONE;
+	if (selection != WATCH_TUI_ACTION_NONE && !watch_stop_requested) {
+		if (watch_tui_action_available(state, selection)) {
+			state->selected_action = selection;
+			state->confirmation[0] = '\0';
+		} else {
+			snprintf(state->operator_notice, sizeof(state->operator_notice),
+				 "Action unavailable: host is %s", watch_tui_host_label(state));
+		}
+	}
+	clearok(stdscr, true);
+	watch_tui_render(display);
+}
+
+static int watch_tui_sync_clock(struct watch_display *display,
+				const struct options *opts,
+				const struct status_options *requested)
+{
+	struct status_options status = { 0 };
+	char command[SGIL1_TZ_MAX + 16];
+	char *text = NULL;
+	int ret;
+
+	if (requested && requested->timezone)
+		set_status_timezone(&status, requested->timezone);
+	else
+		set_status_host_timezone(&status);
+	if (!status.timezone)
+		return 1;
+	snprintf(command, sizeof(command), "date tz %s", status.timezone);
+	if (watch_tui_record_action(display, "Operator: set L1 clock from this machine"))
+		return -1;
+	ret = l1_text_command_status(opts, command, true, &text);
+	if (!ret && l1_text_indicates_failure(text))
+		ret = 1;
+	if (watch_tui_record_action(display, text))
+		ret = -1;
+	free(text);
+	if (ret)
+		return ret;
+	if (requested) {
+		time_t l1_time;
+		double fraction;
+		struct timespec host;
+
+		text = NULL;
+		if (!l1_text_command_status(opts, "date", false, &text) &&
+		    !watch_tui_parse_clock(text, status.timezone, &l1_time, &fraction) &&
+		    !clock_gettime(CLOCK_REALTIME, &host)) {
+			double drift = difftime(host.tv_sec, l1_time) + (double)host.tv_nsec / 1e9 - fraction;
+
+			if (drift >= -requested->drift_seconds && drift <= requested->drift_seconds) {
+				free(text);
+				watch_display_status(display, "L1 clock within requested drift threshold");
+				return 0;
+			}
+		}
+		free(text);
+	}
+	if (watch_stop_requested || make_l1_date_command(command, sizeof(command)))
+		return 1;
+	text = NULL;
+	ret = l1_text_command_status(opts, command, true, &text);
+	if (!ret && l1_text_indicates_failure(text))
+		ret = 1;
+	if (watch_tui_record_action(display, text))
+		ret = -1;
+	free(text);
+	watch_display_status(display, ret ?
+		"L1 clock sync failed or response unavailable; not retried" :
+		"L1 clock set from this machine");
+	return ret;
+}
+
 static int watch_tui_run_action(struct watch_display *display,
 				const struct options *opts,
 				enum watch_tui_action action)
@@ -8025,6 +8458,27 @@ static int watch_tui_run_action(struct watch_display *display,
 	int ret = 0;
 
 	state->action_busy = true;
+	if (action == WATCH_TUI_ACTION_SYNC_TIME) {
+		ret = watch_tui_sync_clock(display, opts, NULL);
+		watch_tui_operator_menu(state);
+		if (ret)
+			snprintf(state->operator_notice, sizeof(state->operator_notice),
+				 "L1 clock sync failed or response unavailable; not retried");
+		goto out;
+	}
+	state->host_state = watch_tui_read_host_state(opts);
+	if (watch_stop_requested)
+		goto out;
+	if (!watch_tui_action_available(state, action)) {
+		if (!state->waiting_for_usb)
+			watch_tui_operator_menu(state);
+		snprintf(state->operator_notice, sizeof(state->operator_notice),
+			 "Action cancelled: host state changed or is unknown");
+		watch_display_status(display, state->operator_notice);
+		if (watch_tui_record_action(display, state->operator_notice))
+			ret = -1;
+		goto out;
+	}
 	snprintf(message, sizeof(message), "Operator confirmed: %s",
 		 watch_tui_action_label(action));
 	watch_display_status(display, message);
@@ -8035,6 +8489,7 @@ static int watch_tui_run_action(struct watch_display *display,
 	/* Never retry a power/reset command: a timeout may follow delivery. */
 	command_ret = run_l1_command_core(opts, command, true, false, false,
 					 true, false, &text);
+	state->clock_poll_not_before = milliseconds_after(monotonic_milliseconds(), 5000);
 	if (watch_tui_record_action(display, text)) {
 		ret = -1;
 		goto out;
@@ -8048,7 +8503,7 @@ static int watch_tui_run_action(struct watch_display *display,
 		snprintf(message, sizeof(message), "%s: failed; command not retried", command);
 	} else if (action == WATCH_TUI_ACTION_POWER_DOWN &&
 		   power_down_text_requests_second_command(text)) {
-		state->selected_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+		state->requested_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
 		state->confirmation[0] = '\0';
 		snprintf(message, sizeof(message),
 			 "L1 requests second power-down signal; confirm again or cancel");
@@ -8060,35 +8515,112 @@ static int watch_tui_run_action(struct watch_display *display,
 		ret = -1;
 		goto out;
 	}
-	if (!command_ret && !l1_text_indicates_failure(text) &&
-	    state->selected_action == WATCH_TUI_ACTION_NONE &&
-	    (action == WATCH_TUI_ACTION_POWER_UP ||
-	     action == WATCH_TUI_ACTION_POWER_DOWN ||
-	     action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN)) {
-		char *power_check = NULL;
-
-		if (!l1_text_command_status(opts, "power check", false, &power_check)) {
-			snprintf(message, sizeof(message), "Power check: %s",
-				 power_text_says_on(power_check) ? "host on" :
-				 power_text_says_off(power_check) ? "host off" : "state unknown");
-			watch_display_status(display, message);
-			if (watch_tui_record_action(display, power_check) ||
-			    watch_tui_record_action(display, message))
-				ret = -1;
-		} else {
-			watch_display_status(display,
-				"Command sent; power check unavailable, monitor for changes");
-		}
-		free(power_check);
-	}
 out:
 	free(text);
 	state->action_busy = false;
-	state->operator_visible = state->selected_action != WATCH_TUI_ACTION_NONE;
+	state->operator_visible = state->operator_refresh ||
+		state->requested_action != WATCH_TUI_ACTION_NONE ||
+		state->selected_action != WATCH_TUI_ACTION_NONE;
 	/* Transport diagnostics use stderr, which can move the real cursor. */
 	clearok(stdscr, true);
 	watch_tui_render(display);
-	return ret;
+	return ret < 0 ? ret : 0;
+}
+/* Keep the mandatory dialog responsive without owning a missing device's lock. */
+static bool watch_tui_try_lock(void)
+{
+	int fd;
+
+	if (sgil1_lock_fd >= 0)
+		return true;
+	fd = open_lock_file();
+	if (fd < 0)
+		return false;
+	if (flock(fd, LOCK_EX | LOCK_NB)) {
+		close(fd);
+		return false;
+	}
+	sgil1_lock_fd = fd;
+	return true;
+}
+
+static int watch_tui_connect(const struct options *opts, struct options *cmd_opts,
+			      struct watch_display *display, struct led_profile *profile,
+			      const struct wait_options *startup)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	bool seen_absence = !find_existing_data_device(opts);
+	uint64_t next_probe = 0;
+
+	state->waiting_for_usb = true;
+	state->clock_valid = false;
+	state->l1_timezone[0] = '\0';
+	state->operator_visible = false;
+	state->operator_refresh = false;
+	state->selected_action = state->requested_action = state->pending_action =
+		WATCH_TUI_ACTION_NONE;
+	state->confirmation[0] = '\0';
+	state->wait_set_time = startup && startup->status.set_time;
+	state->wait_action = startup && startup->power_up ? WATCH_TUI_ACTION_POWER_UP :
+		startup && startup->power_down ? WATCH_TUI_ACTION_POWER_DOWN :
+		startup && startup->reset ? WATCH_TUI_ACTION_HOST_RESET : WATCH_TUI_ACTION_NONE;
+	release_sgil1_lock();
+	while (!watch_stop_requested) {
+		uint64_t now = monotonic_milliseconds();
+
+		if (now >= next_probe) {
+			state->wait_device_present = find_existing_data_device(opts) != NULL;
+			if (!state->wait_device_present)
+				seen_absence = true;
+			if (state->wait_device_present &&
+			    (!startup || !startup->background || seen_absence) &&
+			    watch_tui_try_lock()) {
+				/* Freeze only confirmed reconnect actions while restoring the route. */
+				state->action_busy = true;
+				watch_tui_render(display);
+				if (!prepare_command_options(opts, cmd_opts))
+					break;
+				state->action_busy = false;
+				release_sgil1_lock();
+			}
+			next_probe = milliseconds_after(now, 500);
+			clearok(stdscr, true);
+			watch_tui_render(display);
+		}
+		(void)watch_display_wait(display, 100);
+	}
+	if (watch_stop_requested) {
+		state->action_busy = false;
+		return 1;
+	}
+	cmd_opts->skip_command_drain = true;
+	state->selected_action = WATCH_TUI_ACTION_NONE; /* Unconfirmed input is never armed. */
+	watch_display_read_led_profile(display, cmd_opts, profile);
+	if (state->wait_set_time && !watch_stop_requested) {
+		int sync_ret = watch_tui_sync_clock(display, cmd_opts,
+			startup ? &startup->status : NULL);
+
+		if (sync_ret < 0)
+			return -1;
+		if (sync_ret) {
+			const char *message = "Reconnect clock sync failed or response unavailable; not retried";
+
+			watch_display_status(display, message);
+			if (watch_tui_record_action(display, message))
+				return -1;
+		}
+	}
+	if (state->wait_action != WATCH_TUI_ACTION_NONE && !watch_stop_requested) {
+		if (watch_tui_run_action(display, cmd_opts, state->wait_action))
+			return -1;
+	}
+	state->wait_action = WATCH_TUI_ACTION_NONE;
+	state->wait_set_time = false;
+	state->waiting_for_usb = false;
+	state->action_busy = false;
+	clearok(stdscr, true);
+	watch_tui_render(display);
+	return watch_stop_requested ? 1 : 0;
 }
 #endif
 
@@ -8108,6 +8640,9 @@ static int run_watch_scheduler(const struct options *opts,
 	uint64_t now = monotonic_milliseconds();
 	uint64_t next_log = now;
 	uint64_t next_led = now;
+#ifdef SGIL1_WITH_TUI
+	uint64_t next_clock = now;
+#endif
 	uint64_t next_pressure_decay = UINT64_MAX;
 	int led_delay = watch->led_interval_ms;
 	int failure_backoff = SGIL1_WATCH_FAILURE_BACKOFF_MIN_MS;
@@ -8135,6 +8670,25 @@ static int run_watch_scheduler(const struct options *opts,
 		}
 
 #ifdef SGIL1_WITH_TUI
+		if (display->tui && !find_existing_data_device(opts)) {
+			int connect_ret = watch_tui_connect(opts, cmd_opts, display, profile, NULL);
+
+			if (connect_ret) {
+				ret = connect_ret < 0 ? 1 : 0;
+				break;
+			}
+			profile_valid = route_valid = true;
+			last_was_led = false;
+			free(previous_leds);
+			previous_leds = NULL;
+			next_led = next_log = monotonic_milliseconds();
+			continue;
+		}
+		if (display->tui && (display->tui_state.operator_refresh ||
+		    display->tui_state.requested_action != WATCH_TUI_ACTION_NONE)) {
+			watch_tui_refresh_operator(display, cmd_opts);
+			continue;
+		}
 		if (display->tui && display->tui_state.pending_action !=
 					WATCH_TUI_ACTION_NONE) {
 			enum watch_tui_action action = display->tui_state.pending_action;
@@ -8150,7 +8704,7 @@ static int run_watch_scheduler(const struct options *opts,
 					break;
 				}
 				/* Re-read firmware and resume fast polling after an action. */
-				profile_valid = false;
+				last_was_led = false;
 				led_delay = watch->led_interval_ms;
 				next_led = next_log = monotonic_milliseconds();
 				if (action == WATCH_TUI_ACTION_L1_RESET ||
@@ -8163,6 +8717,20 @@ static int run_watch_scheduler(const struct options *opts,
 		do_led = now >= next_led;
 		do_log = now >= next_log;
 		if (!do_led && !do_log) {
+#ifdef SGIL1_WITH_TUI
+			if (display->tui && now >= next_clock &&
+			    now >= display->tui_state.clock_poll_not_before) {
+				struct options clock_opts = *cmd_opts;
+
+				if (clock_opts.timeout_ms < 0 || clock_opts.timeout_ms > 250)
+					clock_opts.timeout_ms = 250;
+				watch_tui_refresh_clock(display, &clock_opts, false);
+				next_clock = milliseconds_after(monotonic_milliseconds(), 5000);
+				clearok(stdscr, true);
+				watch_tui_render(display);
+				continue;
+			}
+#endif
 			uint64_t next = next_led < next_log ? next_led : next_log;
 			uint64_t remaining = next > now ? next - now : 0;
 			int wait_ms = remaining > INT_MAX ? INT_MAX : (int)remaining;
@@ -8393,42 +8961,60 @@ cleanup:
 	return ret;
 }
 
-static int do_watch_command(const struct options *opts, int argc, char **argv,
-			    int command_index)
+static int run_watch_command(const struct options *opts,
+			      struct watch_options *watch, const struct wait_options *startup)
 {
 	struct watch_signal_state signals;
-	struct watch_options watch;
 	struct watch_display display;
 	struct led_profile profile;
 	struct options cmd_opts;
 	int ret;
 
-	if (parse_watch_args(argc, argv, command_index + 1, &watch))
-		return 2;
-	watch.show_annotations |= opts->show_annotations;
+	watch->show_annotations |= opts->show_annotations;
 	watch_stop_requested = 0;
-	if (watch_display_init(&display, &watch))
+	if (watch_display_init(&display, watch))
 		return 1;
 	if (install_watch_signal_handlers(&signals)) {
 		watch_display_finish(&display);
 		return 1;
 	}
-
 	l1_wait_input_hook = watch_display_input_hook;
 	l1_wait_input_context = &display;
 	l1_wait_cancel_enabled = true;
-	if (prepare_command_options(opts, &cmd_opts))
+#ifdef SGIL1_WITH_TUI
+	if (display.tui) {
+		ret = watch_tui_connect(opts, &cmd_opts, &display, &profile, startup);
+		if (!ret)
+			ret = run_watch_scheduler(opts, &cmd_opts, watch, &display, &profile);
+		else
+			ret = ret < 0 ? 1 : 0;
+	} else
+#else
+	(void)startup;
+#endif
+	if (acquire_sgil1_lock() || prepare_command_options(opts, &cmd_opts))
 		ret = watch_stop_requested ? 0 : 1;
 	else {
 		watch_display_read_led_profile(&display, &cmd_opts, &profile);
-		ret = run_watch_scheduler(opts, &cmd_opts, &watch, &display, &profile);
+		ret = run_watch_scheduler(opts, &cmd_opts, watch, &display, &profile);
 	}
 	l1_wait_cancel_enabled = false;
 	l1_wait_input_hook = NULL;
 	l1_wait_input_context = NULL;
 	restore_watch_signal_handlers(&signals);
 	watch_display_finish(&display);
+	release_sgil1_lock();
 	return ret;
+}
+
+static int do_watch_command(const struct options *opts, int argc, char **argv,
+			    int command_index)
+{
+	struct watch_options watch;
+
+	if (parse_watch_args(argc, argv, command_index + 1, &watch))
+		return 2;
+	return run_watch_command(opts, &watch, NULL);
 }
 
 static bool debug_arg_is_option(const char *arg)
@@ -9262,6 +9848,14 @@ static int do_wait(const struct options *opts, const struct wait_options *wait)
 	ret = validate_wait_power_action(opts, wait);
 	if (ret)
 		return ret;
+	if (wait->tui) {
+		struct watch_options watch;
+		char *tui_args[] = { "--tui" };
+
+		if (parse_watch_args(1, tui_args, 0, &watch))
+			return 2;
+		return run_watch_command(opts, &watch, wait);
+	}
 
 	for (;;) {
 		struct options follow_opts;
@@ -9509,7 +10103,7 @@ int main(int argc, char **argv)
 		return do_wait(&opts, &wait);
 	}
 
-	if (command_uses_l1_transaction(cmd) && acquire_sgil1_lock())
+	if (strcmp(cmd, "watch") && command_uses_l1_transaction(cmd) && acquire_sgil1_lock())
 		return 1;
 
 	if (!strcmp(cmd, "probe"))

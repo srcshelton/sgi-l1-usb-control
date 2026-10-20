@@ -846,6 +846,19 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
 
+    def test_wait_tui_rejects_text_only_timers(self):
+        for option in (["--wait-timeout", "1"], ["--keepalive", "1"]):
+            proc = self.run_ctl(["wait", "--tui", *option])
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("apply to text mode", proc.stderr)
+
+    def test_wait_tui_prearmed_power_requires_force(self):
+        for option in ("--power-up", "--power-down", "--reset"):
+            proc, log = self.run_with_log(["wait", "--tui", option])
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("requires --force", proc.stderr)
+            self.assertNotIn("CMD ", log)
+
     def test_wait_follow_requires_power_action(self):
         proc = self.run_ctl(["wait", "--follow"])
 

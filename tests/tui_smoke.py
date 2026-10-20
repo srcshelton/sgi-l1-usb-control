@@ -177,9 +177,8 @@ def run_led_annotation_smoke():
             initial = plain_text(redraw(proc, master))
             if expected not in initial:
                 raise AssertionError(f"retained/qualified LED missing: {initial!r}")
-            if b"Altix image" in extra_env.get("SGIL1_MOCK_VERSION_RESPONSE", "").encode():
-                if b"Console last active: never" not in initial:
-                    raise AssertionError("unqualified firmware affected console activity")
+            if b"Console last active: never" in initial:
+                raise AssertionError("received LED output did not update console activity")
             if extra_args:
                 if b"source:" not in initial:
                     raise AssertionError("TUI ignored --show-annotations")
