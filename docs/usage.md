@@ -115,7 +115,9 @@ with no input uses the displayed timestamped filename. Relative paths use
 the first existing directory where a private file can be created, checked in
 this order: `TMPDIR`, `TMP`, `XDG_RUNTIME_DIR`, `/var/tmp`, `/tmp`.
 The chosen directory is shown in the prompt. **Ctrl-U** clears input, and the
-arrow, Home/End, Delete and Backspace keys edit it. Missing directories are
+arrow, Home/End, Delete and Backspace keys edit it. A visible cursor marks
+filename entry and word-confirmation prompts, and disappears as soon as input
+is accepted or dismissed. Missing directories are
 reported as errors; they are not created automatically.
 
 An existing non-empty file requires **o** to overwrite or **a** to append.
@@ -129,7 +131,9 @@ to create and replace files in the destination directory. An error explains
 what failed, and **Return** lets you edit the path and retry the same snapshot.
 
 After success, the **Buffer saved** dialog displays the full resolved path
-and stays open until **Return**. **Up/Down** scroll long paths and messages.
+and stays open until **Return**. The confirmation shows the message and path
+with Close and optional Copy path actions, without position counters or scroll
+instructions.
 If a suitable clipboard helper is available, **c Copy path** copies only the
 file path. Helpers are run directly with the path on standard input; path
 characters are never interpreted by a shell. Copy failures are shown without
@@ -153,6 +157,11 @@ and **Left/Right** (or **<**/**>**) for columns. **Home** returns to the top
 left; **End** reaches the final rows. Resizing the terminal recalculates the
 view and clamps its scroll positions.
 
+A ruler separates the L1 output from the footer. The footer groups its keys
+on the right, with visible ranges such as `Lines 1-40 of 42` on the left.
+Line and column ranges appear only for axes that can scroll. Trailing blank
+lines are excluded from the scrollable output.
+
 **r** refreshes the reading; the view shows when the last successful reading
 was taken. Refresh failures retain the previous table and mark the error.
 **Return**, **Esc** or **e** closes the view. LED/log monitoring continues
@@ -173,7 +182,9 @@ interrupt USB; **s** sets the L1 clock and timezone from the machine running
 `sgil1ctl`. The menu shows the L1 date and its approximate difference from
 that machine's time, using years/days or smaller units as appropriate.
 
-Type `YES` and press **Return** to send the selected command once. Blank or
+Selecting **u** powers on a verified off host without a `YES` prompt; host
+state is checked again immediately before the command is sent. Other actions
+require typing `YES` and pressing **Return** to send the command once. Blank or
 other input followed by **Return** aborts the action and returns to the menu.
 **Esc** or **\*** closes Operator controls; **q** still quits the application.
 If the L1 requests a second power-down signal in its command response or in

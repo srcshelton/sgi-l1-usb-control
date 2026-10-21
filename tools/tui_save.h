@@ -391,7 +391,7 @@ static int tui_save_commit(struct tui_save *save)
 	staged = false;
 	if (source >= 0)
 		close(source);
-	snprintf(save->message, sizeof(save->message), "%s %zu bytes. Up/Down scroll path.",
+	snprintf(save->message, sizeof(save->message), "%s %zu bytes.",
 		 save->append ? "Appended" : "Saved", save->bytes);
 	{
 		int directory = openat(save->directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);

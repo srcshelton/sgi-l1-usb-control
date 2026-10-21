@@ -62,11 +62,12 @@ def check_pane_controls(capture, send, resize):
         operator_row = next(i for i, line in enumerate(lines) if "Operator controls" in line)
         save_row = next(i for i, line in enumerate(lines) if "Save buffer" in line)
         env_row = next(i for i, line in enumerate(lines) if "Environment" in line)
-        if operator_row + 1 != save_row or env_row != save_row + (0 if compact else 1) or env_row + 1 != rows[0]:
-            raise AssertionError(f"Operator controls is not first in Help:\n{rendered}")
+        observation_row = next(i for i, line in enumerate(lines) if ("a view:" if compact else "Observation view") in line)
+        if operator_row + 1 != env_row or env_row + 1 != rows[0] or save_row + 1 != observation_row:
+            raise AssertionError(f"Incorrect action order in Help:\n{rendered}")
         if rows != sorted(rows) or rows[1] not in (rows[0], rows[0] + 1) or rows[3] != rows[2] + 1:
             raise AssertionError(f"wrong help order:\n{rendered}")
-        if rows[-1] != rows[-2] + 1:
+        if rows[-1] not in (rows[-2], rows[-2] + 1):
             raise AssertionError(f"Redraw and Close are not adjacent:\n{rendered}")
         send(b"\r")
 
@@ -160,8 +161,36 @@ def check_environment(capture, send, resize, command_log, environment):
     expect(" Environment ")
     expect("Environmental monitoring is enabled")
     expect("Warning Limits     Fault Limits       Current")
+    rendered = capture()
+    footer = next(line for line in rendered.split("\n") if "Lines " in line)
+    if "Cols " in footer or "Arrows PgUp PgDn | R Refresh | Return/Esc Close" not in footer:
+        raise AssertionError(f"Environment footer did not group keys/conditional ranges: {footer!r}")
+    if not re.search(r"Lines 1-\d+ of 41", footer):
+        raise AssertionError(f"Environment footer did not report a visible range: {footer!r}")
+    lines = rendered.split("\n")
+    title = next(line for line in lines if " Environment " in line)
+    border = re.search(r"TPP Environment P+W", title)
+    keys = "Arrows PgUp PgDn | R Refresh | Return/Esc Close"
+    if not border or footer.index(keys) + len(keys) != border.end() - 2 or footer.index("Lines ") != border.start() + 2:
+        raise AssertionError("Environment footer is not left/right aligned")
+    ruler = lines[lines.index(footer) - 1]
+    if not any(char != " " and char * 20 in ruler for char in set(ruler)):
+        raise AssertionError("Environment output has no footer separator")
     if env_count() != 1:
         raise AssertionError("Environment entry did not issue one env request")
+    longest = max(len(line) for line in environment.read_text().rstrip().splitlines())
+    resize(24, 60)
+    expect("Lines 1-11 of 41")
+    expect(f"Cols 1-54 of {longest}")
+    expect("R Refresh | Return/Esc Close")
+    send(b"\x06")
+    expect("Lines 12-22 of 41")
+    send(b"\x02")
+    expect("Lines 1-11 of 41")
+    send(b">")
+    expect(f"Cols 2-55 of {longest}")
+    send(b"\033OH")
+    resize(24, 120)
     send(b"\033OF")  # End reaches the final temperature rows.
     expect("Not currently available")
     send(b"\033OH")
@@ -169,15 +198,26 @@ def check_environment(capture, send, resize, command_log, environment):
     resize(80, 120)
     rendered = expect("Environmental monitoring is enabled")
     expect("Not currently available")
+    if "Lines " in rendered or "Cols " in rendered:
+        raise AssertionError("Environment showed position counters when all output fits")
     lines = rendered.split("\n")
     top = next(i for i, line in enumerate(lines) if " Environment " in line)
-    bottom = next(i for i, line in enumerate(lines) if "r Refresh | Return/Esc Close" in line) + 1
-    if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().splitlines()) + 5:
+    bottom = next(i for i, line in enumerate(lines) if "R Refresh | Return/Esc Close" in line) + 1
+    if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().rstrip().splitlines()) + 5:
         raise AssertionError("Environment did not size to content with three-row margins")
+    resize(40, 40)
+    expect("Lines 1-26 of 41")
+    expect(f"Cols 1-34 of {longest}")
+    expect("Arrows PgUp PgDn")
+    expect("R Refresh")
+    expect("Return/Esc")
     resize(11, 40)
     send(b">" * 100)
     send(b"\033OF")
     expect("available")
+    rendered = expect("R Refresh | Return/Esc")
+    if not any(char != " " and char * 20 in rendered.split("\n")[5] for char in set(rendered.split("\n")[5])):
+        raise AssertionError("minimum-size Environment view lost its footer ruler")
     resize(24, 120)
     send(b"\033OH")
     sample = environment.read_text()
@@ -276,26 +316,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Action unavailable: host is off")
     if "Confirm:" in capture() or commands().count("CMD power check") <= checks:
         raise AssertionError("unavailable action was not rechecked/blocked")
-    select(b"u")
-    send(b"NO\r")
-    expect("Host: off")
-    if "Confirm:" in capture() or sent():
-        raise AssertionError("invalid confirmation did not abort to the menu")
-    select(b"u")
-    send(b"\r")
-    if "Confirm:" in capture() or sent():
-        raise AssertionError("blank confirmation did not abort to the menu")
-    select(b"u")
-    power_file.write_text("on")  # External state change while the prompt is open.
-    send(b"YES\r")
-    expect("Host: on")
-    if sent():
-        raise AssertionError("state change during confirmation did not cancel power up")
-    power_file.write_text("off")
-    send(b"\033*")
-    expect("Host: off")
-    select(b"U")
-    send(b"YES\r")
+    send(b"U")  # A verified off host powers on without typing YES.
     expect("power up: command acknowledged")
     if sent() != ["CMD power up"]:
         raise AssertionError(f"wrong power-up commands: {sent()}")
@@ -305,6 +326,22 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     send(b"*")
     expect("Host: on")
     expect("*u Power up")
+    select(b"r")
+    send(b"NO\r")
+    expect("Host: on")
+    if "Confirm:" in capture() or sent() != ["CMD power up"]:
+        raise AssertionError("invalid reset confirmation did not abort")
+    select(b"r")
+    send(b"\r")
+    if "Confirm:" in capture() or sent() != ["CMD power up"]:
+        raise AssertionError("blank reset confirmation did not abort")
+    select(b"r")
+    power_file.write_text("off")
+    send(b"YES\r")
+    if sent() != ["CMD power up"]:
+        raise AssertionError("host-state change during reset confirmation was ignored")
+    power_file.write_text("on")
+    send(b"\033*")
     select(b"d")
     send(b"YES\r")
     expect("Second power-down signal")
@@ -382,6 +419,8 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
     submit(path)
     expect("Buffer saved")
     expect("c Copy path")
+    if "Rows " in capture() or "Up/Down scroll" in capture():
+        raise AssertionError("Buffer saved still offers scrolling or position counters")
     original = path.read_text()
     if "voltage nominal" not in original or "previous message repeated" in original:
         raise AssertionError(f"Save omitted raw/folded log contents: {original}")
@@ -462,7 +501,7 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
     send(b"\033OB" * 100)
     rendered = capture()
     # The basename can wrap at different columns as the runner path changes.
-    visible_path = "".join(row[3:37].rstrip() for row in rendered.split("\n")[1:6])
+    visible_path = "".join(row[3:37].rstrip() for row in rendered.split("\n")[1:8])
     if "end-of-long-path.txt" not in visible_path:
         raise AssertionError(f"last page omitted the full filename: {visible_path!r}\n{rendered}")
     send(b"\033OA")
@@ -484,7 +523,6 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
 def check_operator_timeout(capture, send, command_log):
     send(b"*")
     send(b"u")
-    send(b"YES\r")
     rendered = capture()
     if "outcome unknown" not in rendered:
         raise AssertionError(f"timeout was not reported as uncertain:\n{rendered}")
@@ -593,7 +631,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     helper = helpers / "pbcopy"
     if exercise_controls:
         helpers.mkdir()
-        environment.write_text((ROOT / "tests" / "fixtures" / "env.txt").read_text())
+        environment.write_text((ROOT / "tests" / "fixtures" / "env.txt").read_text() + "\n \n\t\n")
         helper.write_text("#!/bin/sh\n/bin/cat > \"$SGIL1_TEST_CLIPBOARD\"\n")
         helper.chmod(0o700)
     power_file.write_text("off" if exercise_controls or operator_timeout or wait_mode in ("up", "cli", "unconfirmed") else "on")

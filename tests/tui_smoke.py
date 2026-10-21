@@ -205,6 +205,48 @@ def run_led_annotation_smoke():
             raise AssertionError(f"LED annotation TUI exited with {proc.returncode}")
 
 
+def run_text_cursor_smoke():
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+    env = os.environ.copy()
+    env.update(TERM="xterm-256color", LD_PRELOAD=str(MOCK), SGIL1_MOCK="1",
+               SGIL1_MOCK_WATCH="1", SGIL1_MOCK_POWER="on")
+    proc = subprocess.Popen([str(BIN), "--device", "/dev/sgi-l1/l1-0",
+                             "--status-device", "/dev/sgi-l1/status", "--timeout", "10",
+                             "watch", "--tui", "--log-interval", "100", "--led-interval", "100"],
+                            env=env, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    output = bytearray()
+
+    def step(keys, visible):
+        os.write(master, keys)
+        drain(master, output, 0.5)
+        modes = re.findall(rb"\x1b\[\?25([hl])", output)
+        if not modes or (modes[-1] == b"h") != visible:
+            raise AssertionError(f"wrong text cursor visibility after {keys!r}")
+
+    try:
+        drain(master, output, 0.7)
+        step(b"s", True)
+        step(b"/no-such-sgil1-directory/file\r", False)
+        step(b"\r", True)
+        step(b"\033", False)
+        step(b"*", False)
+        step(b"r", True)
+        step(b"NO\r", False)
+        step(b"\033", False)
+        os.write(master, b"q")
+        proc.wait(timeout=3)
+        if proc.returncode:
+            raise AssertionError("text cursor fixture did not exit cleanly")
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=3)
+    print("PASS text cursor: filename entry, retry, security prompt, acceptance and dismissal")
+
+
 def main():
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
@@ -525,6 +567,7 @@ def main():
         raise AssertionError(f"TUI exited with status {proc.returncode}")
     if b"\x1b[38;5;124m" not in output or b"\x1b[38;5;54m" not in output:
         raise AssertionError("TUI did not render its restrained colour accents")
+    run_text_cursor_smoke()
     run_basic_palette_smoke()
     run_led_annotation_smoke()
     return 0

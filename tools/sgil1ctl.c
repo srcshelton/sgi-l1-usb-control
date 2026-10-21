@@ -483,7 +483,7 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  h, ?                  show Help; Esc or Return closes it\n"
 			"  s                     save the full selected buffer to a file\n"
 			"  e                     show environmental monitoring; r refreshes\n"
-			"  *                     operator power/reset/clock controls; YES confirms\n"
+			"  *                     operator controls; YES for power-down/reset/clock\n"
 			"  Ctrl-L                redraw the screen\n"
 			"  q                     quit\n");
 		command_usage_footer(out);
@@ -6726,28 +6726,28 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 
 	mvwaddnstr(window, 5, 4, "*", 18);
 	mvwaddnstr(window, 5, 24, "Operator controls", 30);
-	mvwaddnstr(window, 6, 4, "s", 18);
-	mvwaddnstr(window, 6, 24, "Save buffer", 30);
-	mvwaddnstr(window, 7, 4, "e", 18);
-	mvwaddnstr(window, 7, 24, "Environment", 30);
-	mvwaddnstr(window, 8, 4, "Tab", 18);
-	mvwaddnstr(window, 8, 24, "Select pane", 30);
-	watch_tui_help_text(window, 8, 56, "Log", 3,
+	mvwaddnstr(window, 6, 4, "e", 18);
+	mvwaddnstr(window, 6, 24, "Environment", 30);
+	mvwaddnstr(window, 7, 4, "Tab", 18);
+	mvwaddnstr(window, 7, 24, "Select pane", 30);
+	watch_tui_help_text(window, 7, 56, "Log", 3,
 			    state->focus == WATCH_TUI_FOCUS_LOG);
-	mvwaddnstr(window, 8, 60, "/", 1);
-	watch_tui_help_text(window, 8, 62, "LEDs", 4,
+	mvwaddnstr(window, 7, 60, "/", 1);
+	watch_tui_help_text(window, 7, 62, "LEDs", 4,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
-	mvwaddnstr(window, 9, 4, "Left/Right, </>", 18);
+	mvwaddnstr(window, 8, 4, "Left/Right, </>", 18);
 	if (COLS < 100)
-		mvwaddnstr(window, 9, 56, "Also ^/v when stacked", width - 60);
-	mvwaddnstr(window, 9, 24, COLS >= 100 ?
+		mvwaddnstr(window, 8, 56, "Also ^/v when stacked", width - 60);
+	mvwaddnstr(window, 8, 24, COLS >= 100 ?
 		   "Move divider left/right" : "Shrink/grow selected pane", 30);
-	mvwaddnstr(window, 10, 4, "Up/Down, k/j", 18);
-	mvwaddnstr(window, 10, 24, "Scroll by line", 30);
-	mvwaddnstr(window, 11, 4, "PgUp/PgDn, ^B/^F", 18);
-	mvwaddnstr(window, 11, 24, "Scroll by page", 30);
-	mvwaddnstr(window, 12, 4, "End, g", 18);
-	mvwaddnstr(window, 12, 24, "Return to live output", 30);
+	mvwaddnstr(window, 9, 4, "Up/Down, k/j", 18);
+	mvwaddnstr(window, 9, 24, "Scroll by line", 30);
+	mvwaddnstr(window, 10, 4, "PgUp/PgDn, ^B/^F", 18);
+	mvwaddnstr(window, 10, 24, "Scroll by page", 30);
+	mvwaddnstr(window, 11, 4, "End, g", 18);
+	mvwaddnstr(window, 11, 24, "Return to live output", 30);
+	mvwaddnstr(window, 12, 4, "s", 18);
+	mvwaddnstr(window, 12, 24, "Save buffer", 30);
 	mvwaddnstr(window, 13, 4, "a", 18);
 	mvwaddnstr(window, 13, 24, "Observation view", 30);
 	watch_tui_help_text(window, 13, 56, "Filtered", 8, !state->all_mode);
@@ -6786,29 +6786,34 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 {
 	int height = getmaxy(window);
 	int redraw = height - 3;
-	bool small = height < 12;
+	bool small = height < 13;
 	char palette_setting[24], text[96];
 
 	watch_tui_palette_setting(state, palette_setting, sizeof(palette_setting), true);
 	mvwaddnstr(window, 1, 2, "* Operator controls", width - 4);
-	mvwaddnstr(window, 2, 2, "s Save buffer | e Environment", width - 4);
+	mvwaddnstr(window, 2, 2, "e Environment", width - 4);
 	mvwaddnstr(window, 3, 2, small ? "Tab pane </> ^/v shrink/grow pane" : "Tab select pane", width - 4);
 	if (!small)
 		mvwaddnstr(window, 4, 2, COLS >= 100 ?
 			"Left/Right </> move divider" : "L/R </> ^/v shrink/grow pane", width - 4);
 	mvwaddnstr(window, small ? 4 : 5, 2, "U/D k/j line ^B/^F page g live", width - 4);
+	mvwaddnstr(window, small ? 5 : 6, 2, "s Save buffer", width - 4);
 	snprintf(text, sizeof(text), "a view:%s t time:%s m mono",
 		 state->all_mode ? "All" : "Filtered", state->show_led_timestamps ? "On" : "Off");
-	mvwaddnstr(window, small ? 5 : 6, 2, text, width - 4);
+	mvwaddnstr(window, small ? 6 : 7, 2, text, width - 4);
 	snprintf(text, sizeof(text), "p sources:%s%s%s", state->show_annotations ? "On" : "Off",
 		 small ? " c palette:" : "", small ? palette_setting : "");
-	mvwaddnstr(window, small ? 6 : 7, 2, text, width - 4);
+	mvwaddnstr(window, small ? 7 : 8, 2, text, width - 4);
 	if (!small) {
 		snprintf(text, sizeof(text), "c palette:%s", palette_setting);
-		mvwaddnstr(window, 8, 2, text, width - 4);
+		mvwaddnstr(window, 9, 2, text, width - 4);
 	}
-	mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
-	mvwaddnstr(window, redraw + 1, 2, "h/?/Esc/Ret close", width - 4);
+	if (height == 10)
+		mvwaddnstr(window, height - 2, 2, "^L redraw | h/?/Esc/Ret close", width - 4);
+	else {
+		mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
+		mvwaddnstr(window, redraw + 1, 2, "h/?/Esc/Ret close", width - 4);
+	}
 }
 
 /* Modal views share Help's border and palette; callers may size to content. */
@@ -7071,6 +7076,42 @@ static size_t watch_tui_save_text(WINDOW *window, const char *text, int first, i
 	return total;
 }
 
+static bool watch_tui_text_input_active(const struct watch_tui_state *state)
+{
+	if (state->save.phase != TUI_SAVE_NONE)
+		return state->save.phase == TUI_SAVE_PATH && !state->save.capture_pending;
+	return (state->operator_visible || state->waiting_for_usb) && !state->action_busy &&
+		!state->operator_refresh && state->requested_action == WATCH_TUI_ACTION_NONE &&
+		state->pending_action == WATCH_TUI_ACTION_NONE &&
+		state->selected_action != WATCH_TUI_ACTION_NONE &&
+		state->selected_action != WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+}
+
+static int watch_tui_input_cells(const char *text, size_t bytes)
+{
+	mbstate_t conversion = { 0 };
+	int cells = 0;
+	size_t offset = 0;
+
+	while (offset < bytes) {
+		wchar_t character;
+		size_t length = mbrtowc(&character, text + offset, bytes - offset, &conversion);
+		int width;
+
+		if (!length || length == (size_t)-1 || length == (size_t)-2) {
+			length = 1;
+			width = 1;
+			memset(&conversion, 0, sizeof(conversion));
+		} else {
+			width = wcwidth(character);
+			if (width < 0) width = 1;
+		}
+		cells += width;
+		offset += length;
+	}
+	return cells;
+}
+
 static void watch_tui_draw_save(struct watch_tui_state *state)
 {
 	struct tui_save *save = &state->save;
@@ -7106,6 +7147,7 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 			start++;
 		mvwaddnstr(window, height - 4, 2, save->input + start, width - 4);
 		mvwaddnstr(window, height - 2, 2, "Return Save | Esc Cancel | ^U Clear", width - 4);
+		wmove(window, height - 4, 2 + watch_tui_input_cells(save->input + start, save->cursor - start));
 	} else if (save->phase == TUI_SAVE_WRITING || save->capture_pending) {
 		mvwaddnstr(window, 2, 2, "Saving buffer...", width - 4);
 	} else {
@@ -7116,11 +7158,13 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 		size_t count;
 
 		snprintf(body, sizeof(body), "%s\n\n%s", message, *save->path ? save->path : save->input);
-		count = watch_tui_save_text(window, body, 1, height - 5, width, &scroll);
+		count = watch_tui_save_text(window, body, 1,
+			save->phase == TUI_SAVE_DONE ? height - 3 : height - 5, width, &scroll);
 		save->path_scroll = scroll;
 		snprintf(line, sizeof(line), "Rows %zu-%zu/%zu; Up/Down scroll",
 			 scroll + 1, scroll + (size_t)(height - 5) < count ? scroll + (size_t)(height - 5) : count, count);
-		mvwaddnstr(window, height - 3, 2, line, width - 4);
+		if (save->phase != TUI_SAVE_DONE)
+			mvwaddnstr(window, height - 3, 2, line, width - 4);
 		mvwaddnstr(window, height - 2, 2, save->phase == TUI_SAVE_CHOICE ?
 			"o Overwrite a Append Return Cancel" : save->phase == TUI_SAVE_ERROR ?
 			"Return Edit path | Esc Cancel" : save->clipboard_kind ?
@@ -7141,6 +7185,7 @@ static void watch_tui_environment_bounds(struct watch_tui_state *state,
 					 int rows, int cells, size_t *count, size_t *longest)
 {
 	const char *line = watch_tui_environment_text(state);
+	size_t total = 0;
 
 	*count = *longest = 0;
 	while (*line) {
@@ -7148,9 +7193,15 @@ static void watch_tui_environment_bounds(struct watch_tui_state *state,
 
 		if (length && line[length - 1] == '\r')
 			length--;
-		if (length > *longest)
-			*longest = length;
-		(*count)++;
+		bool nonblank = false;
+
+		total++;
+		for (size_t i = 0; i < length; i++)
+			if (!isspace((unsigned char)line[i])) nonblank = true;
+		if (nonblank) {
+			*count = total;
+			if (length > *longest) *longest = length;
+		}
 		line = strchr(line, '\n');
 		if (!line)
 			break;
@@ -7162,9 +7213,16 @@ static void watch_tui_environment_bounds(struct watch_tui_state *state,
 		state->environment_column = *longest > (size_t)cells ? *longest - (size_t)cells : 0;
 }
 
+static void watch_tui_environment_size(struct watch_tui_state *state,
+		int *width, int *height, int *first, int *rows, size_t *count, size_t *longest);
+
 static void watch_tui_environment_key(struct watch_tui_state *state, int key)
 {
-	size_t page = LINES > 11 ? (size_t)(LINES - 11) : 1;
+	int width, height, first, rows;
+	size_t count, longest, page;
+
+	watch_tui_environment_size(state, &width, &height, &first, &rows, &count, &longest);
+	page = rows > 0 ? (size_t)rows : 1;
 
 	switch (key) {
 	case 27: case '\n': case '\r': case KEY_ENTER: case 'e': case 'E': case 'q': case 'Q':
@@ -7187,31 +7245,85 @@ static void watch_tui_environment_key(struct watch_tui_state *state, int key)
 	}
 }
 
+struct watch_tui_environment_footer {
+	char line_range[64], column_range[64], position[132];
+	const char *keys[3];
+	int rows;
+};
+
+static void watch_tui_environment_footer(const struct watch_tui_state *state,
+					 int cells, int visible, size_t count, size_t longest,
+					 struct watch_tui_environment_footer *footer)
+{
+	const char *all_keys = "Arrows PgUp PgDn | R Refresh | Return/Esc Close";
+	size_t line_end = state->environment_row + (size_t)visible;
+	size_t column_end = state->environment_column + (size_t)cells;
+	size_t left;
+
+	memset(footer, 0, sizeof(*footer));
+	if (count > (size_t)visible)
+		snprintf(footer->line_range, sizeof(footer->line_range), "Lines %zu-%zu of %zu",
+			state->environment_row + 1, line_end < count ? line_end : count, count);
+	if (longest > (size_t)cells)
+		snprintf(footer->column_range, sizeof(footer->column_range), "Cols %zu-%zu of %zu",
+			state->environment_column + 1, column_end < longest ? column_end : longest, longest);
+	snprintf(footer->position, sizeof(footer->position), "%s%s%s", footer->line_range,
+		*footer->line_range && *footer->column_range ? " | " : "", footer->column_range);
+	left = strlen(footer->position);
+	if (strlen(all_keys) + left + (left ? 1 : 0) <= (size_t)cells) {
+		footer->rows = 1;
+		footer->keys[0] = all_keys;
+	} else {
+		left = strlen(footer->line_range) > strlen(footer->column_range) ? strlen(footer->line_range) : strlen(footer->column_range);
+		if (left + (left ? 1 : 0) + strlen("R Refresh | Return/Esc Close") <= (size_t)cells) {
+			footer->rows = 2;
+			footer->keys[0] = "Arrows PgUp PgDn";
+			footer->keys[1] = "R Refresh | Return/Esc Close";
+		} else {
+			footer->rows = 3;
+			footer->keys[0] = "Arrows PgUp PgDn";
+			footer->keys[1] = "R Refresh";
+			footer->keys[2] = "Return/Esc";
+		}
+	}
+}
+
 static void watch_tui_environment_size(struct watch_tui_state *state,
 				       int *width, int *height, int *first, int *rows,
 				       size_t *count, size_t *longest)
 {
 	size_t saved_row = state->environment_row, saved_column = state->environment_column;
 	size_t desired_width;
-	int maximum_height = LINES - 6; /* Always reserve three rows above and below. */
+	int maximum_height = LINES - 6, footer_rows = 1;
+	struct watch_tui_environment_footer footer;
 
 	watch_tui_environment_bounds(state, 1, 1, count, longest);
 	state->environment_row = saved_row;
 	state->environment_column = saved_column;
 	desired_width = *longest;
-	if (desired_width < strlen(state->environment_status))
-		desired_width = strlen(state->environment_status);
-	if (desired_width < 30)
-		desired_width = 30;
+	if (desired_width < strlen(state->environment_status)) desired_width = strlen(state->environment_status);
+	if (desired_width < 30) desired_width = 30;
 	*width = desired_width > (size_t)(COLS - 6) ? COLS - 2 : (int)desired_width + 4;
-	*height = *count > (size_t)(maximum_height > 5 ? maximum_height - 5 : 0) ?
-		maximum_height : (int)*count + 5;
-	if (*height < 6 && maximum_height >= 6)
-		*height = 6;
-	if (*height > maximum_height)
-		*height = maximum_height;
-	*first = *height < 6 ? 1 : 2;
-	*rows = *height - (*height < 6 ? 3 : 5);
+	for (int pass = 0; pass < 3; pass++) {
+		int overhead = footer_rows + 4;
+
+		*height = *count > (size_t)(maximum_height > overhead ? maximum_height - overhead : 0) ?
+			maximum_height : (int)*count + overhead;
+		if (*height < overhead + 1 && maximum_height >= overhead + 1) *height = overhead + 1;
+		if (*height > maximum_height) *height = maximum_height;
+		if (*height < overhead + 1) {
+			/* Preserve a usable one-line viewer in a 40x10 terminal. */
+			*first = 1;
+			*rows = *height - 3;
+			break;
+		}
+		*first = 2;
+		*rows = *height - overhead;
+		watch_tui_environment_bounds(state, *rows, *width - 4, count, longest);
+		watch_tui_environment_footer(state, *width - 4, *rows, *count, *longest, &footer);
+		if (footer.rows <= footer_rows) break;
+		footer_rows = footer.rows;
+	}
 	watch_tui_environment_bounds(state, *rows, *width - 4, count, longest);
 }
 
@@ -7221,25 +7333,22 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 	int width, height, row, first, rows;
 	size_t count, longest, index = 0;
 	const char *line;
-	char position[128];
+	struct watch_tui_environment_footer footer;
 
-	if (!state->environment_visible)
-		return;
+	if (!state->environment_visible) return;
 	watch_tui_environment_size(state, &width, &height, &first, &rows, &count, &longest);
 	window = watch_tui_sized_dialog(state, !strncmp(state->environment_status, "env failed:", 11) ?
 		" Environment: error " : " Environment ", width, height);
-	if (!window)
-		return;
+	if (!window) return;
 	row = first;
-	if (height >= 6)
+	if (first == 2)
 		mvwaddnstr(window, 1, 2, state->environment_requested ? "Reading L1 environment..." :
 			state->environment_status, width - 4);
 	line = watch_tui_environment_text(state);
-	while (*line && row < first + rows) {
+	while (*line && index < count && row < first + rows) {
 		size_t length = strcspn(line, "\n");
 
-		if (length && line[length - 1] == '\r')
-			length--;
+		if (length && line[length - 1] == '\r') length--;
 		if (index++ >= state->environment_row) {
 			if (length > state->environment_column) {
 				size_t available = length - state->environment_column;
@@ -7249,15 +7358,35 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 			row++;
 		}
 		line = strchr(line, '\n');
-		if (!line)
-			break;
+		if (!line) break;
 		line++;
 	}
-	snprintf(position, sizeof(position), "Line %zu/%zu col %zu | Arrows/PgUp/PgDn", count ? state->environment_row + 1 : 0,
-		count, state->environment_column + 1);
-	if (height >= 6)
-		mvwaddnstr(window, height - 3, 2, position, width - 4);
-	mvwaddnstr(window, height - 2, 2, "r Refresh | Return/Esc Close", width - 4);
+	if (first == 2) {
+		int separator = first + rows;
+		int footer_first = separator + 1;
+		int footer_rows = height - footer_first - 1;
+
+		mvwhline(window, separator, 1, ACS_HLINE, width - 2);
+		watch_tui_environment_footer(state, width - 4, rows, count, longest, &footer);
+		if (footer_rows == 1)
+			mvwaddnstr(window, footer_first, 2, footer.position, width - 4);
+		else {
+			int stats = (*footer.line_range ? 1 : 0) + (*footer.column_range ? 1 : 0);
+			int y = footer_first + footer_rows - stats;
+			if (*footer.line_range) mvwaddnstr(window, y++, 2, footer.line_range, width - 4);
+			if (*footer.column_range) mvwaddnstr(window, y, 2, footer.column_range, width - 4);
+		}
+		for (int i = 0; i < footer.rows && i < footer_rows; i++) {
+			int x = width - 2 - (int)strlen(footer.keys[i]);
+			mvwaddnstr(window, footer_first + i, x, footer.keys[i], width - x - 2);
+		}
+	} else {
+		const char *keys = " R Refresh | Return/Esc ";
+
+		/* Share the lower frame when three-row margins leave only a tiny view. */
+		mvwhline(window, height - 2, 1, ACS_HLINE, width - 2);
+		mvwaddnstr(window, height - 1, width - 2 - (int)strlen(keys), keys, width - 4);
+	}
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -7271,7 +7400,7 @@ static void watch_tui_draw_help(const struct watch_tui_state *state)
 
 	if (!state->help_visible)
 		return;
-	window = watch_tui_dialog(state, " Help ", wide ? 21 : (LINES < 12 ? 10 : 12), &width, &height);
+	window = watch_tui_dialog(state, " Help ", wide ? 21 : (LINES < 13 ? LINES : 13), &width, &height);
 	if (!window)
 		return;
 	if (wide)
@@ -7425,6 +7554,8 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 	if (height >= 16 || confirming || state->waiting_for_usb)
 		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ?
 			"q Quit application" : "Esc/* Back", width - 4);
+	if (watch_tui_text_input_active(state))
+		wmove(window, 6, 11 + (int)strlen(state->confirmation));
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -7496,6 +7627,7 @@ static void watch_tui_render(struct watch_display *display)
 		return;
 	watch_tui_drain_diagnostics(display);
 	if (LINES < 10 || COLS < 40) {
+		(void)curs_set(0);
 		erase();
 		mvaddnstr(0, 0, "sgil1ctl watch", COLS);
 		mvaddnstr(2, 0, "Terminal must be at least 40x10.", COLS);
@@ -7619,6 +7751,7 @@ static void watch_tui_render(struct watch_display *display)
 	watch_tui_draw_environment(state);
 	watch_tui_draw_operator(state);
 	watch_tui_draw_save(state);
+	(void)curs_set(watch_tui_text_input_active(state) ? 1 : 0);
 	doupdate();
 }
 
@@ -8990,7 +9123,10 @@ static void watch_tui_refresh_operator(struct watch_display *display,
 	state->requested_action = WATCH_TUI_ACTION_NONE;
 	if (selection != WATCH_TUI_ACTION_NONE && !watch_stop_requested) {
 		if (watch_tui_action_available(state, selection)) {
-			state->selected_action = selection;
+			if (selection == WATCH_TUI_ACTION_POWER_UP)
+				state->pending_action = selection;
+			else
+				state->selected_action = selection;
 			state->confirmation[0] = '\0';
 		} else {
 			snprintf(state->operator_notice, sizeof(state->operator_notice),

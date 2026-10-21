@@ -135,10 +135,10 @@ static void test_environment_geometry(void)
 	char wide[201];
 
 	LINES = 80; COLS = 120;
-	state.environment_text = strdup("one\n\n  columns 1234567890\nlast\n");
+	state.environment_text = strdup("one\n\n  columns 1234567890\nlast\n\n  \n\t\n");
 	assert(state.environment_text);
 	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
-	assert(count == 4 && height == 9 && rows == 4 && width == 34);
+	assert(count == 4 && height == 10 && rows == 4 && width == 34);
 	assert((LINES - height) / 2 >= 3 && first == 2);
 	state.environment_row = state.environment_column = SIZE_MAX;
 	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
@@ -159,6 +159,17 @@ static void test_environment_geometry(void)
 	assert(state.environment_requested);
 	watch_tui_environment_key(&state, '\n');
 	assert(!state.environment_visible && !state.environment_requested);
+	{
+		struct watch_tui_environment_footer footer;
+
+		state.environment_row = state.environment_column = 0;
+		watch_tui_environment_footer(&state, 71, 40, 42, 70, &footer);
+		assert(!strcmp(footer.line_range, "Lines 1-40 of 42") && !*footer.column_range && footer.rows == 1);
+		watch_tui_environment_footer(&state, 201, 42, 42, 200, &footer);
+		assert(!*footer.line_range && !*footer.column_range && !*footer.position);
+		watch_tui_environment_footer(&state, 34, 1, 1, 200, &footer);
+		assert(!*footer.line_range && !strcmp(footer.column_range, "Cols 1-34 of 200"));
+	}
 	LINES = saved_lines; COLS = saved_cols;
 	puts("PASS Environment geometry: live content dimensions, blank rows, margins, compact view and scroll bounds");
 }
@@ -194,6 +205,34 @@ static void test_diagnostic_capture(void)
 	puts("PASS diagnostics: stderr isolated, complete/partial lines retained, transient status and stderr restored");
 }
 
+static void test_text_input_cursor(void)
+{
+	struct watch_tui_state state = { 0 };
+
+	assert(!watch_tui_text_input_active(&state));
+	state.save.phase = TUI_SAVE_PATH;
+	assert(watch_tui_text_input_active(&state));
+	state.save.capture_pending = true;
+	assert(!watch_tui_text_input_active(&state));
+	state.save.capture_pending = false;
+	state.save.phase = TUI_SAVE_WRITING;
+	assert(!watch_tui_text_input_active(&state));
+	state.save.phase = TUI_SAVE_DONE;
+	assert(!watch_tui_text_input_active(&state));
+	state.save.phase = TUI_SAVE_NONE;
+	state.operator_visible = true;
+	state.selected_action = WATCH_TUI_ACTION_HOST_RESET;
+	assert(watch_tui_text_input_active(&state));
+	state.selected_action = WATCH_TUI_ACTION_NONE;
+	state.pending_action = WATCH_TUI_ACTION_HOST_RESET;
+	assert(!watch_tui_text_input_active(&state));
+	state.pending_action = WATCH_TUI_ACTION_NONE;
+	state.selected_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+	assert(!watch_tui_text_input_active(&state));
+	assert(watch_tui_input_cells("abc", 3) == 3);
+	puts("PASS text entry: cursor only for filename and word confirmation input");
+}
+
 static void test_confirmation(void)
 {
 	struct watch_tui_state state = { .operator_visible = true };
@@ -201,19 +240,19 @@ static void test_confirmation(void)
 	keys(&state, "u");
 	assert(state.requested_action == WATCH_TUI_ACTION_POWER_UP);
 	assert(state.selected_action == WATCH_TUI_ACTION_NONE);
-	select_ready(&state, WATCH_TUI_ACTION_POWER_UP);
+	select_ready(&state, WATCH_TUI_ACTION_HOST_RESET);
 	keys(&state, "\n");
 	assert(state.selected_action == WATCH_TUI_ACTION_NONE);
 	assert(state.operator_refresh && state.operator_visible);
-	select_ready(&state, WATCH_TUI_ACTION_POWER_UP);
+	select_ready(&state, WATCH_TUI_ACTION_HOST_RESET);
 	keys(&state, "YESno\n");
 	assert(state.selected_action == WATCH_TUI_ACTION_NONE);
 	assert(state.pending_action == WATCH_TUI_ACTION_NONE);
-	select_ready(&state, WATCH_TUI_ACTION_POWER_UP);
+	select_ready(&state, WATCH_TUI_ACTION_HOST_RESET);
 	keys(&state, "YEZ\bS\n");
-	assert(state.pending_action == WATCH_TUI_ACTION_POWER_UP);
+	assert(state.pending_action == WATCH_TUI_ACTION_HOST_RESET);
 	keys(&state, "dYES\n");
-	assert(state.pending_action == WATCH_TUI_ACTION_POWER_UP);
+	assert(state.pending_action == WATCH_TUI_ACTION_HOST_RESET);
 	state.pending_action = WATCH_TUI_ACTION_NONE;
 	select_ready(&state, WATCH_TUI_ACTION_HOST_RESET);
 	keys(&state, "YES\033");
@@ -620,6 +659,7 @@ int main(void)
 	}
 	test_repeats();
 	test_confirmation();
+	test_text_input_cursor();
 	test_second_power_down();
 	test_environment_geometry();
 	test_diagnostic_capture();

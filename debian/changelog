@@ -1,3 +1,25 @@
+sgi-l1-usb-control (0.1.62) unstable; urgency=medium
+
+  * Updated components since 0.1.61: user-space sgil1ctl, tests and
+    documentation; kernel module source is unchanged.
+  * Separate Environment output from its footer with a ruler. Group and
+    right-align navigation keys, show visible line/column ranges only
+    when scrolling is possible, and trim trailing blank lines.
+  * Page by the actual Environment viewport height, retain dynamic sizing
+    and three-row screen margins, and adapt the footer to narrow terminals.
+  * Move Save buffer immediately before Observation view in Help.
+  * Show the cursor during filename and exact-word confirmation entry,
+    and hide it as soon as input is accepted or dismissed.
+  * Simplify Buffer saved to its result, full path and close/copy choices,
+    without position counters or scrolling instructions.
+  * Allow Operator controls to power on a host confirmed off without
+    requiring YES. Retain fresh host-state checks before sending and
+    explicit confirmation for destructive operations and clock changes.
+  * Extend state and terminal regression coverage for Environment ranges,
+    footer layout, paging, cursor visibility and power-on behavior.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 21 Oct 2026 17:19:01 +0100
+
 sgi-l1-usb-control (0.1.61) unstable; urgency=medium
 
   * Updated components since 0.1.60: user-space sgil1ctl, tests, build
