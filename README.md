@@ -139,8 +139,14 @@ the **Filtered** and **All** views. Filtered LED states show their retained
 sample count; **t** shows the first and latest observation times. Press **\***
 to open operator controls for power up, power down, host reset, L1 reset and
 clock sync. The menu shows host state and clock difference; unavailable actions
-stay visible and marked. Each action requires typing `YES` and pressing
-**Return**; blank input aborts it. The status bar also shows L1 time and warns
+stay visible and marked. Selecting an action requires typing `YES` and pressing
+**Return**; blank input aborts it. If the L1 requests a second power-down signal,
+a follow-up **y**/**n** prompt offers to send it once. Press **s** in the monitoring view to save
+all retained data from the selected pane to a file, with overwrite/append
+choices and a full-path confirmation. Press **e** for an Environment dialog
+sized to the live `env` output, with scrolling and **r** to refresh. Transport
+diagnostics appear briefly in the status bar and remain in the log buffer.
+The status bar also shows L1 time and warns
 when it differs by more than five seconds from this machine.
 
 If USB is absent, the TUI waits in a dialog where you can arm clock or power

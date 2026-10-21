@@ -53,16 +53,18 @@ def check_pane_controls(capture, send, resize):
         send(b"?")
         rendered = capture()
         lines = rendered.rstrip("\n").split("\n")
-        entries = (["Tab select pane", "shrink/grow pane", "t time:",
+        entries = ([("Tab pane" if any("Tab pane" in line for line in lines) else "Tab select pane"), "shrink/grow pane", "t time:",
                     "p sources:", "^L redraw", "h/?/Esc/Ret close"] if compact else
                    ["Select pane", "Move divider left/right", "LED timestamps",
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
                 for entry in entries]
         operator_row = next(i for i, line in enumerate(lines) if "Operator controls" in line)
-        if operator_row + 1 != rows[0]:
+        save_row = next(i for i, line in enumerate(lines) if "Save buffer" in line)
+        env_row = next(i for i, line in enumerate(lines) if "Environment" in line)
+        if operator_row + 1 != save_row or env_row != save_row + (0 if compact else 1) or env_row + 1 != rows[0]:
             raise AssertionError(f"Operator controls is not first in Help:\n{rendered}")
-        if rows != sorted(rows) or rows[1] != rows[0] + 1 or rows[3] != rows[2] + 1:
+        if rows != sorted(rows) or rows[1] not in (rows[0], rows[0] + 1) or rows[3] != rows[2] + 1:
             raise AssertionError(f"wrong help order:\n{rendered}")
         if rows[-1] != rows[-2] + 1:
             raise AssertionError(f"Redraw and Close are not adjacent:\n{rendered}")
@@ -144,6 +146,75 @@ def check_pane_controls(capture, send, resize):
     print("PASS pane controls: focus, aliases, limits, wrapping, resize and help order", flush=True)
 
 
+def check_environment(capture, send, resize, command_log, environment):
+    def expect(text):
+        rendered = capture()
+        if text not in rendered:
+            raise AssertionError(f"missing {text!r}:\n{rendered}")
+        return rendered
+
+    def env_count():
+        return command_log.read_text().splitlines().count("CMD env")
+
+    send(b"?e")
+    expect(" Environment ")
+    expect("Environmental monitoring is enabled")
+    expect("Warning Limits     Fault Limits       Current")
+    if env_count() != 1:
+        raise AssertionError("Environment entry did not issue one env request")
+    send(b"\033OF")  # End reaches the final temperature rows.
+    expect("Not currently available")
+    send(b"\033OH")
+    expect("Environmental monitoring is enabled")
+    resize(80, 120)
+    rendered = expect("Environmental monitoring is enabled")
+    expect("Not currently available")
+    lines = rendered.split("\n")
+    top = next(i for i, line in enumerate(lines) if " Environment " in line)
+    bottom = next(i for i, line in enumerate(lines) if "r Refresh | Return/Esc Close" in line) + 1
+    if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().splitlines()) + 5:
+        raise AssertionError("Environment did not size to content with three-row margins")
+    resize(11, 40)
+    send(b">" * 100)
+    send(b"\033OF")
+    expect("available")
+    resize(24, 120)
+    send(b"\033OH")
+    sample = environment.read_text()
+    environment.write_text("ERROR: environmental controller unavailable\n")
+    send(b"r")
+    expect("env failed:")
+    expect("previous reading retained")
+    expect("Environmental monitoring is enabled")
+    environment.write_text("SGIL1_MOCK_TIMEOUT\n")
+    send(b"r")
+    expect("response timed out")
+    footer = capture().split("\n")[-2]
+    if "Transport:" not in footer or "Broken pipe" not in footer:
+        raise AssertionError(f"pipe-reset diagnostic disrupted the TUI: {footer!r}")
+    environment.write_text(sample.replace("0.188", "0.199"))
+    send(b"r")
+    expect("0.199")
+    if env_count() != 4:
+        raise AssertionError("Environment refresh issued duplicate requests")
+    commands = command_log.read_text().splitlines()
+    if commands[-1] not in ("CMD log", "CMD leds", "CMD date", "CMD date tz"):
+        raise AssertionError("monitoring did not continue while Environment was open")
+    send(b"\r")
+    if " Environment " in capture():
+        raise AssertionError("Return did not close Environment")
+    send(b"e")
+    if env_count() != 5:
+        raise AssertionError("reopening Environment did not refresh")
+    send(b"\033")
+    deadline = time.monotonic() + 6
+    while "Transport:" in capture().split("\n")[-2] and time.monotonic() < deadline:
+        send(b"")
+    if "Console last active:" not in capture().split("\n")[-2]:
+        raise AssertionError("pipe-reset status did not expire")
+    print("PASS Environment: full table, scrolling, resize, refresh, retained errors and continued monitoring", flush=True)
+
+
 def check_operator_controls(capture, send, resize, command_log, power_file):
     actions = {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}
 
@@ -171,15 +242,15 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     send(b"t")
     expect("samples; last")
     send(b"t")
-    send(b"uYES\r")
+    send(b"udrl")  # Power shortcuts remain inactive outside Operator controls.
     if sent():
         raise AssertionError("operator command was available outside the menu")
     send(b"?")
-    help_title = next(line[17:103] for line in capture().splitlines() if " Help " in line)
+    help_title = next(line for line in capture().splitlines() if " Help " in line)
     send(b"*")
     menu = expect("Host: off")
-    operator_title = next(line[17:103] for line in menu.splitlines() if " Operator controls " in line)
-    if help_title[:3] != operator_title[:3] or help_title[-3:] != operator_title[-3:]:
+    operator_title = next(line for line in menu.splitlines() if " Operator controls " in line)
+    if not re.search(r"TPP Help P+W", help_title) or not re.search(r"TPP Operator controls P+W", operator_title):
         raise AssertionError(f"Help/Operator border mismatch: {help_title!r} / {operator_title!r}")
     if "q quit monitoring" in menu or "q stops monitoring" in menu:
         raise AssertionError("ambiguous quit instruction remains in Operator controls")
@@ -239,7 +310,8 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Second power-down signal")
     if sent().count("CMD power down") != 1:
         raise AssertionError("second signal was automatically sent")
-    send(b"YES\r")
+    expect("Send 'pwr d' a second time?")
+    send(b"y")
     expect("power down: command acknowledged")
     if sent().count("CMD power down") != 2:
         raise AssertionError("second signal was not sent exactly once")
@@ -283,6 +355,128 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     print("PASS operator controls: shared styling, host-state gating/rechecks, abort, clock sync and early LEDs", flush=True)
 
 
+def check_save_buffer(capture, send, resize, directory, helper, clipboard):
+    exports = directory / "exports"
+    exports.mkdir()
+
+    def expect(text):
+        rendered = capture()
+        if text not in rendered:
+            raise AssertionError(f"missing {text!r}:\n{rendered}")
+        return rendered
+
+    def begin(leds=False):
+        send(b"s")
+        rendered = expect("Save buffer")
+        if ("Full retained LED" in rendered) != leds:
+            send(b"\033\ts")
+            rendered = expect("Save buffer")
+        if ("Full retained LED" in rendered) != leds:
+            raise AssertionError("Save captured the wrong pane")
+
+    def submit(path):
+        send(str(path).encode() + b"\r")
+
+    path = exports / "log 'quotes' ; $(echo no-shell) λ.txt"
+    begin()
+    submit(path)
+    expect("Buffer saved")
+    expect("c Copy path")
+    original = path.read_text()
+    if "voltage nominal" not in original or "previous message repeated" in original:
+        raise AssertionError(f"Save omitted raw/folded log contents: {original}")
+    if "Power Down: issue 'pwr d' again to immediately power down." not in original:
+        raise AssertionError("second-signal request was lost from the log buffer")
+    if "[transport] reset-pipes after L1 response timeout failed: Broken pipe" not in original:
+        raise AssertionError("pipe-reset diagnostic was lost from the log buffer")
+    send(b"c")
+    expect("File path copied to clipboard")
+    if clipboard.read_text() != str(path):
+        raise AssertionError("clipboard did not receive the exact literal absolute path")
+    helper.write_text("#!/bin/sh\necho 'desktop access denied' >&2\nexit 3\n")
+    helper.chmod(0o700)
+    send(b"c")
+    expect("Clipboard failed: desktop access denied")
+    if "Buffer saved" not in capture() or path.read_text() != original:
+        raise AssertionError("clipboard failure affected the saved file/completion view")
+    send(b"\033")
+    expect("Buffer saved")  # Successful saves require Return acknowledgement.
+    send(b"\r")
+    begin()
+    submit(path)
+    expect("File has content")
+    send(b"\r")
+    if path.read_text() != original or "Buffer saved" in capture():
+        raise AssertionError("Return did not cancel a conflicting save")
+    begin()
+    submit(path)
+    expect("File has content")
+    send(b"a")
+    expect("Buffer saved")
+    if path.read_text() != original + original:
+        raise AssertionError("append did not preserve all existing and new data")
+    send(b"\r")
+    begin()
+    submit(path)
+    send(b"o")
+    expect("Buffer saved")
+    if path.read_text() != original:
+        raise AssertionError("overwrite did not replace the file with the full snapshot")
+    send(b"\r")
+    begin()
+    submit(exports / "missing" / "file.txt")
+    expect("Save failed")
+    expect("Cannot access destination directory")
+    send(b"\r\x15")
+    submit(exports / "retry.txt")
+    expect("Buffer saved")
+    send(b"\r")
+    victim = exports / "victim.txt"
+    victim.write_text("keep this file")
+    link = exports / "linked.txt"
+    link.symlink_to(victim)
+    begin()
+    submit(link)
+    expect("Save failed")
+    if victim.read_text() != "keep this file":
+        raise AssertionError("symlink target was changed")
+    send(b"\033")
+    begin(leds=True)
+    led_path = exports / "leds.txt"
+    submit(led_path)
+    expect("Buffer saved")
+    led_text = led_path.read_text()
+    if led_text.count("0x09") < 2 or not re.search(r"\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d{3}", led_text):
+        raise AssertionError("full LED export omitted repeats or timestamps")
+    send(b"\r")
+    # Completion paths longer than the view remain scrollable, including at 40x10.
+    long_dir = exports
+    for _ in range(16):
+        long_dir = long_dir / ("long-directory-" + "x" * 64)
+    long_dir.mkdir(parents=True)
+    long_path = long_dir / "end-of-long-path.txt"
+    begin(leds=True)
+    submit(long_path)
+    expect("Buffer saved")
+    resize(11, 40)
+    send(b"\033OB" * 100)
+    expect("end-of-long-path.txt")
+    send(b"\033OA")
+    expect("Buffer saved")
+    send(b"\r")
+    resize(24, 120)
+    if not long_path.exists():
+        raise AssertionError("long save path was not written")
+    # Relative names are resolved under the explicitly supplied TMPDIR.
+    begin()
+    send(b"relative-save.txt\r")
+    expect("Buffer saved")
+    if not (directory / "relative-save.txt").exists():
+        raise AssertionError("relative path did not use TMPDIR")
+    send(b"\r")
+    print("PASS Save buffer: full snapshots, paths, conflict choices, errors, clipboard and long-path scrolling", flush=True)
+
+
 def check_operator_timeout(capture, send, command_log):
     send(b"*")
     send(b"u")
@@ -290,6 +484,10 @@ def check_operator_timeout(capture, send, command_log):
     rendered = capture()
     if "outcome unknown" not in rendered:
         raise AssertionError(f"timeout was not reported as uncertain:\n{rendered}")
+    if "Transport:" not in rendered.split("\n")[-2] or "timed out waiting" not in rendered.split("\n")[-2]:
+        raise AssertionError(f"transport diagnostic was not confined to the status bar:\n{rendered}")
+    if "[transport] timed out waiting for" not in rendered:
+        raise AssertionError("timeout diagnostic was not retained in the log buffer")
     send(b"\r\r")
     commands = command_log.read_text().splitlines()
     if commands.count("CMD power up") != 1:
@@ -298,7 +496,12 @@ def check_operator_timeout(capture, send, command_log):
         raise AssertionError("operator menu remained open after timeout")
     if commands[-1] not in ("CMD log", "CMD leds", "CMD version", "CMD date", "CMD date tz"):
         raise AssertionError("monitoring did not resume after timeout")
-    print("PASS operator timeout: unknown outcome, one send and resumed monitoring", flush=True)
+    deadline = time.monotonic() + 6
+    while "Transport:" in capture().split("\n")[-2] and time.monotonic() < deadline:
+        send(b"")
+    if "Console last active:" not in capture().split("\n")[-2]:
+        raise AssertionError("temporary transport status did not expire")
+    print("PASS operator timeout: captured diagnostics, temporary status, unknown outcome and no retry", flush=True)
 
 
 def check_usb_wait(capture, send, presence, command_log, mode):
@@ -380,14 +583,31 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout and not wait_mode
     command_log = directory / "commands.log"
     power_file = directory / "power.txt"
+    clipboard = directory / "clipboard.txt"
+    environment = directory / "environment.txt"
+    helpers = directory / "helpers"
+    helper = helpers / "pbcopy"
+    if exercise_controls:
+        helpers.mkdir()
+        environment.write_text((ROOT / "tests" / "fixtures" / "env.txt").read_text())
+        helper.write_text("#!/bin/sh\n/bin/cat > \"$SGIL1_TEST_CLIPBOARD\"\n")
+        helper.chmod(0o700)
     power_file.write_text("off" if exercise_controls or operator_timeout or wait_mode in ("up", "cli", "unconfirmed") else "on")
     presence = directory / "usb-present"
     extra_env = ({"SGIL1_MOCK_LEDS_RESPONSE": "CPU  A: 0x09: pane resizing preserves every "
                   "word of this long LED status message\n"} if exercise_controls else {})
     extra_env.update(SGIL1_MOCK_LOG=str(command_log), SGIL1_MOCK_POWER_DOWN_CONFIRM="1",
                      SGIL1_MOCK_POWER_FILE=str(power_file))
+    if exercise_controls:
+        extra_env["SGIL1_MOCK_POWER_DOWN_LOG_CONFIRM"] = "1"
+        extra_env["SGIL1_MOCK_RESET_PIPES_EPIPE"] = "1"
+    if exercise_controls:
+        extra_env.update(PATH=str(helpers) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+                         SGIL1_TEST_CLIPBOARD=str(clipboard), TMPDIR=str(directory),
+                         SGIL1_MOCK_ENV_FILE=str(environment))
     if operator_timeout:
         extra_env["SGIL1_MOCK_POWER_UP_TIMEOUT"] = "1"
+        extra_env["SGIL1_MOCK_RESET_PIPES_EPIPE"] = "1"
     if wait_mode:
         extra_env["SGIL1_MOCK_PRESENT_FILE"] = str(presence)
         extra_env.pop("SGIL1_MOCK_POWER_DOWN_CONFIRM", None)
@@ -471,7 +691,8 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         hardcopy.unlink(missing_ok=True)
         screen_command("-p", "0", "-X", "hardcopy", str(hardcopy))
         deadline = time.monotonic() + 2
-        while not hardcopy.exists() and time.monotonic() < deadline:
+        # Screen can create the hardcopy before it has written its contents.
+        while (not hardcopy.exists() or not hardcopy.stat().st_size) and time.monotonic() < deadline:
             drain(0.02)
         return hardcopy.read_text(errors="replace")
 
@@ -511,7 +732,15 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             elif operator_timeout:
                 check_operator_timeout(capture, send, command_log)
             else:
+                check_environment(capture, send, resize, command_log, environment)
                 check_operator_controls(capture, send, resize, command_log, power_file)
+                check_save_buffer(capture, send, resize, directory, helper, clipboard)
+                # Restore the fixture's original focus before navigation checks.
+                send(b"s")
+                if "Full retained LED" in capture():
+                    send(b"\033\t")
+                else:
+                    send(b"\033")
                 check_pane_controls(capture, send, resize)
         if stop == "q":
             os.write(master, b"q")

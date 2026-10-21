@@ -340,6 +340,13 @@ static int enqueue_discovery_response(struct mock_fd *m)
 
 static const char *mock_log_response(void)
 {
+	if (getenv("SGIL1_MOCK_POWER_DOWN_LOG_CONFIRM") && mock_power_down_count > 0)
+		return "05/27/2026 12:38:00 L1 booted\n"
+		       "05/27/2026 12:38:01 USB_WQUE Q full (BROAD)\n"
+		       "05/27/2026 12:38:02 USB_WQUE Q avail - lost: 0/0/20 repl: 0 (BROAD)\n"
+		       "05/27/2026 12:38:03 voltage nominal\n"
+		       "05/27/2026 12:38:04 voltage nominal\n"
+		       "05/27/2026 12:38:05 Power Down: issue 'pwr d' again to immediately power down.\n";
 	if (getenv("SGIL1_MOCK_LOG_NONADJACENT_REPEAT"))
 		return "05/27/2026 12:38:00 USB-W: IRouter:write failed\n"
 		       "05/27/2026 12:38:00 USB-W: USB:endpoint not configured\n"
@@ -523,6 +530,17 @@ static const char *known_response_for_command(const char *cmd)
 		       "Control  Active   Suspended 1      0      0\n"
 		       "Read     Active   Ready     0      0      0\n"
 		       "Write    Active   Ready     0      0      0\n";
+	if ((!strcmp(cmd, "env") || !strcmp(cmd, "env check")) && getenv("SGIL1_MOCK_ENV_FILE")) {
+		static char env_response[16384];
+		FILE *source = fopen(getenv("SGIL1_MOCK_ENV_FILE"), "r");
+
+		if (!source)
+			return "ERROR: environment fixture unavailable\n";
+		size_t length = fread(env_response, 1, sizeof(env_response) - 1, source);
+		env_response[length] = '\0';
+		fclose(source);
+		return env_response;
+	}
 	if (!strcmp(cmd, "env") || !strcmp(cmd, "env check"))
 		return "Environmental monitoring is enabled and running.\n\n"
 		       "Description    State       Warning Limits     Fault Limits       Current\n"
@@ -737,6 +755,12 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 		}
 	}
 
+	if (!strcmp(cmd, "env") && getenv("SGIL1_MOCK_ENV_FILE") &&
+	    !strcmp(known_response_for_command(cmd), "SGIL1_MOCK_TIMEOUT\n")) {
+		free(raw_cmd);
+		return (ssize_t)count;
+	}
+
 	if (!strcmp(cmd, "power up") || !strcmp(cmd, "pwr up") ||
 	    !strcmp(cmd, "pwr u")) {
 		mock_store_power(true);
@@ -748,7 +772,8 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 	} else if (!strcmp(cmd, "power down") || !strcmp(cmd, "pwr down") ||
 		   !strcmp(cmd, "pwr d")) {
 		if (mock_power_down_confirm && mock_power_down_count++ == 0) {
-			response = "Type power down again to confirm: pwr d\n";
+			response = getenv("SGIL1_MOCK_POWER_DOWN_LOG_CONFIRM") ? "power down OK\n" :
+				"Type power down again to confirm: pwr d\n";
 		} else {
 			mock_store_power(false);
 			response = "power appears off\n";
@@ -967,6 +992,10 @@ int ioctl(int fd, unsigned long request, ...)
 	case SGIL1_RESET_DEVICE:
 		log_command("IOCTL", request == SGIL1_RESET_DEVICE ?
 			    "reset-device" : "reset-pipes");
+		if (request == SGIL1_RESET_PIPES && getenv("SGIL1_MOCK_RESET_PIPES_EPIPE")) {
+			errno = EPIPE;
+			return -1;
+		}
 		return 0;
 	case SGIL1_READ_CFG: {
 		struct sgil1_cfg *cfg;

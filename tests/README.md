@@ -45,6 +45,18 @@ a reserved hardstatus row. It exits each combination with `q`, `SIGINT`, and
 `SIGTERM`, then checks Screen's rendered state to ensure the footer is erased
 and the returning shell prompt has a clean row.
 
+The Screen suite also exercises Save buffer with full log/LED snapshots,
+conflict choices, literal and long paths, permission errors and clipboard
+failures. Environment coverage uses `fixtures/env.txt`, changes the returned
+content during the test, and checks content-sized geometry, three-row margins,
+scrolling, refresh failures and continued monitoring. Timeout cases verify
+that stderr diagnostics stay inside the log/status display and expire from
+the footer, while uncertain power commands are never retried.
+
+`tests/tui_state_test.c` adds filesystem safety, clipboard provider, environment
+geometry and stderr-isolation checks. CI compiles and runs it alongside the
+terminal suites; it can also be built with AddressSanitizer and UBSan.
+
 Run the normal suite and then build Debian packages:
 
 ```sh

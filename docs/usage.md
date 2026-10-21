@@ -87,6 +87,8 @@ row. The display keeps your width and height settings for the current session.
 | **h**, **?** | Show help |
 | **Esc**, **Return** | Close help |
 | **\*** | Open operator power/reset/clock controls |
+| **s** | Save the full selected log or LED buffer |
+| **e** | Show environmental monitoring |
 | **Ctrl-L** | Redraw the screen |
 | **q** | Quit |
 
@@ -97,6 +99,67 @@ With **t** enabled, the timestamp above the state is its first retained
 observation, and the repeat summary gives its latest observation. Counts and
 times cover retained samples, so they decrease or advance as history expires.
 These are observed snapshots, not a count of distinct firmware events.
+
+### Saving a buffer
+
+Select a pane with **Tab**, then press **s** (**Save buffer**, also listed in
+Help). This captures all retained data from that pane, including entries
+outside the visible area, hidden LED messages and repeated observations.
+Log exports use the full retained log rather than folded summaries; LED
+exports include every retained sample and its timestamp. The LED description
+source setting is preserved. New messages received while you choose a path
+do not change this snapshot.
+
+Enter an absolute file path, `~/...`, or a relative name. Pressing **Return**
+with no input uses the displayed timestamped filename. Relative paths use
+the first existing directory where a private file can be created, checked in
+this order: `TMPDIR`, `TMP`, `XDG_RUNTIME_DIR`, `/var/tmp`, `/tmp`.
+The chosen directory is shown in the prompt. **Ctrl-U** clears input, and the
+arrow, Home/End, Delete and Backspace keys edit it. Missing directories are
+reported as errors; they are not created automatically.
+
+An existing non-empty file requires **o** to overwrite or **a** to append.
+**Return**, **c** or **Esc** cancels without changing it. Files are staged
+in the destination directory before replacement; new files are private
+(mode `0600`). Existing ownership, permissions and attributes are preserved,
+and a file changed since the prompt is rejected. Symlinks, multiple hard
+links, special files and files with privilege bits are refused. Safe append
+requires the existing file to be readable, and all saves require permission
+to create and replace files in the destination directory. An error explains
+what failed, and **Return** lets you edit the path and retry the same snapshot.
+
+After success, the **Buffer saved** dialog displays the full resolved path
+and stays open until **Return**. **Up/Down** scroll long paths and messages.
+If a suitable clipboard helper is available, **c Copy path** copies only the
+file path. Helpers are run directly with the path on standard input; path
+characters are never interpreted by a shell. Copy failures are shown without
+affecting the saved file. Supported helpers are `pbcopy`,
+[wl-copy](https://github.com/bugaevc/wl-clipboard) in a Wayland session, and
+[xclip](https://github.com/astrand/xclip) or
+[xsel](https://github.com/kfish/xsel) in an X11 session.
+The Copy option is omitted when no suitable helper is found.
+
+Default locations can be temporary. Choose a durable absolute path when the
+export needs to survive cleanup or a reboot.
+
+### Environmental monitoring
+
+Press **e** (**Environment** in Help) to read the L1 `env` table. The view
+preserves the controller's text, blank lines and column alignment. Its size
+is calculated from each actual response: it fits all rows and columns when
+possible, uses no more height than needed, and leaves at least three screen
+rows above and below it. Larger output scrolls with **Up/Down**, **PgUp/PgDn**
+and **Left/Right** (or **<**/**>**) for columns. **Home** returns to the top
+left; **End** reaches the final rows. Resizing the terminal recalculates the
+view and clamps its scroll positions.
+
+**r** refreshes the reading; the view shows when the last successful reading
+was taken. Refresh failures retain the previous table and mark the error.
+**Return**, **Esc** or **e** closes the view. LED/log monitoring continues
+between these one-shot environment requests. A USB disconnect returns to
+the mandatory waiting dialog.
+
+### Operator controls
 
 Press **\*** (also the first Help entry) to open **Operator controls**.
 The menu reads the host power state and the L1 date and timezone on entry and
@@ -113,12 +176,22 @@ that machine's time, using years/days or smaller units as appropriate.
 Type `YES` and press **Return** to send the selected command once. Blank or
 other input followed by **Return** aborts the action and returns to the menu.
 **Esc** or **\*** closes Operator controls; **q** still quits the application.
-If the L1 requests a second power-down signal, that signal needs a separate
-`YES` confirmation. Commands and responses appear in both log views. An
+If the L1 requests a second power-down signal in its command response or in
+new entries from the very next successful log read, a follow-up dialog offers
+**y Yes** or **n No**; **Return** also cancels. A second `YES` is not required.
+The request remains in the log buffer, and the second signal is sent only once
+after **y**, with a fresh host-state check. Stale log entries and later reads
+cannot trigger this prompt. Commands and responses appear in both log views. An
 acknowledgement does not mean a power transition or reboot has finished.
 Timed-out commands are reported as having an unknown outcome and are not
 retried. Power actions resume LED/log monitoring without waiting for a
 power-state confirmation, so early boot diagnostics can be captured.
+
+Transport diagnostics are captured while the TUI is active. They appear in
+both log buffers with a `[transport]` prefix and temporarily occupy the bottom
+status bar for five seconds, without writing over the panes. Afterward, the
+usual clock/activity status returns. CLI diagnostics keep their normal stderr
+behavior.
 
 The status bar shows the L1 clock immediately before console activity. Clock
 readings refresh in idle polling slots, approximately every five seconds;

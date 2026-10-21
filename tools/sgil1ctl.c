@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #ifdef SGIL1_WITH_TUI
 #include <curses.h>
@@ -480,6 +481,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  p                     show or hide LED description sources\n"
 			"  c, m                  cycle palettes or toggle monochrome\n"
 			"  h, ?                  show Help; Esc or Return closes it\n"
+			"  s                     save the full selected buffer to a file\n"
+			"  e                     show environmental monitoring; r refreshes\n"
 			"  *                     operator power/reset/clock controls; YES confirms\n"
 			"  Ctrl-L                redraw the screen\n"
 			"  q                     quit\n");
@@ -5758,7 +5761,19 @@ enum watch_tui_host_state {
 	WATCH_TUI_HOST_OFF,
 };
 
+#include "tui_save.h"
+
 struct watch_tui_state {
+	struct tui_save save;
+	bool diagnostics_active;
+	int diagnostics_read_fd, diagnostics_saved_stderr;
+	char diagnostic_line[512], diagnostic_message[560];
+	size_t diagnostic_length;
+	uint64_t diagnostic_until;
+	bool environment_visible, environment_requested;
+	char *environment_text;
+	char environment_status[160];
+	size_t environment_row, environment_column;
 	struct watch_tui_line_history raw_log_history;
 	struct watch_tui_line_history log_history;
 	struct watch_tui_led_history led_history;
@@ -5776,6 +5791,7 @@ struct watch_tui_state {
 	bool operator_visible;
 	bool operator_refresh;
 	bool action_busy;
+	bool power_down_log_pending;
 	bool waiting_for_usb;
 	bool wait_device_present;
 	bool wait_set_time;
@@ -6710,55 +6726,59 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 
 	mvwaddnstr(window, 5, 4, "*", 18);
 	mvwaddnstr(window, 5, 24, "Operator controls", 30);
-	mvwaddnstr(window, 6, 4, "Tab", 18);
-	mvwaddnstr(window, 6, 24, "Select pane", 30);
-	watch_tui_help_text(window, 6, 56, "Log", 3,
+	mvwaddnstr(window, 6, 4, "s", 18);
+	mvwaddnstr(window, 6, 24, "Save buffer", 30);
+	mvwaddnstr(window, 7, 4, "e", 18);
+	mvwaddnstr(window, 7, 24, "Environment", 30);
+	mvwaddnstr(window, 8, 4, "Tab", 18);
+	mvwaddnstr(window, 8, 24, "Select pane", 30);
+	watch_tui_help_text(window, 8, 56, "Log", 3,
 			    state->focus == WATCH_TUI_FOCUS_LOG);
-	mvwaddnstr(window, 6, 60, "/", 1);
-	watch_tui_help_text(window, 6, 62, "LEDs", 4,
+	mvwaddnstr(window, 8, 60, "/", 1);
+	watch_tui_help_text(window, 8, 62, "LEDs", 4,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
-	mvwaddnstr(window, 7, 4, "Left/Right, </>", 18);
+	mvwaddnstr(window, 9, 4, "Left/Right, </>", 18);
 	if (COLS < 100)
-		mvwaddnstr(window, 7, 56, "Also ^/v when stacked", width - 60);
-	mvwaddnstr(window, 7, 24, COLS >= 100 ?
+		mvwaddnstr(window, 9, 56, "Also ^/v when stacked", width - 60);
+	mvwaddnstr(window, 9, 24, COLS >= 100 ?
 		   "Move divider left/right" : "Shrink/grow selected pane", 30);
-	mvwaddnstr(window, 8, 4, "Up/Down, k/j", 18);
-	mvwaddnstr(window, 8, 24, "Scroll by line", 30);
-	mvwaddnstr(window, 9, 4, "PgUp/PgDn, ^B/^F", 18);
-	mvwaddnstr(window, 9, 24, "Scroll by page", 30);
-	mvwaddnstr(window, 10, 4, "End, g", 18);
-	mvwaddnstr(window, 10, 24, "Return to live output", 30);
-	mvwaddnstr(window, 11, 4, "a", 18);
-	mvwaddnstr(window, 11, 24, "Observation view", 30);
-	watch_tui_help_text(window, 11, 56, "Filtered", 8, !state->all_mode);
-	mvwaddnstr(window, 11, 65, "/", 1);
-	watch_tui_help_text(window, 11, 67, "All", 3, state->all_mode);
-	mvwaddnstr(window, 12, 4, "t", 18);
-	mvwaddnstr(window, 12, 24, "LED timestamps", 30);
-	watch_tui_help_text(window, 12, 56, "Off", 3,
+	mvwaddnstr(window, 10, 4, "Up/Down, k/j", 18);
+	mvwaddnstr(window, 10, 24, "Scroll by line", 30);
+	mvwaddnstr(window, 11, 4, "PgUp/PgDn, ^B/^F", 18);
+	mvwaddnstr(window, 11, 24, "Scroll by page", 30);
+	mvwaddnstr(window, 12, 4, "End, g", 18);
+	mvwaddnstr(window, 12, 24, "Return to live output", 30);
+	mvwaddnstr(window, 13, 4, "a", 18);
+	mvwaddnstr(window, 13, 24, "Observation view", 30);
+	watch_tui_help_text(window, 13, 56, "Filtered", 8, !state->all_mode);
+	mvwaddnstr(window, 13, 65, "/", 1);
+	watch_tui_help_text(window, 13, 67, "All", 3, state->all_mode);
+	mvwaddnstr(window, 14, 4, "t", 18);
+	mvwaddnstr(window, 14, 24, "LED timestamps", 30);
+	watch_tui_help_text(window, 14, 56, "Off", 3,
 			    !state->show_led_timestamps);
-	mvwaddnstr(window, 12, 60, "/", 1);
-	watch_tui_help_text(window, 12, 62, "On", 2,
+	mvwaddnstr(window, 14, 60, "/", 1);
+	watch_tui_help_text(window, 14, 62, "On", 2,
 			    state->show_led_timestamps);
-	mvwaddnstr(window, 13, 4, "p", 18);
-	mvwaddnstr(window, 13, 24, "LED description sources", 30);
-	watch_tui_help_text(window, 13, 56, "Off", 3, !state->show_annotations);
-	mvwaddnstr(window, 13, 60, "/", 1);
-	watch_tui_help_text(window, 13, 62, "On", 2, state->show_annotations);
-	mvwaddnstr(window, 14, 4, "c", 18);
-	mvwaddnstr(window, 14, 24, "Cycle hardware palette", 30);
-	mvwaddnstr(window, 14, 56, palette_setting, width - 60);
-	mvwaddnstr(window, 15, 4, "m", 18);
-	mvwaddnstr(window, 15, 24, "Colour output", 30);
-	watch_tui_help_text(window, 15, 56, "Colour", 6,
+	mvwaddnstr(window, 15, 4, "p", 18);
+	mvwaddnstr(window, 15, 24, "LED description sources", 30);
+	watch_tui_help_text(window, 15, 56, "Off", 3, !state->show_annotations);
+	mvwaddnstr(window, 15, 60, "/", 1);
+	watch_tui_help_text(window, 15, 62, "On", 2, state->show_annotations);
+	mvwaddnstr(window, 16, 4, "c", 18);
+	mvwaddnstr(window, 16, 24, "Cycle hardware palette", 30);
+	mvwaddnstr(window, 16, 56, palette_setting, width - 60);
+	mvwaddnstr(window, 17, 4, "m", 18);
+	mvwaddnstr(window, 17, 24, "Colour output", 30);
+	watch_tui_help_text(window, 17, 56, "Colour", 6,
 			    !state->monochrome && state->color_capable);
-	mvwaddnstr(window, 15, 63, "/", 1);
-	watch_tui_help_text(window, 15, 65, "Mono", 4,
+	mvwaddnstr(window, 17, 63, "/", 1);
+	watch_tui_help_text(window, 17, 65, "Mono", 4,
 			    state->monochrome || !state->color_capable);
-	mvwaddnstr(window, 16, 4, "Ctrl-L", 18);
-	mvwaddnstr(window, 16, 24, "Redraw screen", 30);
-	mvwaddnstr(window, 17, 4, "h, ?, Esc, Return", 18);
-	mvwaddnstr(window, 17, 24, "Close Help", 30);
+	mvwaddnstr(window, 18, 4, "Ctrl-L", 18);
+	mvwaddnstr(window, 18, 24, "Redraw screen", 30);
+	mvwaddnstr(window, 19, 4, "h, ?, Esc, Return", 18);
+	mvwaddnstr(window, 19, 24, "Close Help", 30);
 }
 
 static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
@@ -6766,46 +6786,40 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 {
 	int height = getmaxy(window);
 	int redraw = height - 3;
-	char palette_setting[24];
-	char text[96];
+	bool small = height < 12;
+	char palette_setting[24], text[96];
 
 	watch_tui_palette_setting(state, palette_setting, sizeof(palette_setting), true);
 	mvwaddnstr(window, 1, 2, "* Operator controls", width - 4);
-	mvwaddnstr(window, 2, 2, "Tab select pane", width - 4);
-	mvwaddnstr(window, 3, 2, COLS >= 100 ?
-		   "Left/Right </> move divider" :
-		   "L/R </> ^/v shrink/grow pane", width - 4);
-	mvwaddnstr(window, 4, 2, "U/D k/j line ^B/^F page g live", width - 4);
+	mvwaddnstr(window, 2, 2, "s Save buffer | e Environment", width - 4);
+	mvwaddnstr(window, 3, 2, small ? "Tab pane </> ^/v shrink/grow pane" : "Tab select pane", width - 4);
+	if (!small)
+		mvwaddnstr(window, 4, 2, COLS >= 100 ?
+			"Left/Right </> move divider" : "L/R </> ^/v shrink/grow pane", width - 4);
+	mvwaddnstr(window, small ? 4 : 5, 2, "U/D k/j line ^B/^F page g live", width - 4);
 	snprintf(text, sizeof(text), "a view:%s t time:%s m mono",
-		 state->all_mode ? "All" : "Filtered",
-		 state->show_led_timestamps ? "On" : "Off");
-	mvwaddnstr(window, 5, 2, text, width - 4);
-	snprintf(text, sizeof(text), "p sources:%s%s%s",
-		 state->show_annotations ? "On" : "Off",
-		 height < 11 ? " c palette:" : "", height < 11 ? palette_setting : "");
-	mvwaddnstr(window, 6, 2, text, width - 4);
-	if (height >= 11) {
+		 state->all_mode ? "All" : "Filtered", state->show_led_timestamps ? "On" : "Off");
+	mvwaddnstr(window, small ? 5 : 6, 2, text, width - 4);
+	snprintf(text, sizeof(text), "p sources:%s%s%s", state->show_annotations ? "On" : "Off",
+		 small ? " c palette:" : "", small ? palette_setting : "");
+	mvwaddnstr(window, small ? 6 : 7, 2, text, width - 4);
+	if (!small) {
 		snprintf(text, sizeof(text), "c palette:%s", palette_setting);
-		mvwaddnstr(window, 7, 2, text, width - 4);
+		mvwaddnstr(window, 8, 2, text, width - 4);
 	}
 	mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
 	mvwaddnstr(window, redraw + 1, 2, "h/?/Esc/Ret close", width - 4);
 }
 
-/* All modal views share Help's geometry, double border and palette. */
-static WINDOW *watch_tui_dialog(const struct watch_tui_state *state,
-				const char *title, int requested_height,
-				int *width, int *height)
+/* Modal views share Help's border and palette; callers may size to content. */
+static WINDOW *watch_tui_sized_dialog(const struct watch_tui_state *state,
+				      const char *title, int width, int height)
 {
 	WINDOW *window;
-	bool wide = COLS >= 88 && LINES >= 21;
 
-	*width = wide ? 86 : COLS - 2;
-	*height = requested_height > LINES ? LINES : requested_height;
-	if (*width < 4 || *height < 3)
+	if (width < 4 || height < 3 || width > COLS || height > LINES)
 		return NULL;
-	window = derwin(stdscr, *height, *width, (LINES - *height) / 2,
-			(COLS - *width) / 2);
+	window = derwin(stdscr, height, width, (LINES - height) / 2, (COLS - width) / 2);
 	if (!window)
 		return NULL;
 	werase(window);
@@ -6813,11 +6827,439 @@ static WINDOW *watch_tui_dialog(const struct watch_tui_state *state,
 		wattron(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
 	watch_tui_draw_help_border(window);
 	wattron(window, A_BOLD);
-	mvwaddnstr(window, 0, 3, title, *width - 6);
+	mvwaddnstr(window, 0, 3, title, width - 6);
 	wattroff(window, A_BOLD);
 	if (watch_tui_colors_enabled(state))
 		wattroff(window, COLOR_PAIR(WATCH_TUI_COLOR_ACCENT));
 	return window;
+}
+
+static WINDOW *watch_tui_dialog(const struct watch_tui_state *state,
+				const char *title, int requested_height,
+				int *width, int *height)
+{
+	bool wide = COLS >= 88 && LINES >= 21;
+
+	*width = wide ? 86 : COLS - 2;
+	*height = requested_height > LINES ? LINES : requested_height;
+	return watch_tui_sized_dialog(state, title, *width, *height);
+}
+
+static void watch_tui_save_begin(struct watch_tui_state *state)
+{
+	struct tui_save *save = &state->save;
+	time_t now = time(NULL);
+	struct tm tm;
+	char stamp[40] = "buffer";
+
+	tui_save_reset(save);
+	memset(save, 0, sizeof(*save));
+	save->initialized = true;
+	save->directory_fd = -1;
+	save->phase = TUI_SAVE_PATH;
+	save->leds = state->focus == WATCH_TUI_FOCUS_LEDS;
+	save->capture_pending = true;
+	state->help_visible = false;
+	if (localtime_r(&now, &tm))
+		strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+	snprintf(save->suggested, sizeof(save->suggested), "sgil1-%s-%s.txt",
+		 save->leds ? "leds" : "log", stamp);
+}
+
+static void watch_tui_save_capture(struct watch_tui_state *state)
+{
+	struct tui_save *save = &state->save;
+	struct text_builder text = { 0 };
+	size_t i, j, k;
+
+	save->capture_pending = false;
+	if (!save->leds) {
+		const struct watch_tui_line_history *history = &state->raw_log_history;
+
+		for (i = 0; i < history->count; i++)
+			if (text_builder_append_text_block(&text, history->lines[
+				watch_tui_history_index(history->start, i, history->capacity)]))
+				goto fail;
+		save->entries = history->count;
+	} else {
+		const struct watch_tui_led_history *history = &state->led_history;
+
+		for (i = 0; i < history->run_count; i++) {
+			const struct watch_tui_led_snapshot *snapshot = watch_tui_led_snapshot_at(history, i);
+			const struct log_line_list *shown = state->show_annotations ?
+				&snapshot->annotated_all_lines : &snapshot->all_lines;
+
+			for (j = 0; j < snapshot->timestamp_count; j++) {
+				if (text_builder_append_text_block(&text, watch_tui_led_timestamp_at(snapshot, j)))
+					goto fail;
+				for (k = 0; k < shown->count; k++)
+					if (text_builder_append_text_block(&text, shown->lines[k]))
+						goto fail;
+			}
+		}
+		save->entries = history->response_count;
+	}
+	(void)tui_save_default_directory(save->directory, sizeof(save->directory));
+	save->data = text.buf;
+	save->bytes = text.len;
+	save->snapshot_valid = true;
+	return;
+fail:
+	free(text.buf);
+	tui_save_error(save, "Not enough memory to capture the full buffer", ENOMEM);
+}
+
+static void watch_tui_save_service(struct watch_tui_state *state, uint64_t now)
+{
+	struct tui_save *save = &state->save;
+
+	if (save->phase == TUI_SAVE_NONE)
+		return;
+	if (save->capture_pending)
+		watch_tui_save_capture(state);
+	if (save->request_pending) {
+		save->request_pending = false;
+		if (!save->snapshot_valid) {
+			tui_save_error(save, "The full buffer could not be captured; retry Save", 0);
+			return;
+		}
+		if (!save->action_mode) {
+			int result = tui_save_prepare(save);
+
+			if (result < 0)
+				return;
+			if (result > 0) {
+				save->phase = TUI_SAVE_CHOICE;
+				return;
+			}
+		}
+		save->append = save->action_mode == 2;
+		(void)tui_save_commit(save);
+	}
+	if (save->copy_requested)
+		tui_save_copy_start(save, now);
+	tui_save_copy_poll(save, now);
+}
+
+static void watch_tui_save_key(struct watch_tui_state *state, int key)
+{
+	struct tui_save *save = &state->save;
+	bool enter = key == '\n' || key == '\r' || key == KEY_ENTER;
+	size_t length = strlen(save->input);
+
+	if (save->phase == TUI_SAVE_DONE) {
+		if (enter)
+			tui_save_reset(save);
+		else if ((key == 'c' || key == 'C') && save->clipboard_kind)
+			save->copy_requested = true;
+	} else if (key == 27) {
+		tui_save_reset(save);
+		return;
+	} else if (save->phase == TUI_SAVE_CHOICE) {
+		if (enter || key == 'c' || key == 'C')
+			tui_save_reset(save);
+		else if (key == 'o' || key == 'O' || key == 'a' || key == 'A') {
+			save->action_mode = key == 'a' || key == 'A' ? 2 : 1;
+			save->request_pending = true;
+			save->phase = TUI_SAVE_WRITING;
+		}
+	} else if (save->phase == TUI_SAVE_ERROR) {
+		if (enter) {
+			save->phase = TUI_SAVE_PATH;
+			if (!save->snapshot_valid)
+				save->capture_pending = true;
+			save->message[0] = '\0';
+			save->path_scroll = 0;
+		}
+	} else if (save->phase == TUI_SAVE_PATH && !save->capture_pending) {
+		if (enter) {
+			save->action_mode = 0;
+			save->request_pending = true;
+			save->phase = TUI_SAVE_WRITING;
+		} else if (key == 21) { /* Ctrl-U */
+			save->input[0] = '\0';
+			save->cursor = 0;
+		} else if (key == KEY_HOME) {
+			save->cursor = 0;
+		} else if (key == KEY_END) {
+			save->cursor = length;
+		} else if (key == KEY_LEFT && save->cursor) {
+			do { save->cursor--; } while (save->cursor &&
+				((unsigned char)save->input[save->cursor] & 0xc0) == 0x80);
+		} else if (key == KEY_RIGHT && save->cursor < length) {
+			do { save->cursor++; } while (save->cursor < length &&
+				((unsigned char)save->input[save->cursor] & 0xc0) == 0x80);
+		} else if ((key == KEY_BACKSPACE || key == 127 || key == 8) && save->cursor) {
+			size_t previous = save->cursor - 1;
+
+			while (previous && ((unsigned char)save->input[previous] & 0xc0) == 0x80)
+				previous--;
+			memmove(save->input + previous, save->input + save->cursor, length - save->cursor + 1);
+			save->cursor = previous;
+		} else if (key == KEY_DC && save->cursor < length) {
+			size_t end = save->cursor + 1;
+
+			while (end < length && ((unsigned char)save->input[end] & 0xc0) == 0x80)
+				end++;
+			memmove(save->input + save->cursor, save->input + end, length - end + 1);
+		} else if (key >= 32 && key <= 255 && key != 127 && length + 1 < sizeof(save->input)) {
+			memmove(save->input + save->cursor + 1, save->input + save->cursor, length - save->cursor + 1);
+			save->input[save->cursor++] = (char)key;
+		}
+	}
+	if (key == KEY_UP || key == KEY_PPAGE) {
+		if (save->path_scroll)
+			save->path_scroll--;
+	} else if (key == KEY_DOWN || key == KEY_NPAGE) {
+		if (save->path_scroll < PATH_MAX)
+			save->path_scroll++;
+	}
+}
+
+/* Wrap by display cells without splitting UTF-8 names; every row is scrollable. */
+static size_t watch_tui_save_line(const char *text, int width, size_t *bytes)
+{
+	mbstate_t conversion = { 0 };
+	size_t offset = 0;
+	int cells_used = 0;
+
+	while (text[offset] && text[offset] != '\n') {
+		wchar_t character;
+		size_t count = mbrtowc(&character, text + offset, MB_CUR_MAX, &conversion);
+		int cells;
+
+		if (count == (size_t)-1 || count == (size_t)-2 || !count) {
+			memset(&conversion, 0, sizeof(conversion));
+			count = 1;
+			cells = 1;
+		} else {
+			cells = wcwidth(character);
+			if (cells < 0)
+				cells = 1;
+		}
+		if (cells_used + cells > width && offset)
+			break;
+		cells_used += cells;
+		offset += count;
+	}
+	*bytes = offset;
+	return offset + (text[offset] == '\n' ? 1 : 0);
+}
+
+static size_t watch_tui_save_text(WINDOW *window, const char *text, int first, int rows,
+				  int width, size_t *scroll)
+{
+	size_t total = 0, offset = 0, bytes, next;
+	int row = 0;
+
+	do {
+		next = watch_tui_save_line(text + offset, width - 4, &bytes);
+		offset += next;
+		total++;
+	} while (text[offset] && next);
+	if (*scroll >= total)
+		*scroll = total - 1;
+	offset = 0;
+	for (size_t index = 0; index < total && row < rows; index++) {
+		next = watch_tui_save_line(text + offset, width - 4, &bytes);
+		if (index >= *scroll) {
+			mvwaddnstr(window, first + row, 2, text + offset, (int)bytes);
+			row++;
+		}
+		offset += next;
+	}
+	return total;
+}
+
+static void watch_tui_draw_save(struct watch_tui_state *state)
+{
+	struct tui_save *save = &state->save;
+	WINDOW *window;
+	int width, height;
+	char line[128];
+	const char *title;
+
+	if (save->phase == TUI_SAVE_NONE)
+		return;
+	title = save->phase == TUI_SAVE_DONE ? " Buffer saved " :
+		save->phase == TUI_SAVE_ERROR ? " Save failed " :
+		save->phase == TUI_SAVE_CHOICE ? " File has content " : " Save buffer ";
+	window = watch_tui_dialog(state, title, 19, &width, &height);
+	if (!window)
+		return;
+	if (save->capture_pending) {
+		mvwaddnstr(window, 2, 2, "Capturing the full retained buffer...", width - 4);
+	} else if (save->phase == TUI_SAVE_PATH) {
+		size_t start = save->cursor > (size_t)(width - 8) ? save->cursor - (size_t)(width - 8) : 0;
+
+		snprintf(line, sizeof(line), "Full retained %s buffer: %zu %s, %zu bytes",
+			 save->leds ? "LED" : "log", save->entries, save->leds ? "samples" : "lines", save->bytes);
+		mvwaddnstr(window, 1, 2, line, width - 4);
+		mvwaddnstr(window, 2, 2, "Relative paths use this directory:", width - 4);
+		size_t directory_scroll = 0;
+
+		watch_tui_save_text(window, *save->directory ? save->directory :
+			"No writable default; enter an absolute path", 3, height - 8, width, &directory_scroll);
+		snprintf(line, sizeof(line), "File path [%.80s]:", save->suggested);
+		mvwaddnstr(window, height - 5, 2, line, width - 4);
+		while (start && ((unsigned char)save->input[start] & 0xc0) == 0x80)
+			start++;
+		mvwaddnstr(window, height - 4, 2, save->input + start, width - 4);
+		mvwaddnstr(window, height - 2, 2, "Return Save | Esc Cancel | ^U Clear", width - 4);
+	} else if (save->phase == TUI_SAVE_WRITING || save->capture_pending) {
+		mvwaddnstr(window, 2, 2, "Saving buffer...", width - 4);
+	} else {
+		const char *message = save->phase == TUI_SAVE_CHOICE ?
+			"Existing non-empty file; choose an action:" : save->message;
+		char body[PATH_MAX + sizeof(save->message) + 4];
+		size_t scroll = save->path_scroll;
+		size_t count;
+
+		snprintf(body, sizeof(body), "%s\n\n%s", message, *save->path ? save->path : save->input);
+		count = watch_tui_save_text(window, body, 1, height - 5, width, &scroll);
+		save->path_scroll = scroll;
+		snprintf(line, sizeof(line), "Rows %zu-%zu/%zu; Up/Down scroll",
+			 scroll + 1, scroll + (size_t)(height - 5) < count ? scroll + (size_t)(height - 5) : count, count);
+		mvwaddnstr(window, height - 3, 2, line, width - 4);
+		mvwaddnstr(window, height - 2, 2, save->phase == TUI_SAVE_CHOICE ?
+			"o Overwrite a Append Return Cancel" : save->phase == TUI_SAVE_ERROR ?
+			"Return Edit path | Esc Cancel" : save->clipboard_kind ?
+			"Return Close | c Copy path" : "Return Close", width - 4);
+	}
+	wnoutrefresh(window);
+	delwin(window);
+}
+
+static const char *watch_tui_environment_text(const struct watch_tui_state *state)
+{
+	return state->environment_text && *state->environment_text ? state->environment_text :
+		state->environment_requested ? "Reading L1 environment..." : state->environment_status;
+}
+
+/* Keep the firmware table intact, including blank lines and aligned columns. */
+static void watch_tui_environment_bounds(struct watch_tui_state *state,
+					 int rows, int cells, size_t *count, size_t *longest)
+{
+	const char *line = watch_tui_environment_text(state);
+
+	*count = *longest = 0;
+	while (*line) {
+		size_t length = strcspn(line, "\n");
+
+		if (length && line[length - 1] == '\r')
+			length--;
+		if (length > *longest)
+			*longest = length;
+		(*count)++;
+		line = strchr(line, '\n');
+		if (!line)
+			break;
+		line++;
+	}
+	if (state->environment_row > (*count > (size_t)rows ? *count - (size_t)rows : 0))
+		state->environment_row = *count > (size_t)rows ? *count - (size_t)rows : 0;
+	if (state->environment_column > (*longest > (size_t)cells ? *longest - (size_t)cells : 0))
+		state->environment_column = *longest > (size_t)cells ? *longest - (size_t)cells : 0;
+}
+
+static void watch_tui_environment_key(struct watch_tui_state *state, int key)
+{
+	size_t page = LINES > 11 ? (size_t)(LINES - 11) : 1;
+
+	switch (key) {
+	case 27: case '\n': case '\r': case KEY_ENTER: case 'e': case 'E': case 'q': case 'Q':
+		state->environment_visible = state->environment_requested = false;
+		break;
+	case 'r': case 'R': state->environment_requested = true; break;
+	case KEY_UP: case 'k': if (state->environment_row) state->environment_row--; break;
+	case KEY_DOWN: case 'j': if (state->environment_row < SIZE_MAX) state->environment_row++; break;
+	case KEY_PPAGE: case 2:
+		state->environment_row = state->environment_row > page ? state->environment_row - page : 0;
+		break;
+	case KEY_NPAGE: case 6:
+		if (state->environment_row < SIZE_MAX - page) state->environment_row += page;
+		break;
+	case KEY_LEFT: case '<': if (state->environment_column) state->environment_column--; break;
+	case KEY_RIGHT: case '>': if (state->environment_column < SIZE_MAX) state->environment_column++; break;
+	case KEY_HOME: state->environment_row = state->environment_column = 0; break;
+	case KEY_END: state->environment_row = SIZE_MAX; break;
+	default: break;
+	}
+}
+
+static void watch_tui_environment_size(struct watch_tui_state *state,
+				       int *width, int *height, int *first, int *rows,
+				       size_t *count, size_t *longest)
+{
+	size_t saved_row = state->environment_row, saved_column = state->environment_column;
+	size_t desired_width;
+	int maximum_height = LINES - 6; /* Always reserve three rows above and below. */
+
+	watch_tui_environment_bounds(state, 1, 1, count, longest);
+	state->environment_row = saved_row;
+	state->environment_column = saved_column;
+	desired_width = *longest;
+	if (desired_width < strlen(state->environment_status))
+		desired_width = strlen(state->environment_status);
+	if (desired_width < 30)
+		desired_width = 30;
+	*width = desired_width > (size_t)(COLS - 6) ? COLS - 2 : (int)desired_width + 4;
+	*height = *count > (size_t)(maximum_height > 5 ? maximum_height - 5 : 0) ?
+		maximum_height : (int)*count + 5;
+	if (*height < 6 && maximum_height >= 6)
+		*height = 6;
+	if (*height > maximum_height)
+		*height = maximum_height;
+	*first = *height < 6 ? 1 : 2;
+	*rows = *height - (*height < 6 ? 3 : 5);
+	watch_tui_environment_bounds(state, *rows, *width - 4, count, longest);
+}
+
+static void watch_tui_draw_environment(struct watch_tui_state *state)
+{
+	WINDOW *window;
+	int width, height, row, first, rows;
+	size_t count, longest, index = 0;
+	const char *line;
+	char position[128];
+
+	if (!state->environment_visible)
+		return;
+	watch_tui_environment_size(state, &width, &height, &first, &rows, &count, &longest);
+	window = watch_tui_sized_dialog(state, !strncmp(state->environment_status, "env failed:", 11) ?
+		" Environment: error " : " Environment ", width, height);
+	if (!window)
+		return;
+	row = first;
+	if (height >= 6)
+		mvwaddnstr(window, 1, 2, state->environment_requested ? "Reading L1 environment..." :
+			state->environment_status, width - 4);
+	line = watch_tui_environment_text(state);
+	while (*line && row < first + rows) {
+		size_t length = strcspn(line, "\n");
+
+		if (length && line[length - 1] == '\r')
+			length--;
+		if (index++ >= state->environment_row) {
+			if (length > state->environment_column) {
+				size_t available = length - state->environment_column;
+				mvwaddnstr(window, row, 2, line + state->environment_column,
+					available < (size_t)(width - 4) ? (int)available : width - 4);
+			}
+			row++;
+		}
+		line = strchr(line, '\n');
+		if (!line)
+			break;
+		line++;
+	}
+	snprintf(position, sizeof(position), "Line %zu/%zu col %zu | Arrows/PgUp/PgDn", count ? state->environment_row + 1 : 0,
+		count, state->environment_column + 1);
+	if (height >= 6)
+		mvwaddnstr(window, height - 3, 2, position, width - 4);
+	mvwaddnstr(window, height - 2, 2, "r Refresh | Return/Esc Close", width - 4);
+	wnoutrefresh(window);
+	delwin(window);
 }
 
 static void watch_tui_draw_help(const struct watch_tui_state *state)
@@ -6829,7 +7271,7 @@ static void watch_tui_draw_help(const struct watch_tui_state *state)
 
 	if (!state->help_visible)
 		return;
-	window = watch_tui_dialog(state, " Help ", wide ? 19 : 11, &width, &height);
+	window = watch_tui_dialog(state, " Help ", wide ? 21 : (LINES < 12 ? 10 : 12), &width, &height);
 	if (!window)
 		return;
 	if (wide)
@@ -6933,11 +7375,15 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 			   "Command in progress" : "Reading host status and L1 clock...", width - 4);
 	} else if (confirming) {
 		mvwaddnstr(window, 1, 2, watch_tui_action_label(state->selected_action), width - 4);
-		mvwaddnstr(window, 3, 2, "Type YES, then Return to send once", width - 4);
-		mvwaddnstr(window, 4, 2, "Blank input + Return aborts action", width - 4);
-		mvwprintw(window, 6, 2, "Confirm: %s", state->confirmation);
-		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN)
-			mvwaddnstr(window, 7, 2, "L1 requests second power-down signal", width - 4);
+		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN) {
+			mvwaddnstr(window, 3, 2, "Send 'pwr d' a second time?", width - 4);
+			mvwaddnstr(window, 4, 2, "This will immediately power down host", width - 4);
+			mvwaddnstr(window, 6, 2, "y Yes | n No (Return also cancels)", width - 4);
+		} else {
+			mvwaddnstr(window, 3, 2, "Type YES, then Return to send once", width - 4);
+			mvwaddnstr(window, 4, 2, "Blank input + Return aborts action", width - 4);
+			mvwprintw(window, 6, 2, "Confirm: %s", state->confirmation);
+		}
 	} else if (state->waiting_for_usb) {
 		mvwaddnstr(window, 1, 2, state->wait_device_present ?
 			"USB present; preparing L1 connection" :
@@ -7018,6 +7464,8 @@ static bool watch_tui_clock_status(const struct watch_tui_state *state,
 	return out_of_sync;
 }
 
+static void watch_tui_drain_diagnostics(struct watch_display *display);
+
 static void watch_tui_render(struct watch_display *display)
 {
 	struct watch_tui_state *state = &display->tui_state;
@@ -7046,6 +7494,7 @@ static void watch_tui_render(struct watch_display *display)
 
 	if (!state->initialized)
 		return;
+	watch_tui_drain_diagnostics(display);
 	if (LINES < 10 || COLS < 40) {
 		erase();
 		mvaddnstr(0, 0, "sgil1ctl watch", COLS);
@@ -7123,7 +7572,7 @@ static void watch_tui_render(struct watch_display *display)
 			    state->led_scroll,
 			    state->focus == WATCH_TUI_FOCUS_LEDS);
 
-	snprintf(footer, sizeof(footer), " %s%s | h/? Help | * Controls",
+	snprintf(footer, sizeof(footer), " %s%s | h/? Help | s Save | e Env | * Controls",
 		 state->status[0] ? state->status : "Monitoring L1",
 		 state->focus == WATCH_TUI_FOCUS_LOG ? " | log selected" :
 							 " | LEDs selected");
@@ -7150,18 +7599,26 @@ static void watch_tui_render(struct watch_display *display)
 	footer_width = clock_x > 1 ? clock_x - 1 : 0;
 	attron(A_REVERSE);
 	mvhline(LINES - 1, 0, ' ', COLS);
-	if (footer_width)
-		mvaddnstr(LINES - 1, 0, footer, footer_width);
-	if (clock_warning)
+	if (state->diagnostic_until > monotonic_milliseconds()) {
 		attron(A_BOLD);
-	mvaddnstr(LINES - 1, clock_x, clock_text, activity_x - clock_x - 1);
-	if (clock_warning)
+		mvaddnstr(LINES - 1, 0, state->diagnostic_message, COLS);
 		attroff(A_BOLD);
-	mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
+	} else {
+		if (footer_width)
+			mvaddnstr(LINES - 1, 0, footer, footer_width);
+		if (clock_warning)
+			attron(A_BOLD);
+		mvaddnstr(LINES - 1, clock_x, clock_text, activity_x - clock_x - 1);
+		if (clock_warning)
+			attroff(A_BOLD);
+		mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
+	}
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
 	watch_tui_draw_help(state);
+	watch_tui_draw_environment(state);
 	watch_tui_draw_operator(state);
+	watch_tui_draw_save(state);
 	doupdate();
 }
 
@@ -7315,6 +7772,99 @@ static void watch_tui_free_led_snapshot(
 	free_log_line_list(&snapshot->annotated_filtered_lines);
 	free(snapshot->timestamps);
 	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+/* A nonblocking pipe keeps transport stderr off the curses terminal. Drain at
+ * render/input boundaries, so diagnostics cannot block a USB transaction. */
+static int watch_tui_capture_stderr(struct watch_tui_state *state)
+{
+	int descriptors[2], saved, error;
+
+	fflush(stderr);
+	saved = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+	if (saved < 0)
+		return -1;
+	if (pipe2(descriptors, O_CLOEXEC | O_NONBLOCK)) {
+		error = errno;
+		close(saved);
+		errno = error;
+		return -1;
+	}
+	if (dup2(descriptors[1], STDERR_FILENO) < 0) {
+		error = errno;
+		close(saved); close(descriptors[0]); close(descriptors[1]);
+		errno = error;
+		return -1;
+	}
+	close(descriptors[1]);
+	state->diagnostics_saved_stderr = saved;
+	state->diagnostics_read_fd = descriptors[0];
+	state->diagnostics_active = true;
+	return 0;
+}
+
+static void watch_tui_restore_stderr(struct watch_tui_state *state)
+{
+	if (!state->diagnostics_active)
+		return;
+	fflush(stderr);
+	while (dup2(state->diagnostics_saved_stderr, STDERR_FILENO) < 0 && errno == EINTR) {}
+	close(state->diagnostics_saved_stderr);
+	close(state->diagnostics_read_fd);
+	clearerr(stderr);
+	state->diagnostics_active = false;
+}
+
+static void watch_tui_record_diagnostic(struct watch_tui_state *state)
+{
+	char log[sizeof(state->diagnostic_line) + 16];
+
+	if (!state->diagnostic_length)
+		return;
+	state->diagnostic_line[state->diagnostic_length] = '\0';
+	snprintf(log, sizeof(log), "[transport] %s", state->diagnostic_line);
+	(void)watch_tui_append_log(state, log, true);
+	(void)watch_tui_append_log(state, log, false);
+	snprintf(state->diagnostic_message, sizeof(state->diagnostic_message), "Transport: %s", state->diagnostic_line);
+	state->diagnostic_until = milliseconds_after(monotonic_milliseconds(), 5000);
+	state->diagnostic_length = 0;
+}
+
+static void watch_tui_drain_diagnostics(struct watch_display *display)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	char buffer[512];
+	ssize_t count;
+	bool received = false;
+
+	if (!state->diagnostics_active)
+		return;
+	fflush(stderr);
+	/* Bound each drain even if retaining a diagnostic itself reports ENOMEM. */
+	for (unsigned int pass = 0; pass < 16; pass++) {
+		count = read(state->diagnostics_read_fd, buffer, sizeof(buffer));
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count <= 0)
+			break;
+		received = true;
+		for (ssize_t i = 0; i < count; i++) {
+			unsigned char ch = (unsigned char)buffer[i];
+
+			if (ch == '\n' || ch == '\r') {
+				watch_tui_record_diagnostic(state);
+			} else {
+				state->diagnostic_line[state->diagnostic_length++] = ch < 32 || ch == 127 ? ' ' : (char)ch;
+				if (state->diagnostic_length + 1 == sizeof(state->diagnostic_line))
+					watch_tui_record_diagnostic(state);
+			}
+		}
+	}
+	if (received) {
+		watch_tui_record_diagnostic(state); /* Include perror fragments without a newline. */
+		display->console_activity_seen = true;
+		display->console_activity_last_seen = monotonic_milliseconds();
+	}
 }
 
 static int watch_tui_append_led_timestamp(
@@ -7568,6 +8118,25 @@ static void watch_tui_operator_menu(struct watch_tui_state *state)
 	state->host_state = WATCH_TUI_HOST_UNKNOWN;
 }
 
+/* Inspect only new entries in the first successful log read after power down.
+ * The caller records both raw and filtered output before invoking this hook. */
+static void watch_tui_power_down_log(struct watch_tui_state *state,
+				     const struct log_line_list *current, size_t start)
+{
+	if (!state->power_down_log_pending)
+		return;
+	state->power_down_log_pending = false;
+	for (size_t i = start; i < current->count; i++) {
+		if (power_down_text_requests_second_command(current->lines[i])) {
+			state->help_visible = false;
+			state->operator_visible = true;
+			state->requested_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+			state->confirmation[0] = '\0';
+			break;
+		}
+	}
+}
+
 /* Input only queues requests. The scheduler owns every USB transaction. */
 static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 {
@@ -7595,6 +8164,15 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 	}
 	if (state->operator_refresh || state->requested_action != WATCH_TUI_ACTION_NONE)
 		return;
+	if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN) {
+		if (key == 'y' || key == 'Y') {
+			state->pending_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
+			state->selected_action = WATCH_TUI_ACTION_NONE;
+		} else if (key == 'n' || key == 'N' || key == '\n' || key == '\r' || key == KEY_ENTER) {
+			watch_tui_operator_menu(state);
+		}
+		return;
+	}
 	if (state->selected_action != WATCH_TUI_ACTION_NONE) {
 		if (key == '\n' || key == '\r' || key == KEY_ENTER) {
 			if (!strcmp(state->confirmation, "YES")) {
@@ -7658,8 +8236,25 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 
 	if (timeout < 0)
 		timeout = 100;
+	watch_tui_drain_diagnostics(display);
 	wtimeout(stdscr, timeout);
 	key = wgetch(stdscr);
+	if (state->save.phase != TUI_SAVE_NONE) {
+		watch_tui_save_key(state, key);
+		if (key == KEY_RESIZE)
+			clearok(stdscr, true);
+		if (key != ERR)
+			watch_tui_render(display);
+		return watch_stop_requested != 0;
+	}
+	if (state->environment_visible && !state->operator_visible && !state->waiting_for_usb) {
+		watch_tui_environment_key(state, key);
+		if (key == KEY_RESIZE || key == 12)
+			clearok(stdscr, true);
+		if (key != ERR)
+			watch_tui_render(display);
+		return watch_stop_requested != 0;
+	}
 	if (state->operator_visible || state->waiting_for_usb) {
 		watch_tui_operator_key(state, key);
 		if (key == KEY_RESIZE)
@@ -7676,6 +8271,15 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		return watch_stop_requested != 0;
 	}
 	switch (key) {
+	case 'e': case 'E':
+		state->help_visible = false;
+		state->environment_visible = state->environment_requested = true;
+		state->environment_row = state->environment_column = 0;
+		break;
+	case 's':
+	case 'S':
+		watch_tui_save_begin(state);
+		break;
 	case '*':
 		state->help_visible = false;
 		watch_tui_operator_menu(state);
@@ -7806,6 +8410,9 @@ static void watch_tui_free(struct watch_tui_state *state)
 	struct watch_tui_led_history *led = &state->led_history;
 	size_t i;
 
+	tui_save_reset(&state->save);
+	watch_tui_restore_stderr(state);
+	free(state->environment_text);
 	watch_tui_free_line_history(&state->raw_log_history);
 	watch_tui_free_line_history(&state->log_history);
 	for (i = 0; i < led->run_count; i++) {
@@ -7979,6 +8586,14 @@ static int watch_display_init(struct watch_display *display,
 			return -1;
 		}
 		state->initialized = true;
+		if (watch_tui_capture_stderr(state)) {
+			int error = errno;
+
+			endwin();
+			watch_tui_free(state);
+			fprintf(stderr, "could not capture TUI diagnostics: %s\n", strerror(error));
+			return -1;
+		}
 		if (!state->alternate_screen) {
 			char *enter_ca = tigetstr("smcup");
 			char *leave_ca = tigetstr("rmcup");
@@ -8386,6 +9001,36 @@ static void watch_tui_refresh_operator(struct watch_display *display,
 	watch_tui_render(display);
 }
 
+static void watch_tui_read_environment(struct watch_display *display, const struct options *opts)
+{
+	struct watch_tui_state *state = &display->tui_state;
+	char *text = NULL;
+	char stamp[SGIL1_TUI_TIMESTAMP_SIZE];
+	int ret;
+
+	watch_tui_render(display);
+	ret = l1_text_command_status(opts, "env", false, &text);
+	state->environment_requested = false;
+	if (ret || l1_text_indicates_failure(text)) {
+		char reason[64];
+
+		snprintf(reason, sizeof(reason), "%.*s", text ? (int)strcspn(text, "\r\n") : 0, text ? text : "");
+		snprintf(state->environment_status, sizeof(state->environment_status),
+			"env failed: %s%s", state->environment_text ? "previous reading retained; " : "",
+			ret == SGIL1_L1CMD_RESPONSE_TIMEOUT ? "response timed out" : *reason ? reason : "response unavailable");
+		free(text);
+	} else {
+		free(state->environment_text);
+		state->environment_text = text;
+		state->environment_row = state->environment_column = 0;
+		watch_tui_format_snapshot_time(stamp, sizeof(stamp));
+		snprintf(state->environment_status, sizeof(state->environment_status), "L1 env | %s%s", stamp,
+			text && *text ? "" : " | empty response");
+	}
+	clearok(stdscr, true);
+	watch_tui_render(display);
+}
+
 static int watch_tui_sync_clock(struct watch_display *display,
 				const struct options *opts,
 				const struct status_options *requested)
@@ -8458,6 +9103,7 @@ static int watch_tui_run_action(struct watch_display *display,
 	int ret = 0;
 
 	state->action_busy = true;
+	state->power_down_log_pending = false;
 	if (action == WATCH_TUI_ACTION_SYNC_TIME) {
 		ret = watch_tui_sync_clock(display, opts, NULL);
 		watch_tui_operator_menu(state);
@@ -8506,8 +9152,9 @@ static int watch_tui_run_action(struct watch_display *display,
 		state->requested_action = WATCH_TUI_ACTION_POWER_DOWN_AGAIN;
 		state->confirmation[0] = '\0';
 		snprintf(message, sizeof(message),
-			 "L1 requests second power-down signal; confirm again or cancel");
+			 "L1 requests second power-down signal; choose yes or no");
 	} else {
+		state->power_down_log_pending = action == WATCH_TUI_ACTION_POWER_DOWN;
 		snprintf(message, sizeof(message), "%s: command acknowledged", command);
 	}
 	watch_display_status(display, message);
@@ -8553,6 +9200,8 @@ static int watch_tui_connect(const struct options *opts, struct options *cmd_opt
 	uint64_t next_probe = 0;
 
 	state->waiting_for_usb = true;
+	state->environment_visible = state->environment_requested = false;
+	state->power_down_log_pending = false;
 	state->clock_valid = false;
 	state->l1_timezone[0] = '\0';
 	state->operator_visible = false;
@@ -8568,6 +9217,7 @@ static int watch_tui_connect(const struct options *opts, struct options *cmd_opt
 	while (!watch_stop_requested) {
 		uint64_t now = monotonic_milliseconds();
 
+		watch_tui_save_service(state, now);
 		if (now >= next_probe) {
 			state->wait_device_present = find_existing_data_device(opts) != NULL;
 			if (!state->wait_device_present)
@@ -8670,6 +9320,10 @@ static int run_watch_scheduler(const struct options *opts,
 		}
 
 #ifdef SGIL1_WITH_TUI
+		if (display->tui && display->tui_state.save.phase != TUI_SAVE_NONE) {
+			watch_tui_save_service(&display->tui_state, now);
+			watch_tui_render(display);
+		}
 		if (display->tui && !find_existing_data_device(opts)) {
 			int connect_ret = watch_tui_connect(opts, cmd_opts, display, profile, NULL);
 
@@ -8687,6 +9341,11 @@ static int run_watch_scheduler(const struct options *opts,
 		if (display->tui && (display->tui_state.operator_refresh ||
 		    display->tui_state.requested_action != WATCH_TUI_ACTION_NONE)) {
 			watch_tui_refresh_operator(display, cmd_opts);
+			continue;
+		}
+		if (display->tui && display->tui_state.environment_requested &&
+		    display->tui_state.pending_action == WATCH_TUI_ACTION_NONE) {
+			watch_tui_read_environment(display, cmd_opts);
 			continue;
 		}
 		if (display->tui && display->tui_state.pending_action !=
@@ -8938,6 +9597,10 @@ static int run_watch_scheduler(const struct options *opts,
 				ret = 1;
 				break;
 			}
+#ifdef SGIL1_WITH_TUI
+			if (display->tui)
+				watch_tui_power_down_log(&display->tui_state, &current, start);
+#endif
 			watch_display_refresh(display);
 
 			free_log_line_list(&previous_log);

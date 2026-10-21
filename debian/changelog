@@ -1,3 +1,37 @@
+sgi-l1-usb-control (0.1.61) unstable; urgency=medium
+
+  * Updated components since 0.1.60: user-space sgil1ctl, tests, build
+    rules and documentation; kernel module source is unchanged.
+  * Add Save buffer (s) to the TUI and Help. Save a fixed snapshot of all
+    retained log lines or LED samples, including repeats, hidden messages
+    and timestamps, independently of the displayed filter and scroll.
+  * Prompt for a path and select the first usable default directory from
+    TMPDIR, TMP, XDG_RUNTIME_DIR, /var/tmp and /tmp for relative names.
+    Show meaningful errors and allow editing and retrying the same snapshot.
+  * Require an explicit overwrite/append/cancel choice for non-empty files.
+    Stage writes before replacement, create private files and preserve
+    existing permissions and attributes. Reject unsafe targets and changes
+    detected after the prompt; leave existing files intact on write failure.
+  * Show the full resolved output path in a scrollable completion dialog
+    requiring Return to close. Offer Copy path when pbcopy, wl-copy, xclip
+    or xsel is available in the current desktop session; report failures.
+  * Offer a yes/no second power-down prompt when the command response or
+    new entries in the next log read request another signal. Retain the
+    request in the log, recheck host state and send only after explicit y.
+    Ignore stale requests and never retry timed-out commands automatically.
+  * Add Environment (e) with a fresh env reading on entry and manual refresh.
+    Size the dialog from the actual response, preserve table columns and
+    blank lines, reserve three screen rows above/below and scroll only when
+    needed. Keep previous readings clearly marked after refresh failures.
+  * Capture TUI stderr diagnostics in both log buffers and display them as
+    temporary status messages, preventing transport timeout/broken-pipe
+    output from corrupting curses. Restore stderr when the TUI exits.
+  * Extend sanitizer, filesystem, clipboard and terminal regression coverage
+    for snapshots, safe replacement, permissions, environment geometry,
+    transport diagnostics and power-down.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 21 Oct 2026 11:57:58 +0100
+
 sgi-l1-usb-control (0.1.60) unstable; urgency=medium
 
   * Updated components since 0.1.59: user-space sgil1ctl, tests and

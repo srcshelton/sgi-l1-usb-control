@@ -3,6 +3,8 @@
 #include "../tools/sgil1ctl.c"
 #undef main
 #include <assert.h>
+#include <dirent.h>
+#include <sys/resource.h>
 
 static void append(struct watch_tui_state *state, const char *raw,
                    const char *timestamp)
@@ -90,6 +92,106 @@ static void select_ready(struct watch_tui_state *state, enum watch_tui_action ac
 	state->requested_action = WATCH_TUI_ACTION_NONE;
 	state->selected_action = action;
 	state->confirmation[0] = '\0';
+}
+
+static void test_second_power_down(void)
+{
+	struct watch_tui_state state = { .operator_visible = true };
+	struct log_line_list lines = { 0 };
+
+	assert(!split_log_lines("old entry\nPower Down: issue 'pwr d' again to immediately power down.\n", &lines));
+	watch_tui_power_down_log(&state, &lines, 1);
+	assert(state.requested_action == WATCH_TUI_ACTION_NONE);
+	state.power_down_log_pending = true;
+	watch_tui_power_down_log(&state, &lines, lines.count); /* Stale entries do not arm it. */
+	assert(!state.power_down_log_pending && state.requested_action == WATCH_TUI_ACTION_NONE);
+	watch_tui_power_down_log(&state, &lines, 1); /* A later read cannot resurrect it. */
+	assert(state.requested_action == WATCH_TUI_ACTION_NONE);
+	state.power_down_log_pending = true;
+	watch_tui_power_down_log(&state, &lines, 1);
+	assert(state.requested_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	assert(!state.power_down_log_pending);
+	select_ready(&state, WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	keys(&state, "n");
+	assert(state.pending_action == WATCH_TUI_ACTION_NONE && state.operator_refresh);
+	select_ready(&state, WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	keys(&state, "\r");
+	assert(state.pending_action == WATCH_TUI_ACTION_NONE && state.operator_refresh);
+	select_ready(&state, WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	keys(&state, "y");
+	assert(state.pending_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	keys(&state, "yyyy");
+	assert(state.pending_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN);
+	free_log_line_list(&lines);
+	puts("PASS second power down: next log only, no stale prompts, yes once and safe cancellation");
+}
+
+static void test_environment_geometry(void)
+{
+	struct watch_tui_state state = { 0 };
+	int saved_lines = LINES, saved_cols = COLS;
+	int width, height, first, rows;
+	size_t count, longest;
+	char wide[201];
+
+	LINES = 80; COLS = 120;
+	state.environment_text = strdup("one\n\n  columns 1234567890\nlast\n");
+	assert(state.environment_text);
+	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
+	assert(count == 4 && height == 9 && rows == 4 && width == 34);
+	assert((LINES - height) / 2 >= 3 && first == 2);
+	state.environment_row = state.environment_column = SIZE_MAX;
+	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
+	assert(!state.environment_row && !state.environment_column);
+	free(state.environment_text);
+	memset(wide, 'x', sizeof(wide) - 1); wide[sizeof(wide) - 1] = '\0';
+	state.environment_text = wide;
+	COLS = 300;
+	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
+	assert(width == 204 && height == 6 && count == 1 && rows == 1);
+	LINES = 10; COLS = 40;
+	watch_tui_environment_key(&state, KEY_END);
+	state.environment_column = SIZE_MAX;
+	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
+	assert(width == 38 && height == 4 && first == 1 && rows == 1);
+	assert(state.environment_column == 166 && !state.environment_row);
+	watch_tui_environment_key(&state, 'r');
+	assert(state.environment_requested);
+	watch_tui_environment_key(&state, '\n');
+	assert(!state.environment_visible && !state.environment_requested);
+	LINES = saved_lines; COLS = saved_cols;
+	puts("PASS Environment geometry: live content dimensions, blank rows, margins, compact view and scroll bounds");
+}
+
+static void test_diagnostic_capture(void)
+{
+	struct watch_display display = { .tui = true };
+	struct watch_tui_state *state = &display.tui_state;
+	int original, terminal[2];
+	char buffer[32];
+
+	assert(!pipe2(terminal, O_CLOEXEC | O_NONBLOCK));
+	original = dup(STDERR_FILENO);
+	assert(original >= 0 && dup2(terminal[1], STDERR_FILENO) >= 0);
+	assert(!watch_tui_init_histories(state, 16, 4));
+	assert(!watch_tui_capture_stderr(state));
+	fprintf(stderr, "command timed-out\nset-pipes after L1 response timeout failed: Broken pipe\n");
+	watch_tui_drain_diagnostics(&display);
+	assert(state->raw_log_history.count == 2 && state->log_history.count == 2);
+	assert(strstr(state->diagnostic_message, "Broken pipe"));
+	assert(state->diagnostic_until > monotonic_milliseconds());
+	assert(strstr(state->raw_log_history.lines[0], "[transport] command timed-out"));
+	assert(read(terminal[0], buffer, sizeof(buffer)) < 0 && errno == EAGAIN);
+	fprintf(stderr, "partial diagnostic");
+	watch_tui_drain_diagnostics(&display);
+	assert(state->raw_log_history.count == 3);
+	watch_tui_free(state);
+	fprintf(stderr, "restored stderr"); fflush(stderr);
+	assert(read(terminal[0], buffer, sizeof(buffer)) == 15);
+	assert(!memcmp(buffer, "restored stderr", 15));
+	assert(dup2(original, STDERR_FILENO) >= 0);
+	close(original); close(terminal[0]); close(terminal[1]);
+	puts("PASS diagnostics: stderr isolated, complete/partial lines retained, transient status and stderr restored");
 }
 
 static void test_confirmation(void)
@@ -202,12 +304,308 @@ static void test_activity(void)
 	watch_tui_free(&display.tui_state);
 }
 
+static void save_test_file(const char *path, const char *text, mode_t mode)
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
+	assert(fd >= 0);
+	assert(!tui_save_write_all(fd, text, strlen(text)));
+	assert(!close(fd));
+	assert(!chmod(path, mode));
+}
+
+static void save_test_contents(const char *path, const char *expected)
+{
+	char buffer[8192];
+	int fd = open(path, O_RDONLY);
+	ssize_t count;
+
+	assert(fd >= 0);
+	count = read(fd, buffer, sizeof(buffer) - 1);
+	assert(count >= 0);
+	buffer[count] = '\0';
+	assert(!strcmp(buffer, expected));
+	close(fd);
+}
+
+static void save_test_init(struct tui_save *save, const char *path, const char *data)
+{
+	memset(save, 0, sizeof(*save));
+	save->initialized = true;
+	save->directory_fd = -1;
+	save->data = strdup(data);
+	assert(save->data);
+	save->bytes = strlen(data);
+	snprintf(save->input, sizeof(save->input), "%s", path);
+}
+
+static void test_save_files(void)
+{
+	char root[PATH_MAX - 128], path[PATH_MAX], other[PATH_MAX], directory[PATH_MAX];
+	struct tui_save save;
+	struct stat st;
+	struct rlimit limit, original;
+	void (*old_signal)(int);
+	DIR *contents;
+	struct dirent *entry;
+
+	assert(getenv("TMPDIR"));
+	snprintf(root, sizeof(root), "%s/sgil1-save-XXXXXX", getenv("TMPDIR"));
+	assert(mkdtemp(root));
+	snprintf(path, sizeof(path), "%s/data '$(echo bad)`.txt", root);
+	save_test_init(&save, path, "first\n");
+	assert(tui_save_prepare(&save) == 0);
+	if (tui_save_commit(&save)) {
+		fprintf(stderr, "Save test failed: %s\n", save.message);
+		abort();
+	}
+	save_test_contents(path, "first\n");
+	assert(!stat(path, &st) && (st.st_mode & 0777) == 0600);
+	tui_save_reset(&save);
+	save_test_init(&save, path, "next\n");
+	assert(tui_save_prepare(&save) == 1);
+	save.append = true;
+	if (tui_save_commit(&save)) {
+		fprintf(stderr, "Save test failed: %s\n", save.message);
+		abort();
+	}
+	save_test_contents(path, "first\nnext\n");
+	tui_save_reset(&save);
+	assert(!chmod(path, 0640));
+	save_test_init(&save, path, "replace\n");
+	assert(tui_save_prepare(&save) == 1);
+	if (tui_save_commit(&save)) {
+		fprintf(stderr, "Save test failed: %s\n", save.message);
+		abort();
+	}
+	save_test_contents(path, "replace\n");
+	assert(!stat(path, &st) && (st.st_mode & 0777) == 0640);
+	tui_save_reset(&save);
+	/* A replaced or edited target must not be overwritten from a stale prompt. */
+	save_test_init(&save, path, "bad");
+	assert(tui_save_prepare(&save) == 1);
+	assert(!unlink(path));
+	save_test_file(path, "someone else's data", 0600);
+	assert(tui_save_commit(&save) < 0);
+	save_test_contents(path, "someone else's data");
+	tui_save_reset(&save);
+	snprintf(other, sizeof(other), "%s/new.txt", root);
+	save_test_init(&save, other, "bad");
+	assert(tui_save_prepare(&save) == 0);
+	save_test_file(other, "created during prompt", 0600);
+	assert(tui_save_commit(&save) < 0);
+	save_test_contents(other, "created during prompt");
+	tui_save_reset(&save);
+	assert(!unlink(other));
+	/* Neither linked files nor special files may be used as save destinations. */
+	assert(!symlink(path, other));
+	save_test_init(&save, other, "bad");
+	assert(tui_save_prepare(&save) < 0);
+	tui_save_reset(&save);
+	assert(!unlink(other));
+	assert(!link(path, other));
+	save_test_init(&save, path, "bad");
+	assert(tui_save_prepare(&save) < 0);
+	tui_save_reset(&save);
+	assert(!unlink(other));
+	assert(!mkfifo(other, 0600));
+	save_test_init(&save, other, "bad");
+	assert(tui_save_prepare(&save) < 0);
+	tui_save_reset(&save);
+	assert(!unlink(other));
+	/* A partial staging write must leave existing data unchanged and clean up. */
+	save_test_init(&save, path, "longer than limit");
+	assert(tui_save_prepare(&save) == 1);
+	assert(!getrlimit(RLIMIT_FSIZE, &original));
+	limit = original;
+	limit.rlim_cur = 4;
+	old_signal = signal(SIGXFSZ, SIG_IGN);
+	assert(!setrlimit(RLIMIT_FSIZE, &limit));
+	assert(tui_save_commit(&save) < 0);
+	assert(!setrlimit(RLIMIT_FSIZE, &original));
+	signal(SIGXFSZ, old_signal);
+	save_test_contents(path, "someone else's data");
+	tui_save_reset(&save);
+	/* Check actual permissions even when the test runner itself is root. */
+	assert(!chmod(root, 0777));
+	assert(!chmod(path, 0400));
+	{
+		pid_t child = fork();
+		int status;
+
+		assert(child >= 0);
+		if (!child) {
+			if (!geteuid()) {
+				if (setgid(65534) || setuid(65534))
+					_exit(2);
+			}
+			save_test_init(&save, path, "bad");
+			_exit(tui_save_prepare(&save) < 0 ? 0 : 1);
+		}
+		assert(waitpid(child, &status, 0) == child);
+		assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+	assert(!chmod(path, 0600));
+	/* Directory preference is deterministic and falls through invalid entries. */
+	snprintf(directory, sizeof(directory), "%s/default", root);
+	assert(!mkdir(directory, 0700));
+	{
+		char *tmpdir = strdup(getenv("TMPDIR"));
+		char *tmp = getenv("TMP") ? strdup(getenv("TMP")) : NULL;
+		char *runtime = getenv("XDG_RUNTIME_DIR") ? strdup(getenv("XDG_RUNTIME_DIR")) : NULL;
+		char chosen[PATH_MAX];
+
+		setenv("TMPDIR", "/nonexistent-sgil1-directory", 1);
+		setenv("TMP", directory, 1);
+		setenv("XDG_RUNTIME_DIR", root, 1);
+		assert(tui_save_default_directory(chosen, sizeof(chosen)) && !strcmp(chosen, directory));
+		setenv("TMPDIR", root, 1);
+		assert(tui_save_default_directory(chosen, sizeof(chosen)) && !strcmp(chosen, root));
+		setenv("TMPDIR", "/proc", 1);
+		setenv("TMP", "/nonexistent-sgil1-directory", 1);
+		assert(tui_save_default_directory(chosen, sizeof(chosen)) && !strcmp(chosen, root));
+		setenv("XDG_RUNTIME_DIR", "/nonexistent-sgil1-directory", 1);
+		assert(tui_save_default_directory(chosen, sizeof(chosen)));
+		assert(!strcmp(chosen, "/var/tmp") || !strcmp(chosen, "/tmp"));
+		setenv("TMPDIR", tmpdir, 1);
+		if (tmp) setenv("TMP", tmp, 1); else unsetenv("TMP");
+		if (runtime) setenv("XDG_RUNTIME_DIR", runtime, 1); else unsetenv("XDG_RUNTIME_DIR");
+		free(tmpdir); free(tmp); free(runtime);
+	}
+	assert(!rmdir(directory));
+	contents = opendir(root);
+	assert(contents);
+	while ((entry = readdir(contents)))
+		assert(strncmp(entry->d_name, ".sgil1ctl-save-", 14));
+	closedir(contents);
+	assert(!unlink(path));
+	assert(!rmdir(root));
+	puts("PASS Save buffer files: create, append, overwrite, permissions, stale targets, links, partial writes and directory order");
+}
+
+static void test_save_snapshot(void)
+{
+	struct watch_tui_state state = { 0 };
+
+	assert(!watch_tui_init_histories(&state, 4, 4));
+	assert(!watch_tui_append_log(&state, "hidden or folded raw log", true));
+	watch_tui_save_begin(&state);
+	watch_tui_save_capture(&state);
+	assert(!strcmp(state.save.data, "hidden or folded raw log\n"));
+	assert(!watch_tui_append_log(&state, "later log", true));
+	assert(!strstr(state.save.data, "later log"));
+	assert(state.save.snapshot_valid);
+	state.save.snapshot_valid = false;
+	state.save.phase = TUI_SAVE_ERROR;
+	watch_tui_save_key(&state, '\n');
+	assert(state.save.capture_pending);
+	tui_save_reset(&state.save);
+	append(&state, "CPU  A: 0xff\n        0x55\n", "first");
+	append(&state, "CPU  A: 0xff\n        0x55\n", "second");
+	state.focus = WATCH_TUI_FOCUS_LEDS;
+	watch_tui_save_begin(&state);
+	watch_tui_save_capture(&state);
+	assert(state.save.entries == 2);
+	assert(strstr(state.save.data, "first\n"));
+	assert(strstr(state.save.data, "second\n"));
+	assert(contains_ci(state.save.data, "0xff"));
+	watch_tui_free(&state);
+	puts("PASS Save buffer snapshot: all retained data, repeats, hidden LEDs and stable capture");
+}
+
+static void test_save_clipboard(void)
+{
+	char root[PATH_MAX - 128], helper[PATH_MAX], copied[PATH_MAX];
+	char *old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+	struct tui_save save;
+	int i;
+
+	snprintf(root, sizeof(root), "%s/sgil1-copy-XXXXXX", getenv("TMPDIR"));
+	assert(mkdtemp(root));
+	snprintf(helper, sizeof(helper), "%s/pbcopy", root);
+	snprintf(copied, sizeof(copied), "%s/copied.txt", root);
+	setenv("SGIL1_TEST_CLIPBOARD", copied, 1);
+	setenv("PATH", root, 1);
+	save_test_init(&save, "", "");
+	tui_save_find_clipboard(&save);
+	assert(!save.clipboard_kind);
+	save_test_file(helper, "#!/bin/sh\n/bin/cat > \"$SGIL1_TEST_CLIPBOARD\"\n", 0700);
+	snprintf(save.path, sizeof(save.path), "/path/with 'quotes' $(touch BAD) and spaces");
+	tui_save_find_clipboard(&save);
+	assert(save.clipboard_kind == 1);
+	tui_save_copy_start(&save, monotonic_milliseconds());
+	for (i = 0; save.copy_pid > 0 && i < 100; i++) {
+		usleep(10000);
+		tui_save_copy_poll(&save, monotonic_milliseconds());
+	}
+	assert(!save.copy_pid && strstr(save.message, "copied to clipboard"));
+	save_test_contents(copied, save.path);
+	save_test_file(helper, "#!/bin/sh\necho 'display access denied' >&2\nexit 3\n", 0700);
+	tui_save_copy_start(&save, monotonic_milliseconds());
+	for (i = 0; save.copy_pid > 0 && i < 100; i++) {
+		usleep(10000);
+		tui_save_copy_poll(&save, monotonic_milliseconds());
+	}
+	assert(!save.copy_pid && strstr(save.message, "display access denied"));
+	save_test_file(helper, "#!/bin/sh\nexec /bin/sleep 60\n", 0700);
+	tui_save_copy_start(&save, monotonic_milliseconds());
+	tui_save_copy_poll(&save, monotonic_milliseconds() + 6000);
+	for (i = 0; save.copy_pid > 0 && i < 100; i++) {
+		usleep(10000);
+		tui_save_copy_poll(&save, monotonic_milliseconds());
+	}
+	assert(!save.copy_pid && strstr(save.message, "timed out"));
+	assert(!unlink(helper));
+	{
+		char *old_wayland = getenv("WAYLAND_DISPLAY") ? strdup(getenv("WAYLAND_DISPLAY")) : NULL;
+		char *old_display = getenv("DISPLAY") ? strdup(getenv("DISPLAY")) : NULL;
+		const char *names[] = { "wl-copy", "xclip", "xsel" };
+		const char *arguments[] = { "", "-selection clipboard -in", "--clipboard --input" };
+
+		for (size_t provider = 0; provider < ARRAY_SIZE(names); provider++) {
+			char script[256];
+
+			snprintf(helper, sizeof(helper), "%s/%s", root, names[provider]);
+			snprintf(script, sizeof(script), "#!/bin/sh\n[ \"$*\" = '%s' ] || exit 4\n/bin/cat > \"$SGIL1_TEST_CLIPBOARD\"\n", arguments[provider]);
+			save_test_file(helper, script, 0700);
+			unsetenv("WAYLAND_DISPLAY"); unsetenv("DISPLAY");
+			tui_save_find_clipboard(&save);
+			assert(!save.clipboard_kind);
+			setenv(provider ? "DISPLAY" : "WAYLAND_DISPLAY", "test-display", 1);
+			tui_save_find_clipboard(&save);
+			assert(save.clipboard_kind == (int)provider + 2);
+			tui_save_copy_start(&save, monotonic_milliseconds());
+			for (i = 0; save.copy_pid > 0 && i < 100; i++) {
+				usleep(10000);
+				tui_save_copy_poll(&save, monotonic_milliseconds());
+			}
+			assert(!save.copy_pid && strstr(save.message, "copied to clipboard"));
+			save_test_contents(copied, save.path);
+			assert(!unlink(helper));
+		}
+		if (old_wayland) setenv("WAYLAND_DISPLAY", old_wayland, 1); else unsetenv("WAYLAND_DISPLAY");
+		if (old_display) setenv("DISPLAY", old_display, 1); else unsetenv("DISPLAY");
+		free(old_wayland); free(old_display);
+	}
+	tui_save_reset(&save);
+	if (old_path) setenv("PATH", old_path, 1); else unsetenv("PATH");
+	free(old_path);
+	unsetenv("SGIL1_TEST_CLIPBOARD");
+	assert(!unlink(copied));
+	assert(!rmdir(root));
+	puts("PASS Save buffer clipboard: hidden when unavailable, literal path copy, failure and timeout");
+}
 int main(void)
 {
 	test_repeats();
 	test_confirmation();
+	test_second_power_down();
+	test_environment_geometry();
+	test_diagnostic_capture();
 	test_availability_and_clock();
 	test_activity();
+	test_save_files();
+	test_save_snapshot();
+	test_save_clipboard();
 	puts("PASS TUI state: retained repeats, hidden changes, timestamps, ring eviction and confirmation");
 	return 0;
 }
