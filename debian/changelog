@@ -1,3 +1,23 @@
+sgi-l1-usb-control (0.1.63) unstable; urgency=medium
+
+  * Updated components since 0.1.62: user-space sgil1ctl and terminal
+    regression tests; kernel module source is unchanged.
+  * Add horizontal separators above the final controls in Save buffer,
+    its result/error/conflict views, Operator controls and confirmation
+    dialogs, including USB waiting and the second power-down prompt.
+  * Reserve separator space when displaying saved paths and adapt Operator
+    footers to small terminals without overwriting controls or notices.
+  * Leave a blank row below Help's final Close item, including at the
+    minimum terminal size, and keep compact labels fully visible.
+  * Fix filename and word-confirmation cursors jumping to the status bar
+    when curses refreshes its input window. Keep the cursor at the actual
+    insertion point between keystrokes and hide it when input ends.
+  * Verify cursor position and visibility through GNU Screen, including
+    editing filename input; cover dialog separators and Help spacing.
+    Wait for USB reconnect completion with a bounded condition check.
+
+ -- Stuart Shelton <stuart@shelton.me>  Wed, 21 Oct 2026 23:03:43 +0100
+
 sgi-l1-usb-control (0.1.62) unstable; urgency=medium
 
   * Updated components since 0.1.61: user-space sgil1ctl, tests and

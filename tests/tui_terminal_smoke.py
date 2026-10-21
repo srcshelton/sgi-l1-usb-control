@@ -27,6 +27,14 @@ HARDSTATUS = "SCREEN-HARDSTATUS"
 ROWS, COLS = 24, 120
 
 
+def check_modal_footer(rendered, controls):
+    lines = rendered.split("\n")
+    row = next(i for i, line in enumerate(lines) if controls in line)
+    ruler = lines[row - 1]
+    if not any(char != " " and char * 20 in ruler for char in set(ruler)):
+        raise AssertionError(f"Missing separator above {controls!r}:\n{rendered}")
+
+
 def check_pane_controls(capture, send, resize):
     def wide_widths(expected):
         rendered = capture()
@@ -63,12 +71,16 @@ def check_pane_controls(capture, send, resize):
         save_row = next(i for i, line in enumerate(lines) if "Save buffer" in line)
         env_row = next(i for i, line in enumerate(lines) if "Environment" in line)
         observation_row = next(i for i, line in enumerate(lines) if ("a view:" if compact else "Observation view") in line)
-        if operator_row + 1 != env_row or env_row + 1 != rows[0] or save_row + 1 != observation_row:
+        if env_row not in (operator_row, operator_row + 1) or env_row + 1 != rows[0] or save_row + 1 != observation_row:
             raise AssertionError(f"Incorrect action order in Help:\n{rendered}")
         if rows != sorted(rows) or rows[1] not in (rows[0], rows[0] + 1) or rows[3] != rows[2] + 1:
             raise AssertionError(f"wrong help order:\n{rendered}")
         if rows[-1] not in (rows[-2], rows[-2] + 1):
             raise AssertionError(f"Redraw and Close are not adjacent:\n{rendered}")
+        title = next(line for line in lines if " Help " in line)
+        frame = re.search(r"TPP Help P+W", title)
+        if not frame or lines[rows[-1] + 1][frame.start() + 1:frame.end() - 1].strip():
+            raise AssertionError(f"Help has no blank row after Close:\n{rendered}")
         send(b"\r")
 
     wide_widths((80, 40))
@@ -273,7 +285,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     def select(key):
         send(key)
         expect("Type YES, then Return to send once")
-        expect("Blank input + Return aborts action")
+        check_modal_footer(expect("Blank input + Return aborts action"), "Esc/* Back")
 
     send(b"\f")
     rendered = capture()
@@ -289,6 +301,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     help_title = next(line for line in capture().splitlines() if " Help " in line)
     send(b"*")
     menu = expect("Host: off")
+    check_modal_footer(menu, "Esc/* Back")
     operator_title = next(line for line in menu.splitlines() if " Operator controls " in line)
     if not re.search(r"TPP Help P+W", help_title) or not re.search(r"TPP Operator controls P+W", operator_title):
         raise AssertionError(f"Help/Operator border mismatch: {help_title!r} / {operator_title!r}")
@@ -305,7 +318,10 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     footer = next(line for line in menu.splitlines() if "Console last active:" in line)
     if "[out of sync]" not in footer or footer.index("L1 ") > footer.index("Console last active:"):
         raise AssertionError(f"status clock missing or misplaced: {footer}")
+    resize(17, 80)  # Sixteen application rows still need the compact footer.
+    check_modal_footer(expect("l Reset L1"), "Esc/* back")
     resize(11, 40)
+    check_modal_footer(expect("l Reset L1"), "Esc/* back")
     send(b"\033")  # The minimum-height modal covers the status row.
     expect("[out of sync]")
     resize(24, 120)
@@ -347,7 +363,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Second power-down signal")
     if sent().count("CMD power down") != 1:
         raise AssertionError("second signal was automatically sent")
-    expect("Send 'pwr d' a second time?")
+    check_modal_footer(expect("Send 'pwr d' a second time?"), "y Yes | n No | Return/Esc Cancel")
     send(b"y")
     expect("power down: command acknowledged")
     if sent().count("CMD power down") != 2:
@@ -400,6 +416,10 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
         rendered = capture()
         if text not in rendered:
             raise AssertionError(f"missing {text!r}:\n{rendered}")
+        controls = next((value for value in ("Return Save", "Return Close", "Return Edit path", "o Overwrite")
+                         if value in rendered), None)
+        if controls:
+            check_modal_footer(rendered, controls)
         return rendered
 
     def begin(leds=False):
@@ -416,6 +436,9 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
 
     path = exports / "log 'quotes' ; $(echo no-shell) λ.txt"
     begin()
+    send(b"cursor-check")
+    send(b"\033OD", cursor_back=1)
+    send(b"\x15")
     submit(path)
     expect("Buffer saved")
     expect("c Copy path")
@@ -574,10 +597,13 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     elif mode in ("cli", "skip"):
         expect("u [x]")
     presence.touch()
-    send(b"")
-    send(b"")  # Allow the bounded presence poll and initial requests to complete.
-    rendered = capture()
-    if "Waiting for USB" in rendered or "Confirm:" in rendered:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        send(b"")
+        rendered = capture()
+        if "Waiting for USB" not in rendered and "Confirm:" not in rendered:
+            break
+    else:
         raise AssertionError(f"wait did not return to monitoring:\n{rendered}")
     expected = {"up": "CMD power up", "cli": "CMD power up", "reset": "CMD softreset",
                 "down": "CMD power down"}.get(mode)
@@ -759,9 +785,35 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         if HARDSTATUS.encode() not in terminal_output:
             raise AssertionError("attached Screen did not render its hardstatus")
         if exercise_controls or operator_timeout or wait_mode:
-            def send(keys):
+            def send(keys, cursor_back=0):
                 os.write(master, keys)
                 drain(0.4 if len(keys) < 30 else 1.5)
+                rendered = capture()
+                lines = rendered.split("\n")
+                prompt = next(((i, line) for i, line in enumerate(lines) if "Confirm: " in line), None)
+                if prompt:
+                    y, line = prompt
+                    x = line.index("Confirm: ") + len("Confirm: ")
+                    while x < len(line) and line[x] in "YESNO":
+                        x += 1
+                elif "File path [" in rendered:
+                    y = next(i for i, line in enumerate(lines) if "File path [" in line) + 1
+                    frame = re.search(r"TPP Save buffer P+W", next(line for line in lines if " Save buffer " in line))
+                    if not frame:
+                        raise AssertionError(f"Missing Save frame:\n{rendered}")
+                    field_start = frame.start() + 2
+                    field = lines[y][field_start:frame.end() - 2].rstrip()
+                    x = field_start + len(field) - cursor_back
+                else:
+                    y = None
+                if y is not None and keys:
+                    info = screen_command("-Q", "info").stdout
+                    position = re.search(rb"\((\d+),(\d+)\)/", info)
+                    if not position or int(position[2]) != y + 1 or (x is not None and int(position[1]) != x + 1):
+                        raise AssertionError(f"Input cursor is outside its field: {info!r}\n{rendered}")
+                    modes = re.findall(rb"\x1b\[\?25([hl])", terminal_output)
+                    if not modes or modes[-1] != b"h":
+                        raise AssertionError("GNU Screen left the input cursor hidden")
 
             def resize(rows, cols):
                 fcntl.ioctl(master, termios.TIOCSWINSZ,

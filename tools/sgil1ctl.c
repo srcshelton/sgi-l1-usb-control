@@ -6785,31 +6785,33 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 					WINDOW *window, int width)
 {
 	int height = getmaxy(window);
-	int redraw = height - 3;
-	bool small = height < 13;
+	int redraw = height - 4;
+	int shift = height == 10 ? -1 : 0;
+	bool small = height < 14;
 	char palette_setting[24], text[96];
 
 	watch_tui_palette_setting(state, palette_setting, sizeof(palette_setting), true);
-	mvwaddnstr(window, 1, 2, "* Operator controls", width - 4);
-	mvwaddnstr(window, 2, 2, "e Environment", width - 4);
-	mvwaddnstr(window, 3, 2, small ? "Tab pane </> ^/v shrink/grow pane" : "Tab select pane", width - 4);
+	mvwaddnstr(window, 1, 2, shift ? "* Operator controls; e Environment" : "* Operator controls", width - 4);
+	if (!shift)
+		mvwaddnstr(window, 2, 2, "e Environment", width - 4);
+	mvwaddnstr(window, 3 + shift, 2, small ? "Tab pane </> ^/v shrink/grow pane" : "Tab select pane", width - 4);
 	if (!small)
 		mvwaddnstr(window, 4, 2, COLS >= 100 ?
 			"Left/Right </> move divider" : "L/R </> ^/v shrink/grow pane", width - 4);
-	mvwaddnstr(window, small ? 4 : 5, 2, "U/D k/j line ^B/^F page g live", width - 4);
-	mvwaddnstr(window, small ? 5 : 6, 2, "s Save buffer", width - 4);
+	mvwaddnstr(window, (small ? 4 : 5) + shift, 2, "U/D k/j line ^B/^F page g live", width - 4);
+	mvwaddnstr(window, (small ? 5 : 6) + shift, 2, "s Save buffer", width - 4);
 	snprintf(text, sizeof(text), "a view:%s t time:%s m mono",
 		 state->all_mode ? "All" : "Filtered", state->show_led_timestamps ? "On" : "Off");
-	mvwaddnstr(window, small ? 6 : 7, 2, text, width - 4);
+	mvwaddnstr(window, (small ? 6 : 7) + shift, 2, text, width - 4);
 	snprintf(text, sizeof(text), "p sources:%s%s%s", state->show_annotations ? "On" : "Off",
 		 small ? " c palette:" : "", small ? palette_setting : "");
-	mvwaddnstr(window, small ? 7 : 8, 2, text, width - 4);
+	mvwaddnstr(window, (small ? 7 : 8) + shift, 2, text, width - 4);
 	if (!small) {
 		snprintf(text, sizeof(text), "c palette:%s", palette_setting);
 		mvwaddnstr(window, 9, 2, text, width - 4);
 	}
-	if (height == 10)
-		mvwaddnstr(window, height - 2, 2, "^L redraw | h/?/Esc/Ret close", width - 4);
+	if (height <= 11)
+		mvwaddnstr(window, height - 3, 2, "^L redraw | h/?/Esc/Ret close", width - 4);
 	else {
 		mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
 		mvwaddnstr(window, redraw + 1, 2, "h/?/Esc/Ret close", width - 4);
@@ -7128,6 +7130,7 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 	window = watch_tui_dialog(state, title, 19, &width, &height);
 	if (!window)
 		return;
+	mvwhline(window, height - 3, 1, ACS_HLINE, width - 2);
 	if (save->capture_pending) {
 		mvwaddnstr(window, 2, 2, "Capturing the full retained buffer...", width - 4);
 	} else if (save->phase == TUI_SAVE_PATH) {
@@ -7159,17 +7162,20 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 
 		snprintf(body, sizeof(body), "%s\n\n%s", message, *save->path ? save->path : save->input);
 		count = watch_tui_save_text(window, body, 1,
-			save->phase == TUI_SAVE_DONE ? height - 3 : height - 5, width, &scroll);
+			save->phase == TUI_SAVE_DONE ? height - 4 : height - 5, width, &scroll);
 		save->path_scroll = scroll;
 		snprintf(line, sizeof(line), "Rows %zu-%zu/%zu; Up/Down scroll",
 			 scroll + 1, scroll + (size_t)(height - 5) < count ? scroll + (size_t)(height - 5) : count, count);
 		if (save->phase != TUI_SAVE_DONE)
-			mvwaddnstr(window, height - 3, 2, line, width - 4);
+			mvwaddnstr(window, height - 4, 2, line, width - 4);
 		mvwaddnstr(window, height - 2, 2, save->phase == TUI_SAVE_CHOICE ?
 			"o Overwrite a Append Return Cancel" : save->phase == TUI_SAVE_ERROR ?
 			"Return Edit path | Esc Cancel" : save->clipboard_kind ?
 			"Return Close | c Copy path" : "Return Close", width - 4);
 	}
+	/* wgetch(stdscr) can refresh the parent between frames; keep its cursor in the input field. */
+	if (watch_tui_text_input_active(state))
+		wcursyncup(window);
 	wnoutrefresh(window);
 	delwin(window);
 }
@@ -7394,13 +7400,13 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 static void watch_tui_draw_help(const struct watch_tui_state *state)
 {
 	WINDOW *window;
-	bool wide = COLS >= 88 && LINES >= 21;
+	bool wide = COLS >= 88 && LINES >= 22;
 	int width;
 	int height;
 
 	if (!state->help_visible)
 		return;
-	window = watch_tui_dialog(state, " Help ", wide ? 21 : (LINES < 13 ? LINES : 13), &width, &height);
+	window = watch_tui_dialog(state, " Help ", wide ? 22 : (LINES < 14 ? LINES : 14), &width, &height);
 	if (!window)
 		return;
 	if (wide)
@@ -7507,7 +7513,6 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN) {
 			mvwaddnstr(window, 3, 2, "Send 'pwr d' a second time?", width - 4);
 			mvwaddnstr(window, 4, 2, "This will immediately power down host", width - 4);
-			mvwaddnstr(window, 6, 2, "y Yes | n No (Return also cancels)", width - 4);
 		} else {
 			mvwaddnstr(window, 3, 2, "Type YES, then Return to send once", width - 4);
 			mvwaddnstr(window, 4, 2, "Blank input + Return aborts action", width - 4);
@@ -7526,9 +7531,8 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 		mvwprintw(window, 4, 2, "u [%c] Power up host", state->wait_action == WATCH_TUI_ACTION_POWER_UP ? 'x' : ' ');
 		mvwprintw(window, 5, 2, "d [%c] Power down host", state->wait_action == WATCH_TUI_ACTION_POWER_DOWN ? 'x' : ' ');
 		mvwprintw(window, 6, 2, "r [%c] Reset/restart host", state->wait_action == WATCH_TUI_ACTION_HOST_RESET ? 'x' : ' ');
-		mvwaddnstr(window, 7, 2, "n Clear power action", width - 4);
 	} else {
-		bool compact = height < 16;
+		bool compact = height < 17;
 
 		mvwprintw(window, 1, 2, "Host: %s", watch_tui_host_label(state));
 		mvwaddnstr(window, 2, 2, state->l1_clock, width - 4);
@@ -7545,17 +7549,24 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 		watch_tui_operator_option(state, window, compact ? 7 : 10, compact ? 19 : 2,
 			compact ? width - 21 : width - 4, "s Sync L1 clock", WATCH_TUI_ACTION_SYNC_TIME);
 		if (compact)
-			mvwaddnstr(window, height - 2, 2, "* unavailable (host); Esc/* back", width - 4);
+			mvwaddnstr(window, height == 10 ? height - 1 : height - 2, 2,
+				"* unavailable (host); Esc/* back", width - 4);
 		else {
 			mvwaddnstr(window, 12, 2, "* Unavailable due to current host state (including unknown)", width - 4);
 			mvwaddnstr(window, 13, 2, state->operator_notice, width - 4);
 		}
 	}
-	if (height >= 16 || confirming || state->waiting_for_usb)
+	if (height >= 17 || confirming || state->waiting_for_usb)
 		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ?
-			"q Quit application" : "Esc/* Back", width - 4);
-	if (watch_tui_text_input_active(state))
+			(confirming ? "q Quit application" : "n Clear action | q Quit application") :
+			state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN ?
+			"y Yes | n No | Return/Esc Cancel" : "Esc/* Back", width - 4);
+	mvwhline(window, height == 10 && !confirming && !state->waiting_for_usb ?
+		height - 2 : height - 3, 1, ACS_HLINE, width - 2);
+	if (watch_tui_text_input_active(state)) {
 		wmove(window, 6, 11 + (int)strlen(state->confirmation));
+		wcursyncup(window);
+	}
 	wnoutrefresh(window);
 	delwin(window);
 }
