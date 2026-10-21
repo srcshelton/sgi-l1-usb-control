@@ -268,7 +268,7 @@ def check_environment(capture, send, resize, command_log, environment):
 
 
 def check_operator_controls(capture, send, resize, command_log, power_file):
-    actions = {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}
+    actions = {"CMD power up", "CMD power down", "CMD softreset", "CMD reset", "CMD reboot_l1 current"}
 
     def commands():
         return command_log.read_text().splitlines()
@@ -284,6 +284,9 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
 
     def select(key):
         send(key)
+        if key == b"l":
+            expect("L1 firmware / reset")
+            send(b"c")
         expect("Type YES, then Return to send once")
         check_modal_footer(expect("Blank input + Return aborts action"), "Esc/* Back")
 
@@ -377,17 +380,29 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Host: unknown")
     expect("*u Power up")
     expect("*d Power down")
+    # Controller reboot remains available with an unknown or off host.
+    select(b"l")
+    send(b"YES\r")
+    expect("reboot_l1 current: command acknowledged")
+    power_file.write_text("off")
+    send(b"*")
+    expect("Host: off")
+    select(b"l")
+    send(b"YES\r")
+    expect("reboot_l1 current: command acknowledged")
+    if power_file.read_text() != "off":
+        raise AssertionError("controller reboot changed host power state")
     power_file.write_text("on")
-    send(b"\033*")
+    send(b"*")
     select(b"r")
     send(b"YES\r")
     expect("softreset: command acknowledged")
     send(b"*")
     select(b"l")
     send(b"YES\r")
-    expect("reset: command acknowledged")
+    expect("reboot_l1 current: command acknowledged")
     send(b"a")
-    expect("reset: command acknowledged")
+    expect("reboot_l1 current: command acknowledged")
     send(b"a*")
     select(b"s")
     send(b"YES\r")
@@ -402,10 +417,94 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("*u Power up")
     select(b"l")
     send(b"*")
-    if sent() != ["CMD power up", "CMD power down", "CMD power down", "CMD softreset", "CMD reset"]:
+    expect("c Reboot current")
+    send(b"*")
+    expect("Host: on")
+    send(b"*")
+    if " Operator controls " in capture() or " L1 firmware / reset " in capture():
+        raise AssertionError("back navigation did not close Operator controls")
+    if sent() != ["CMD power up", "CMD power down", "CMD power down", "CMD reboot_l1 current", "CMD reboot_l1 current", "CMD softreset", "CMD reboot_l1 current"]:
         raise AssertionError(f"operator actions sent wrong commands: {sent()}")
     resize(24, 120)
     print("PASS operator controls: shared styling, host-state gating/rechecks, abort, clock sync and early LEDs", flush=True)
+
+
+def check_firmware_banks(capture, send, command_log, power_file, flash_file):
+    normal = flash_file.read_text()
+
+    def expect(text):
+        rendered = capture()
+        if text not in rendered:
+            raise AssertionError(f"Missing firmware text {text!r}:\n{rendered}")
+        return rendered
+
+    def reboots():
+        return [line for line in command_log.read_text().splitlines() if line.startswith("CMD reboot_l1 ")]
+
+    def open_menu():
+        send(b"*")
+        send(b"l")
+        expect("L1 firmware / reset")
+
+    power_file.write_text("off")
+    open_menu()
+    expect("Running bank: B")
+    expect("A: 1.48.1 [valid]")
+    expect("B: 1.24.11 [default] running")
+    expect("01/22/2007 11:34:20")
+    expect("10/29/2003 00:05:26")
+    check_modal_footer(capture(), "r Refresh; Esc Back")
+    before = reboots()
+    send(b"o")
+    expect("Boot L1 bank A")
+    expect("Bank A: 1.48.1 [valid]")
+    send(b"\r")
+    expect("L1 firmware / reset")
+    if reboots() != before:
+        raise AssertionError("blank bank-switch confirmation sent a reboot")
+    flash_file.write_text(normal.replace("A valid", "A invalid"))
+    send(b"r")
+    expect("*o Boot other")
+    send(b"o")
+    if "Confirm:" in capture() or reboots() != before:
+        raise AssertionError("invalid alternate bank could be booted")
+    flash_file.write_text("ERROR: flash status unavailable\n")
+    send(b"r")
+    expect("Flash status unavailable")
+    expect("*o Boot other")
+    send(b"o")
+    if "Confirm:" in capture() or reboots() != before:
+        raise AssertionError("missing firmware status could authorise another bank")
+    flash_file.write_text(normal)
+    send(b"r")
+    send(b"o")
+    expect("Bank A: 1.48.1 [valid]")
+    flash_file.write_text(normal.replace("1.48.1", "1.48.2"))
+    send(b"YES\r")
+    expect("Firmware changed/unavailable; confirm again")
+    if reboots() != before:
+        raise AssertionError("a changed bank was booted using stale confirmation")
+    flash_file.write_text(normal)
+    send(b"r")
+    send(b"o")
+    expect("Boot L1 bank A")
+    send(b"YES\r")
+    expect("reboot_l1 a: command acknowledged")
+    if reboots() != before + ["CMD reboot_l1 a"] or power_file.read_text() != "off":
+        raise AssertionError("alternate bank reboot was repeated or changed host power")
+    open_menu()
+    expect("Running bank: A")
+    expect("A: 1.48.1 [valid] running")
+    send(b"o")
+    expect("Boot L1 bank B")
+    expect("Bank B: 1.24.11 [default]")
+    send(b"YES\r")
+    expect("reboot_l1 b: command acknowledged")
+    if reboots() != before + ["CMD reboot_l1 a", "CMD reboot_l1 b"]:
+        raise AssertionError("other-bank reboot targeted the wrong bank")
+    if any(line == "CMD reset" for line in command_log.read_text().splitlines()):
+        raise AssertionError("a controller reboot sent the host reset command")
+    print("PASS L1 firmware: versions/builds, current/other bank, invalid/missing status, stale confirmation and one-shot boot", flush=True)
 
 
 def check_save_buffer(capture, send, resize, directory, helper, clipboard):
@@ -608,7 +707,7 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     expected = {"up": "CMD power up", "cli": "CMD power up", "reset": "CMD softreset",
                 "down": "CMD power down"}.get(mode)
     actions = [line for line in commands() if line in
-               {"CMD power up", "CMD power down", "CMD softreset", "CMD reset"}]
+               {"CMD power up", "CMD power down", "CMD softreset", "CMD reset", "CMD reboot_l1 current"}]
     if actions != ([expected] if expected else []):
         raise AssertionError(f"wrong reconnect actions: {actions}, mode {mode}")
     if mode in ("up", "cli"):
@@ -653,9 +752,13 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     power_file = directory / "power.txt"
     clipboard = directory / "clipboard.txt"
     environment = directory / "environment.txt"
+    flash_file = directory / "flash.txt"
     helpers = directory / "helpers"
     helper = helpers / "pbcopy"
     if exercise_controls:
+        flash_file.write_text("Flash image B currently booted\nImage Status Revision Built\n"
+                              "A valid 1.48.1 01/22/2007 11:34:20\n"
+                              "B default 1.24.11 10/29/2003 00:05:26\n")
         helpers.mkdir()
         environment.write_text((ROOT / "tests" / "fixtures" / "env.txt").read_text() + "\n \n\t\n")
         helper.write_text("#!/bin/sh\n/bin/cat > \"$SGIL1_TEST_CLIPBOARD\"\n")
@@ -672,7 +775,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     if exercise_controls:
         extra_env.update(PATH=str(helpers) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
                          SGIL1_TEST_CLIPBOARD=str(clipboard), TMPDIR=str(directory),
-                         SGIL1_MOCK_ENV_FILE=str(environment))
+                         SGIL1_MOCK_ENV_FILE=str(environment), SGIL1_MOCK_FLASH_FILE=str(flash_file))
     if operator_timeout:
         extra_env["SGIL1_MOCK_POWER_UP_TIMEOUT"] = "1"
         extra_env["SGIL1_MOCK_RESET_PIPES_EPIPE"] = "1"
@@ -828,6 +931,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             else:
                 check_environment(capture, send, resize, command_log, environment)
                 check_operator_controls(capture, send, resize, command_log, power_file)
+                check_firmware_banks(capture, send, command_log, power_file, flash_file)
                 check_save_buffer(capture, send, resize, directory, helper, clipboard)
                 # Restore the fixture's original focus before navigation checks.
                 send(b"s")

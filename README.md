@@ -141,7 +141,9 @@ to open operator controls for power up, power down, host reset, L1 reset and
 clock sync. The menu shows host state and clock difference; unavailable actions
 stay visible and marked. Power-on starts directly after verifying the host is
 off; other actions require typing `YES` and pressing **Return**, and blank input
-aborts them. If the L1 requests a second power-down signal,
+aborts them. The **l** submenu shows both L1 firmware banks, their versions
+and build dates, and the running bank. Choose **c** to reboot the current image
+or **o** to boot the other valid bank; **r** refreshes the bank information. If the L1 requests a second power-down signal,
 a follow-up **y**/**n** prompt offers to send it once. Press **s** in the monitoring view to save
 all retained data from the selected pane to a file, with overwrite/append
 choices and a full-path confirmation. Press **e** for an Environment dialog
@@ -192,7 +194,8 @@ sgil1ctl reset --force
 ```
 
 The first issues a soft reset to the SGI system; the second restarts the L1
-controller itself. Adding `--follow` to a power or reset command displays LED
+controller itself using `reboot_l1 current`, regardless of host power state,
+and keeps the current firmware image. Adding `--follow` to a power or reset command displays LED
 changes during the operation.
 
 ### Waiting for a controller

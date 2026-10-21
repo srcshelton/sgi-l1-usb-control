@@ -1,3 +1,28 @@
+sgi-l1-usb-control (0.1.64) unstable; urgency=medium
+
+  * Updated components since 0.1.63: user-space sgil1ctl, tests, build
+    dependencies and documentation; kernel module source is unchanged.
+  * Correct TUI Reset L1 and CLI reset --force to send reboot_l1 current.
+    The raw L1 reset command resets the host, not the controller. Controller
+    reboots work independently of host power and retain the running image.
+  * Add an L1 firmware/reset submenu showing both banks' revisions, build
+    dates, status and the running bank, read from flash status on entry,
+    refresh and action selection. Offer current-image or other-bank reboot.
+  * Require YES for each reboot. Keep unavailable alternate banks visible
+    and marked; reject missing, contradictory or unrecognised image data
+    and images not reported valid/default with a recognised revision.
+  * Name the alternate target bank explicitly and recheck its identity,
+    revision, build date and status after confirmation. Cancel changed or
+    unavailable targets and require a fresh confirmation. Record the chosen
+    bank/version/build in the log and never retry timed-out reboot commands.
+  * Add reboot_l1 to confirmed destructive commands and flash status to
+    read-only commands. Send no firmware-write or flash default commands.
+  * Expand mock, parser and terminal coverage for host-off/unknown resets,
+    both bank directions, invalid images, stale confirmation, timeout,
+    submenu navigation and whitespace-only flash-status lines.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 22 Oct 2026 00:03:10 +0100
+
 sgi-l1-usb-control (0.1.63) unstable; urgency=medium
 
   * Updated components since 0.1.62: user-space sgil1ctl and terminal

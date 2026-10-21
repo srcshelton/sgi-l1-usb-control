@@ -41,6 +41,8 @@
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define SGIL1_REV_LEN 64
 #define SGIL1_IO_SIZE 4096
+/* SGI 007-3938-003, pp. 82-83: reset targets the host; retain the running L1 image. */
+#define SGIL1_L1_REBOOT_COMMAND "reboot_l1 current"
 #define SGIL1_IR_DEFAULT_L1_CMD_ADDR 0x00041003U
 #define SGIL1_IR_DEFAULT_SRC_ADDR 0x83000101U
 #define SGIL1_IR_DISCOVERY_ADDR 0x0ffff00eU
@@ -559,7 +561,8 @@ static bool command_usage(FILE *out, const char *cmd)
 		fprintf(out,
 			"Usage: sgil1ctl [GLOBAL OPTIONS] reset --force [-w|--follow]\n"
 			"\n"
-			"Send the L1 controller reset; use 'power reset --force' for host reboot.\n"
+			"Send the L1 controller reset using reboot_l1 current.\n"
+			"Use 'power reset --force' for host reboot.\n"
 			"\n"
 			"Options:\n"
 			"  --force, --yes        confirm L1 controller reset\n"
@@ -1021,7 +1024,7 @@ static bool l1_command_is_read_only(const char *cmd)
 	       streq_ci(cmd, "usb") || streq_ci(cmd, "env") ||
 	       streq_ci(cmd, "env check") || streq_ci(cmd, "fan") ||
 	       streq_ci(cmd, "leds") || streq_ci(cmd, "debug") ||
-	       streq_ci(cmd, "l1dbg") ||
+	       streq_ci(cmd, "l1dbg") || streq_ci(cmd, "flash status") ||
 	       streq_ci(cmd, "date") || streq_ci(cmd, "date tz") ||
 	       streq_ci(cmd, "serial") || streq_ci(cmd, "serial all") ||
 	       streq_ci(cmd, "log") ||
@@ -1091,6 +1094,7 @@ static bool l1_command_is_destructive(const char *cmd)
 	       l1_command_matches_prefix(cmd, "pwr down") ||
 	       l1_command_matches_prefix(cmd, "pwr d") ||
 	       l1_command_matches_prefix(cmd, "reset") ||
+	       l1_command_matches_prefix(cmd, "reboot_l1") ||
 	       l1_command_matches_prefix(cmd, "softreset") ||
 	       l1_command_matches_prefix(cmd, "softrst");
 }
@@ -5752,6 +5756,8 @@ enum watch_tui_action {
 	WATCH_TUI_ACTION_POWER_DOWN_AGAIN,
 	WATCH_TUI_ACTION_HOST_RESET,
 	WATCH_TUI_ACTION_L1_RESET,
+	WATCH_TUI_ACTION_L1_BANK_A,
+	WATCH_TUI_ACTION_L1_BANK_B,
 	WATCH_TUI_ACTION_SYNC_TIME,
 };
 
@@ -5762,9 +5768,13 @@ enum watch_tui_host_state {
 };
 
 #include "tui_save.h"
+#include "tui_firmware.h"
 
 struct watch_tui_state {
 	struct tui_save save;
+	bool firmware_visible;
+	struct tui_firmware firmware, firmware_confirmed;
+	char firmware_notice[128];
 	bool diagnostics_active;
 	int diagnostics_read_fd, diagnostics_saved_stderr;
 	char diagnostic_line[512], diagnostic_message[560];
@@ -7424,9 +7434,23 @@ static const char *watch_tui_action_command(enum watch_tui_action action)
 	case WATCH_TUI_ACTION_POWER_DOWN:
 	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN: return "power down";
 	case WATCH_TUI_ACTION_HOST_RESET: return "softreset";
-	case WATCH_TUI_ACTION_L1_RESET: return "reset";
+	case WATCH_TUI_ACTION_L1_RESET: return SGIL1_L1_REBOOT_COMMAND;
+	case WATCH_TUI_ACTION_L1_BANK_A: return "reboot_l1 a";
+	case WATCH_TUI_ACTION_L1_BANK_B: return "reboot_l1 b";
 	default: return "";
 	}
+}
+
+static bool watch_tui_l1_reboot(enum watch_tui_action action)
+{
+	return action == WATCH_TUI_ACTION_L1_RESET || action == WATCH_TUI_ACTION_L1_BANK_A ||
+		action == WATCH_TUI_ACTION_L1_BANK_B;
+}
+
+static int watch_tui_firmware_target(enum watch_tui_action action)
+{
+	return action == WATCH_TUI_ACTION_L1_BANK_A ? 0 :
+		action == WATCH_TUI_ACTION_L1_BANK_B ? 1 : -1;
 }
 
 static const char *watch_tui_action_label(enum watch_tui_action action)
@@ -7436,7 +7460,9 @@ static const char *watch_tui_action_label(enum watch_tui_action action)
 	case WATCH_TUI_ACTION_POWER_DOWN: return "Power down host";
 	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN: return "Second power-down signal";
 	case WATCH_TUI_ACTION_HOST_RESET: return "Reset/restart host";
-	case WATCH_TUI_ACTION_L1_RESET: return "Reset L1 controller (USB may drop)";
+	case WATCH_TUI_ACTION_L1_RESET: return "Reboot current L1 image (USB may drop)";
+	case WATCH_TUI_ACTION_L1_BANK_A: return "Boot L1 bank A (USB may drop)";
+	case WATCH_TUI_ACTION_L1_BANK_B: return "Boot L1 bank B (USB may drop)";
 	case WATCH_TUI_ACTION_SYNC_TIME: return "Set L1 clock from this machine";
 	default: return "";
 	}
@@ -7452,6 +7478,10 @@ static bool watch_tui_action_available(const struct watch_tui_state *state,
 	case WATCH_TUI_ACTION_POWER_DOWN_AGAIN:
 	case WATCH_TUI_ACTION_HOST_RESET:
 		return state->host_state == WATCH_TUI_HOST_ON;
+	case WATCH_TUI_ACTION_L1_BANK_A:
+	case WATCH_TUI_ACTION_L1_BANK_B:
+		return tui_firmware_can_boot_other(&state->firmware) &&
+			watch_tui_firmware_target(action) == 1 - state->firmware.current;
 	case WATCH_TUI_ACTION_L1_RESET:
 	case WATCH_TUI_ACTION_SYNC_TIME:
 		return true;
@@ -7490,6 +7520,40 @@ static void watch_tui_operator_option(const struct watch_tui_state *state,
 	}
 }
 
+static void watch_tui_draw_firmware(const struct watch_tui_state *state, WINDOW *window,
+				    int width, int height)
+{
+	char text[160];
+	bool available = tui_firmware_can_boot_other(&state->firmware);
+
+	if (*state->firmware_notice)
+		mvwaddnstr(window, 1, 2, state->firmware_notice, width - 4);
+	else if (*state->operator_notice)
+		mvwaddnstr(window, 1, 2, state->operator_notice, width - 4);
+	else {
+		snprintf(text, sizeof(text), "Running bank: %c", state->firmware.current >= 0 ?
+			'A' + state->firmware.current : '?');
+		mvwaddnstr(window, 1, 2, text, width - 4);
+	}
+	for (int i = 0; i < 2; i++) {
+		const struct tui_firmware_bank *bank = &state->firmware.bank[i];
+
+		snprintf(text, sizeof(text), "%c: %s [%s]%s", 'A' + i,
+			bank->present ? bank->revision : "version unavailable",
+			bank->present ? bank->status : "unknown",
+			state->firmware.current == i ? " running" : "");
+		mvwaddnstr(window, 2 + i * 2, 2, text, width - 4);
+		snprintf(text, sizeof(text), "Built: %s", *bank->built ? bank->built : "unavailable");
+		mvwaddnstr(window, 3 + i * 2, 2, text, width - 4);
+	}
+	mvwaddnstr(window, 6, 2, "c Reboot current", 16);
+	if (!available) wattron(window, A_DIM);
+	mvwaddnstr(window, 6, 20, available ? "o Boot other" : "*o Boot other", width - 22);
+	if (!available) wattroff(window, A_DIM);
+	if (height >= 11)
+		mvwaddnstr(window, 7, 2, "* Other bank unknown/not bootable", width - 4);
+}
+
 static void watch_tui_draw_operator(const struct watch_tui_state *state)
 {
 	WINDOW *window;
@@ -7500,16 +7564,30 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 	if (!state->operator_visible && !state->waiting_for_usb)
 		return;
 	window = watch_tui_dialog(state, state->waiting_for_usb ?
-		" Waiting for USB " : " Operator controls ",
-		confirming ? 12 : state->waiting_for_usb ? 12 : 17, &width, &height);
+		" Waiting for USB " : state->firmware_visible ? " L1 firmware / reset " : " Operator controls ",
+		confirming ? 12 : state->waiting_for_usb ? 12 : state->firmware_visible ? 12 : 17, &width, &height);
 	if (!window)
 		return;
 	if (state->action_busy || state->operator_refresh ||
 	    state->requested_action != WATCH_TUI_ACTION_NONE) {
 		mvwaddnstr(window, 2, 2, state->action_busy ?
-			   "Command in progress" : "Reading host status and L1 clock...", width - 4);
+			   "Command in progress" : state->firmware_visible ? "Reading L1 firmware banks..." :
+			   "Reading host status and L1 clock...", width - 4);
 	} else if (confirming) {
 		mvwaddnstr(window, 1, 2, watch_tui_action_label(state->selected_action), width - 4);
+		if (watch_tui_l1_reboot(state->selected_action)) {
+			int target = watch_tui_firmware_target(state->selected_action);
+			char text[128];
+
+			if (target < 0) target = state->firmware.current;
+			if (target >= 0 && target < 2) {
+				const struct tui_firmware_bank *bank = &state->firmware.bank[target];
+				snprintf(text, sizeof(text), "Bank %c: %s [%s]", 'A' + target,
+					bank->revision, bank->status);
+				mvwaddnstr(window, 2, 2, text, width - 4);
+			}
+		}
+
 		if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN) {
 			mvwaddnstr(window, 3, 2, "Send 'pwr d' a second time?", width - 4);
 			mvwaddnstr(window, 4, 2, "This will immediately power down host", width - 4);
@@ -7518,6 +7596,8 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 			mvwaddnstr(window, 4, 2, "Blank input + Return aborts action", width - 4);
 			mvwprintw(window, 6, 2, "Confirm: %s", state->confirmation);
 		}
+	} else if (state->firmware_visible) {
+		watch_tui_draw_firmware(state, window, width, height);
 	} else if (state->waiting_for_usb) {
 		mvwaddnstr(window, 1, 2, state->wait_device_present ?
 			"USB present; preparing L1 connection" :
@@ -7556,12 +7636,13 @@ static void watch_tui_draw_operator(const struct watch_tui_state *state)
 			mvwaddnstr(window, 13, 2, state->operator_notice, width - 4);
 		}
 	}
-	if (height >= 17 || confirming || state->waiting_for_usb)
+	if (height >= 17 || confirming || state->waiting_for_usb || state->firmware_visible)
 		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ?
 			(confirming ? "q Quit application" : "n Clear action | q Quit application") :
 			state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN ?
-			"y Yes | n No | Return/Esc Cancel" : "Esc/* Back", width - 4);
-	mvwhline(window, height == 10 && !confirming && !state->waiting_for_usb ?
+			"y Yes | n No | Return/Esc Cancel" : state->firmware_visible && !confirming ?
+			"* unavailable; r Refresh; Esc Back" : "Esc/* Back", width - 4);
+	mvwhline(window, height == 10 && !confirming && !state->waiting_for_usb && !state->firmware_visible ?
 		height - 2 : height - 3, 1, ACS_HLINE, width - 2);
 	if (watch_tui_text_input_active(state)) {
 		wmove(window, 6, 11 + (int)strlen(state->confirmation));
@@ -8254,12 +8335,21 @@ static void watch_tui_cycle_palette(struct watch_tui_state *state,
 static void watch_tui_operator_menu(struct watch_tui_state *state)
 {
 	state->operator_visible = true;
+	state->firmware_visible = false;
 	state->operator_notice[0] = '\0';
 	state->selected_action = WATCH_TUI_ACTION_NONE;
 	state->requested_action = WATCH_TUI_ACTION_NONE;
 	state->confirmation[0] = '\0';
 	state->operator_refresh = true;
 	state->host_state = WATCH_TUI_HOST_UNKNOWN;
+}
+
+static void watch_tui_return_operator(struct watch_tui_state *state)
+{
+	bool firmware = state->firmware_visible;
+
+	watch_tui_operator_menu(state);
+	state->firmware_visible = firmware;
 }
 
 /* Inspect only new entries in the first successful log read after power down.
@@ -8297,6 +8387,11 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 		if (state->waiting_for_usb) {
 			state->selected_action = WATCH_TUI_ACTION_NONE;
 			state->confirmation[0] = '\0';
+		} else if (state->firmware_visible) {
+			bool confirming = state->selected_action != WATCH_TUI_ACTION_NONE;
+
+			watch_tui_return_operator(state);
+			if (!confirming) state->firmware_visible = false;
 		} else {
 			state->operator_visible = false;
 			state->selected_action = WATCH_TUI_ACTION_NONE;
@@ -8330,7 +8425,7 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 				state->selected_action = WATCH_TUI_ACTION_NONE;
 				state->confirmation[0] = '\0';
 			} else {
-				watch_tui_operator_menu(state);
+				watch_tui_return_operator(state);
 			}
 		} else if (key == KEY_BACKSPACE || key == 127 || key == 8) {
 			if (length)
@@ -8348,6 +8443,28 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 			state->wait_set_time = !state->wait_set_time;
 		if (key == 'n' || key == 'N')
 			state->wait_action = WATCH_TUI_ACTION_NONE;
+	}
+	if (!state->waiting_for_usb && state->firmware_visible) {
+		if (key == 'r' || key == 'R') {
+			state->operator_refresh = true;
+			state->operator_notice[0] = '\0';
+		} else if (key == 'c' || key == 'C') {
+			state->requested_action = WATCH_TUI_ACTION_L1_RESET;
+		} else if (key == 'o' || key == 'O') {
+			if (tui_firmware_can_boot_other(&state->firmware))
+				state->requested_action = state->firmware.current == 0 ?
+					WATCH_TUI_ACTION_L1_BANK_B : WATCH_TUI_ACTION_L1_BANK_A;
+			else
+				snprintf(state->operator_notice, sizeof(state->operator_notice),
+					"Other bank unavailable; refresh status");
+		}
+		return;
+	}
+	if (!state->waiting_for_usb && (key == 'l' || key == 'L')) {
+		state->firmware_visible = true;
+		state->operator_refresh = true;
+		state->operator_notice[0] = '\0';
+		return;
 	}
 	switch (key) {
 	case 'u': case 'U': action = WATCH_TUI_ACTION_POWER_UP; break;
@@ -9119,6 +9236,20 @@ static void watch_tui_refresh_clock(struct watch_display *display,
 	free(timezone);
 }
 
+static void watch_tui_read_firmware(struct watch_tui_state *state, const struct options *opts)
+{
+	char *text = NULL;
+	int ret = l1_text_command_status(opts, "flash status", false, &text);
+
+	tui_firmware_parse(NULL, &state->firmware);
+	state->firmware_notice[0] = '\0';
+	if (ret || !text || l1_text_indicates_failure(text))
+		snprintf(state->firmware_notice, sizeof(state->firmware_notice), "Flash status unavailable");
+	else if (!tui_firmware_parse(text, &state->firmware))
+		snprintf(state->firmware_notice, sizeof(state->firmware_notice), "Incomplete flash status");
+	free(text);
+}
+
 static void watch_tui_refresh_operator(struct watch_display *display,
 				        const struct options *opts)
 {
@@ -9127,13 +9258,19 @@ static void watch_tui_refresh_operator(struct watch_display *display,
 
 	state->action_busy = true;
 	watch_tui_render(display);
-	state->host_state = watch_tui_read_host_state(opts);
-	watch_tui_refresh_clock(display, opts, true);
+	if (state->firmware_visible)
+		watch_tui_read_firmware(state, opts);
+	else {
+		state->host_state = watch_tui_read_host_state(opts);
+		watch_tui_refresh_clock(display, opts, true);
+	}
 	state->action_busy = false;
 	state->operator_refresh = false;
 	state->requested_action = WATCH_TUI_ACTION_NONE;
 	if (selection != WATCH_TUI_ACTION_NONE && !watch_stop_requested) {
 		if (watch_tui_action_available(state, selection)) {
+			if (watch_tui_l1_reboot(selection))
+				state->firmware_confirmed = state->firmware;
 			if (selection == WATCH_TUI_ACTION_POWER_UP)
 				state->pending_action = selection;
 			else
@@ -9141,6 +9278,7 @@ static void watch_tui_refresh_operator(struct watch_display *display,
 			state->confirmation[0] = '\0';
 		} else {
 			snprintf(state->operator_notice, sizeof(state->operator_notice),
+				 state->firmware_visible ? "Firmware bank unavailable; review status" :
 				 "Action unavailable: host is %s", watch_tui_host_label(state));
 		}
 	}
@@ -9259,7 +9397,20 @@ static int watch_tui_run_action(struct watch_display *display,
 				 "L1 clock sync failed or response unavailable; not retried");
 		goto out;
 	}
-	state->host_state = watch_tui_read_host_state(opts);
+	if (!watch_tui_l1_reboot(action))
+		state->host_state = watch_tui_read_host_state(opts);
+	else if (watch_tui_firmware_target(action) >= 0) {
+		watch_tui_read_firmware(state, opts);
+		if (!tui_firmware_same_target(&state->firmware_confirmed, &state->firmware,
+					      watch_tui_firmware_target(action))) {
+			watch_tui_return_operator(state);
+			snprintf(state->operator_notice, sizeof(state->operator_notice),
+				 "Firmware changed/unavailable; confirm again");
+			watch_display_status(display, state->operator_notice);
+			if (watch_tui_record_action(display, state->operator_notice)) ret = -1;
+			goto out;
+		}
+	}
 	if (watch_stop_requested)
 		goto out;
 	if (!watch_tui_action_available(state, action)) {
@@ -9274,6 +9425,12 @@ static int watch_tui_run_action(struct watch_display *display,
 	}
 	snprintf(message, sizeof(message), "Operator confirmed: %s",
 		 watch_tui_action_label(action));
+	if (watch_tui_firmware_target(action) >= 0) {
+		const struct tui_firmware_bank *bank = &state->firmware.bank[watch_tui_firmware_target(action)];
+
+		snprintf(message, sizeof(message), "Operator confirmed: boot L1 bank %c, version %s, built %s",
+			'A' + watch_tui_firmware_target(action), bank->revision, bank->built);
+	}
 	watch_display_status(display, message);
 	if (watch_tui_record_action(display, message)) {
 		ret = -1;
@@ -9347,6 +9504,7 @@ static int watch_tui_connect(const struct options *opts, struct options *cmd_opt
 	uint64_t next_probe = 0;
 
 	state->waiting_for_usb = true;
+	state->firmware_visible = false;
 	state->environment_visible = state->environment_requested = false;
 	state->power_down_log_pending = false;
 	state->clock_valid = false;
@@ -9513,7 +9671,7 @@ static int run_watch_scheduler(const struct options *opts,
 				last_was_led = false;
 				led_delay = watch->led_interval_ms;
 				next_led = next_log = monotonic_milliseconds();
-				if (action == WATCH_TUI_ACTION_L1_RESET ||
+				if (watch_tui_l1_reboot(action) ||
 				    action == WATCH_TUI_ACTION_HOST_RESET)
 					route_valid = !cmd_opts->dest_auto_discovered;
 			}
@@ -10334,11 +10492,11 @@ static int do_reset_command(const struct options *opts, int argc, char **argv,
 		return 2;
 	if (!force) {
 		fprintf(stderr,
-			"refusing L1 command 'reset': add --force to confirm system power/reset action\n");
+			"refusing L1 controller reboot: add --force to confirm\n");
 		return 2;
 	}
 
-	ret = run_l1_command_core(opts, "reset", true, false, false, true,
+	ret = run_l1_command_core(opts, SGIL1_L1_REBOOT_COMMAND, true, false, false, true,
 				  opts->debug, &text);
 	if (ret == SGIL1_L1CMD_RESPONSE_TIMEOUT) {
 		printf("Reset: command sent; response timed out, which can happen if USB drops during reset\n");

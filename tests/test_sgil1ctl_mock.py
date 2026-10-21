@@ -841,7 +841,7 @@ class Sgil1CtlMockTests(unittest.TestCase):
             seconds=0.5,
         )
 
-        self.assertIn("reset issued", stdout)
+        self.assertIn("restarting controller", stdout)
         self.assertIn("0x55: Global master in PROM", stdout)
         self.assertIn("0x70: Running BIST on bank 0", stdout)
         self.assertNotIn("LEDs follow: leds command failed", stderr)
@@ -1064,6 +1064,46 @@ class Sgil1CtlMockTests(unittest.TestCase):
         self.assertIn("requested second signal", proc.stdout)
         self.assertEqual(log.count("CMD power down"), 2, log)
         self.assertIn("confirmed system appears off", proc.stdout)
+
+    def test_controller_reset_requires_force_and_uses_reboot_l1(self):
+        proc, log = self.run_with_log(["reset"], {"SGIL1_MOCK_POWER": "off"})
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("add --force", proc.stderr)
+        self.assertNotIn("CMD reboot_l1", log)
+        self.assertNotIn("CMD reset\n", log)
+        for power in ("off", "on"):
+            with self.subTest(power=power):
+                proc, log = self.run_with_log(["reset", "--force"], {"SGIL1_MOCK_POWER": power})
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("restarting controller", proc.stdout)
+                self.assertEqual(log.count("CMD reboot_l1 current\n"), 1)
+                self.assertNotIn("CMD reset\n", log)
+                self.assertNotIn("CMD softreset\n", log)
+                self.assertNotIn("CMD power check\n", log)
+
+    def test_controller_reset_timeout_is_not_retried(self):
+        proc, log = self.run_with_log(["reset", "--force"],
+                                      {"SGIL1_MOCK_POWER": "off", "SGIL1_MOCK_L1_REBOOT_TIMEOUT": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("response timed out", proc.stdout)
+        self.assertEqual(log.count("CMD reboot_l1 current\n"), 1)
+        self.assertNotIn("CMD reset\n", log)
+
+    def test_raw_reset_targets_host_and_reboot_l1_requires_force(self):
+        proc, log = self.run_with_log(["l1cmd", "reset", "--force"], {"SGIL1_MOCK_POWER": "off"})
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("ERROR: power appears off.", proc.stdout)
+        self.assertIn("CMD reset\n", log)
+        for args in (["reboot_l1"], ["reboot_l1", "current"]):
+            with self.subTest(args=args):
+                proc, log = self.run_with_log(["l1cmd", *args])
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("add --force", proc.stderr)
+                self.assertNotIn("CMD reboot_l1", log)
+                proc, log = self.run_with_log(["l1cmd", *args, "--force"], {"SGIL1_MOCK_POWER": "off"})
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("restarting controller", proc.stdout)
+                self.assertEqual(log.count("CMD " + " ".join(args) + "\n"), 1)
 
     def test_power_reset_requires_force_and_sends_softreset(self):
         denied = self.run_ctl(["power", "reset"])

@@ -57,6 +57,7 @@ struct mock_fd {
 static struct mock_fd mock_fds[MOCK_MAX_FDS];
 static bool mock_initialized;
 static bool mock_power_on = true;
+static int mock_firmware_bank = 1;
 static bool mock_power_down_confirm;
 static bool mock_power_up_timeout;
 static int mock_power_down_count;
@@ -448,13 +449,50 @@ static const char *mock_power_response(void)
 	return mock_power_on ? "power appears on\n" : "power appears off\n";
 }
 
+static const char *mock_flash_status(void)
+{
+	static char text[8192];
+	const char *path = getenv("SGIL1_MOCK_FLASH_FILE");
+
+	if (path) {
+		FILE *fp = fopen(path, "r");
+		if (!fp) return "ERROR: flash status unavailable\n";
+		size_t length = fread(text, 1, sizeof(text) - 1, fp);
+		text[length] = '\0';
+		fclose(fp);
+	} else {
+		snprintf(text, sizeof(text), "Flash image %c currently booted\n"
+			"Image Status Revision Built\n----- -------- ---------- -----\n"
+			"A valid 1.48.1 01/22/2007 11:34:20\n"
+			"B default 1.24.11 10/29/2003 00:05:26\n", 'A' + mock_firmware_bank);
+	}
+	return text;
+}
+
+static void mock_reboot_firmware(int bank)
+{
+	const char *path = getenv("SGIL1_MOCK_FLASH_FILE");
+	const char *text = mock_flash_status();
+	const char *header = strstr(text, "Flash image ");
+
+	mock_firmware_bank = bank;
+	if (path && header && header[12]) {
+		FILE *fp = fopen(path, "r+");
+		if (fp) {
+			if (!fseek(fp, (long)(header - text + 12), SEEK_SET))
+				fputc('A' + bank, fp);
+			fclose(fp);
+		}
+	}
+}
+
 static const char *known_response_for_command(const char *cmd)
 {
 	if (!strcmp(cmd, "help"))
 		return "Commands are:\n"
 		       "*                  syscom|junkbus|jb|bedrockbrick "
 		       "version|ver usb env date serial log leds debug "
-		       "l1dbg power|pwr reset softreset|softrst flash fan\n"
+		       "l1dbg power|pwr reset reboot_l1 softreset|softrst flash fan\n"
 		       "                   help|hlp\n\n";
 	if (!strcmp(cmd, "help bedrock"))
 		return "syscom|junkbus|jb|bedrock \n"
@@ -502,6 +540,8 @@ static const char *known_response_for_command(const char *cmd)
 		       "        set image B as the default flash image\n"
 		       "flash status\n"
 		       "        display status of flash images\n";
+	if (!strcmp(cmd, "flash status"))
+		return mock_flash_status();
 	if (!strcmp(cmd, "flash"))
 		return "ERROR: command not found.\n";
 	if (!strcmp(cmd, "date help"))
@@ -643,8 +683,13 @@ static const char *known_response_for_command(const char *cmd)
 		return "";
 	if (!strcmp(cmd, "log"))
 		return mock_log_response();
-	if (!strcmp(cmd, "reset"))
-		return "reset issued\n";
+	if (!strcmp(cmd, "reset")) {
+		(void)mock_power_response();
+		return mock_power_on ? "reset issued\n" : "ERROR: power appears off.\n";
+	}
+	if (!strcmp(cmd, "reboot_l1") || !strcmp(cmd, "reboot_l1 current") ||
+	    !strcmp(cmd, "reboot_l1 a") || !strcmp(cmd, "reboot_l1 b"))
+		return "reboot_l1: restarting controller\n";
 	if (!strcmp(cmd, "softreset") || !strcmp(cmd, "softrst"))
 		return "soft reset issued\n";
 
@@ -750,6 +795,15 @@ static ssize_t handle_data_write(struct mock_fd *m, const void *buf, size_t coun
 				       0);
 
 		if (mock_command_failure_count++ < failures) {
+			free(raw_cmd);
+			return (ssize_t)count;
+		}
+	}
+
+	if (!strncmp(cmd, "reboot_l1", 9)) {
+		if (!strcmp(cmd, "reboot_l1 a")) mock_reboot_firmware(0);
+		if (!strcmp(cmd, "reboot_l1 b")) mock_reboot_firmware(1);
+		if (getenv("SGIL1_MOCK_L1_REBOOT_TIMEOUT")) {
 			free(raw_cmd);
 			return (ssize_t)count;
 		}

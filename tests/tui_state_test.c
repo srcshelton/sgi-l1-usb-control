@@ -279,6 +279,48 @@ static void test_confirmation(void)
 	watch_stop_requested = 0;
 }
 
+static void test_firmware_banks(void)
+{
+	const char *normal = "Flash image B currently booted\r\n \t\r\n"
+		"Image Status Revision Built\r\n----- -------- ---------- -----\r\n"
+		"A valid 1.48.1 01/22/2007 11:34:20\r\n"
+		"B default 1.24.11 10/29/2003 00:05:26\r\n";
+	struct tui_firmware firmware, changed;
+	struct watch_tui_state state = { 0 };
+
+	assert(tui_firmware_parse(normal, &firmware));
+	assert(firmware.current == 1 && tui_firmware_can_boot_other(&firmware));
+	assert(!strcmp(firmware.bank[0].revision, "1.48.1"));
+	assert(!strcmp(firmware.bank[1].built, "10/29/2003 00:05:26"));
+	assert(tui_firmware_same_target(&firmware, &firmware, 0));
+	assert(!tui_firmware_same_target(&firmware, &firmware, 1));
+	state.firmware = firmware;
+	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_L1_BANK_A));
+	assert(!watch_tui_action_available(&state, WATCH_TUI_ACTION_L1_BANK_B));
+	assert(!strcmp(watch_tui_action_command(WATCH_TUI_ACTION_L1_BANK_A), "reboot_l1 a"));
+	assert(!strcmp(watch_tui_action_command(WATCH_TUI_ACTION_L1_BANK_B), "reboot_l1 b"));
+	changed = firmware;
+	changed.current = 0;
+	assert(!tui_firmware_same_target(&firmware, &changed, 0));
+	changed = firmware;
+	snprintf(changed.bank[0].revision, sizeof(changed.bank[0].revision), "1.48.2");
+	assert(!tui_firmware_same_target(&firmware, &changed, 0));
+	assert(!tui_firmware_parse(NULL, &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	assert(!tui_firmware_parse("Flash image A currently booted\nB valid 1.2.3\n", &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	assert(tui_firmware_parse("Flash image A currently booted\nA default 1.2.3\nB invalid 9.9.9\n", &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	assert(!tui_firmware_parse("Flash image A currently booted\nFlash image B currently booted\nA valid 1.2.3\nB valid 1.2.3\n", &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	assert(!tui_firmware_parse("Flash image A currently booted\nA valid 1.2.3\nA valid 1.2.3\nB valid 1.2.3\n", &changed));
+	assert(tui_firmware_parse("Flash image A currently booted\nA default 1.2.3\nB unknown 1.2.3\n", &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	assert(tui_firmware_parse("Flash image A currently booted\nA default 1.2.3\nB valid nonsense\n", &changed));
+	assert(!tui_firmware_can_boot_other(&changed));
+	puts("PASS L1 firmware: bank/version/build parsing, validity, contradictory replies and target changes");
+}
+
 static void test_availability_and_clock(void)
 {
 	struct watch_tui_state state = { 0 };
@@ -290,11 +332,15 @@ static void test_availability_and_clock(void)
 	assert(!watch_tui_action_available(&state, WATCH_TUI_ACTION_POWER_UP));
 	assert(!watch_tui_action_available(&state, WATCH_TUI_ACTION_HOST_RESET));
 	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_L1_RESET));
+	assert(!strcmp(watch_tui_action_command(WATCH_TUI_ACTION_L1_RESET), "reboot_l1 current"));
+	assert(!strcmp(watch_tui_action_command(WATCH_TUI_ACTION_HOST_RESET), "softreset"));
 	state.host_state = WATCH_TUI_HOST_OFF;
 	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_POWER_UP));
+	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_L1_RESET));
 	assert(!watch_tui_action_available(&state, WATCH_TUI_ACTION_POWER_DOWN));
 	state.host_state = WATCH_TUI_HOST_ON;
 	assert(!watch_tui_action_available(&state, WATCH_TUI_ACTION_POWER_UP));
+	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_L1_RESET));
 	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_POWER_DOWN));
 	assert(watch_tui_action_available(&state, WATCH_TUI_ACTION_HOST_RESET));
 	watch_tui_format_delta(22.0 * 365 * 86400 + 2 * 86400, text, sizeof(text));
@@ -664,6 +710,7 @@ int main(void)
 	test_environment_geometry();
 	test_diagnostic_capture();
 	test_availability_and_clock();
+	test_firmware_banks();
 	test_activity();
 	test_save_files();
 	test_save_snapshot();

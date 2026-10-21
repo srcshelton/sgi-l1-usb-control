@@ -40,7 +40,7 @@ sgil1ctl: $(SGIL1CTL_OBJECT) $(CONFIG_STAMP)
 sgil1ctl.o: sgil1ctl.c ../include/sgi_l1_ioctl.h $(VERSION_INPUTS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wall -Wextra -Wpedantic -c -o $@ $<
 
-sgil1ctl-tui.o: sgil1ctl.c tui_save.h ../include/sgi_l1_ioctl.h $(VERSION_INPUTS)
+sgil1ctl-tui.o: sgil1ctl.c tui_save.h tui_firmware.h ../include/sgi_l1_ioctl.h $(VERSION_INPUTS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wall -Wextra -Wpedantic -c -o $@ $<
 
 $(CONFIG_STAMP):

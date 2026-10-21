@@ -174,13 +174,29 @@ Press **\*** (also the first Help entry) to open **Operator controls**.
 The menu reads the host power state and the L1 date and timezone on entry and
 on return. It checks again when an action is selected, before asking for
 confirmation, and rechecks host power state immediately before sending a
-power/reset command. Unavailable host actions remain visible, dimmed or italic
+host power/reset command. Unavailable host actions remain visible, dimmed or italic
 and marked with `*`: **u** (power up) requires an off host, while **d** (power
 down) and **r** (host soft reset/restart) require an on host. If host state is
-unknown, those actions are unavailable. **l** resets the L1 controller and can
-interrupt USB; **s** sets the L1 clock and timezone from the machine running
+unknown, those actions are unavailable. **l** opens **L1 firmware / reset**;
+**s** sets the L1 clock and timezone from the machine running
 `sgil1ctl`. The menu shows the L1 date and its approximate difference from
 that machine's time, using years/days or smaller units as appropriate.
+
+The L1 firmware view reads `flash status` on entry and refresh, showing both
+banks' versions, build dates and status, and identifying the running bank.
+**c** reboots the current image with `reboot_l1 current`; **o** boots the other
+bank using `reboot_l1 a` or `reboot_l1 b`. Both require `YES` and work regardless
+of host power state. **r** refreshes the information; **Esc** returns to Operator
+controls. Blank or invalid confirmation returns to the firmware menu.
+
+The other-bank option stays visible and marked unavailable if either bank or
+the running-bank identity is missing, contradictory or unrecognised, or the
+other image is not reported valid/default with a recognised version. The
+selected bank and version appear in the confirmation. Its identity, version,
+build date and status are read again after confirmation; changes cancel the
+request and require a fresh confirmation. These actions select an image for
+reboot; no firmware-write or `flash default` commands are sent.
+USB may disconnect, and a timed-out reboot is never retried automatically.
 
 Selecting **u** powers on a verified off host without a `YES` prompt; host
 state is checked again immediately before the command is sent. Other actions
@@ -269,9 +285,13 @@ the Linux host when the difference reaches the threshold.
 | `sgil1ctl power down` | Send one power-down signal |
 | `sgil1ctl power down --force` | Send a second signal to force power off |
 | `sgil1ctl power reset --force` | Issue a soft reset to the SGI system |
-| `sgil1ctl reset --force` | Reset the L1 controller |
+| `sgil1ctl reset --force` | Reboot the L1 controller with `reboot_l1 current` |
 
 `--follow` or `-w` monitors LEDs during power and reset operations.
+The controller reboot works with the host on or off and retains the current
+firmware image. The raw L1 `reset` command resets the host system; it is not
+a controller reboot. See the [SGI L1/L2 Controller Software User's Guide](https://www.infania.net/misc1/sgi_techpubs/techpubs/007-3938-003.pdf#page=104),
+pages 82-83, for `reboot_l1` and `reset`.
 
 ## Actions on connection
 
