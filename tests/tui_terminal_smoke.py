@@ -460,7 +460,11 @@ def check_save_buffer(capture, send, resize, directory, helper, clipboard):
     expect("Buffer saved")
     resize(11, 40)
     send(b"\033OB" * 100)
-    expect("end-of-long-path.txt")
+    rendered = capture()
+    # The basename can wrap at different columns as the runner path changes.
+    visible_path = "".join(row[3:37].rstrip() for row in rendered.split("\n")[1:6])
+    if "end-of-long-path.txt" not in visible_path:
+        raise AssertionError(f"last page omitted the full filename: {visible_path!r}\n{rendered}")
     send(b"\033OA")
     expect("Buffer saved")
     send(b"\r")

@@ -7057,8 +7057,8 @@ static size_t watch_tui_save_text(WINDOW *window, const char *text, int first, i
 		offset += next;
 		total++;
 	} while (text[offset] && next);
-	if (*scroll >= total)
-		*scroll = total - 1;
+	if (*scroll > (total > (size_t)rows ? total - (size_t)rows : 0))
+		*scroll = total > (size_t)rows ? total - (size_t)rows : 0;
 	offset = 0;
 	for (size_t index = 0; index < total && row < rows; index++) {
 		next = watch_tui_save_line(text + offset, width - 4, &bytes);
