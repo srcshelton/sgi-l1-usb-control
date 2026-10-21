@@ -596,6 +596,28 @@ static void test_save_clipboard(void)
 }
 int main(void)
 {
+	char fallback[PATH_MAX] = "";
+	bool made_parent = false;
+
+	/* TMPDIR is optional on developer machines and GitHub-hosted runners.
+	 * Keep fallback fixtures in a named workspace directory and remove them. */
+	if (!getenv("TMPDIR") || !*getenv("TMPDIR")) {
+		char workspace[PATH_MAX - 160];
+		const char *session = getenv("CODEX_SESSION_ID");
+
+		if (!session || !*session)
+			session = getenv("GITHUB_RUN_ID");
+		assert(getcwd(workspace, sizeof(workspace)));
+		if (!mkdir(".worktrees", 0700))
+			made_parent = true;
+		else
+			assert(errno == EEXIST);
+		snprintf(fallback, sizeof(fallback), "%s/.worktrees/tui-state-%.64s-XXXXXX",
+			 workspace, session && *session ? session : "standalone");
+		assert(mkdtemp(fallback));
+		assert(!setenv("TMPDIR", fallback, 1));
+		printf("TUI state fixtures: %s (removed on success)\n", fallback);
+	}
 	test_repeats();
 	test_confirmation();
 	test_second_power_down();
@@ -607,5 +629,10 @@ int main(void)
 	test_save_snapshot();
 	test_save_clipboard();
 	puts("PASS TUI state: retained repeats, hidden changes, timestamps, ring eviction and confirmation");
+	if (*fallback) {
+		assert(!rmdir(fallback));
+		if (made_parent)
+			assert(!rmdir(".worktrees"));
+	}
 	return 0;
 }
