@@ -487,7 +487,8 @@ static bool command_usage(FILE *out, const char *cmd)
 			"  e                     show environmental monitoring; r refreshes\n"
 			"  *                     operator controls; YES for power-down/reset/clock\n"
 			"  Ctrl-L                redraw the screen\n"
-			"  q                     quit\n");
+			"  q                     quit from the main monitoring view\n"
+			"  Ctrl-C                quit from any view\n");
 		command_usage_footer(out);
 		return true;
 	}
@@ -6863,7 +6864,7 @@ static void watch_tui_draw_wide_help(const struct watch_tui_state *state,
 			    state->monochrome || !state->color_capable);
 	mvwaddnstr(window, 18, 4, "Ctrl-L", 18);
 	mvwaddnstr(window, 18, 24, "Redraw screen", 30);
-	mvwaddnstr(window, 19, 4, "q", 18);
+	mvwaddnstr(window, 19, 4, "Ctrl-C", 18);
 	mvwaddnstr(window, 19, 24, "Quit", 30);
 	mvwaddnstr(window, 20, 4, "h, ?, Esc, Return", 18);
 	mvwaddnstr(window, 20, 24, "Close Help", 30);
@@ -6903,13 +6904,13 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 		wmove(window, 6, 2);
 		whline(window, ' ', width - 4);
 		snprintf(text, sizeof(text), "p sources:%s c:%s", state->show_annotations ? "On" : "Off", palette_setting);
-		mvwaddnstr(window, 6, 2, text, width - 11);
-		mvwaddnstr(window, 6, width - 8, "q Quit", 6);
+		mvwaddnstr(window, 6, 2, text, width - 12);
+		mvwaddnstr(window, 6, width - 9, "^C Quit", 7);
 	} else if (height <= 12)
-		mvwaddnstr(window, height - 4, 2, "^L redraw | q Quit", width - 4);
+		mvwaddnstr(window, height - 4, 2, "^L redraw | ^C Quit", width - 4);
 	else {
 		mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
-		mvwaddnstr(window, redraw + 1, 2, "q Quit", width - 4);
+		mvwaddnstr(window, redraw + 1, 2, "^C Quit", width - 4);
 	}
 	mvwaddnstr(window, height - 3, 2, "h, ?, Esc, Ret Close", width - 4);
 }
@@ -7336,7 +7337,7 @@ static void watch_tui_environment_key(struct watch_tui_state *state, int key)
 	page = rows > 0 ? (size_t)rows : 1;
 
 	switch (key) {
-	case 27: case '\n': case '\r': case KEY_ENTER: case 'e': case 'E': case 'q': case 'Q':
+	case 27: case '\n': case '\r': case KEY_ENTER: case 'e': case 'E':
 		state->environment_visible = state->environment_requested = state->environment_follow = false;
 		break;
 	case 'r': case 'R': state->environment_requested = true; break;
@@ -7388,7 +7389,7 @@ static void watch_tui_environment_footer(const struct watch_tui_state *state,
 			state->environment_column + 1, column_end < longest ? column_end : longest, longest);
 	snprintf(footer->position, sizeof(footer->position), "%s%s%s", footer->line_range,
 		*footer->line_range && *footer->column_range ? " | " : "", footer->column_range);
-	snprintf(all_keys, sizeof(all_keys), "Cursor keys, PgUp/PgDn | r Refresh | w Follow %s | t %s | Return, Esc Close", follow, units);
+	snprintf(all_keys, sizeof(all_keys), "Cursor keys, PgUp/PgDn | r Refresh | w Follow (%s) | t %s | Return, Esc Close", follow, units);
 	left = strlen(footer->position);
 	if (strlen(all_keys) + left + (left ? 1 : 0) <= (size_t)cells) {
 		footer->rows = 1;
@@ -7396,7 +7397,7 @@ static void watch_tui_environment_footer(const struct watch_tui_state *state,
 	} else {
 		left = strlen(footer->line_range) > strlen(footer->column_range) ? strlen(footer->line_range) : strlen(footer->column_range);
 		char options[96];
-		snprintf(options, sizeof(options), "w Follow %s | t %s | Return, Esc Close", follow, units);
+		snprintf(options, sizeof(options), "w Follow (%s) | t %s | Return, Esc Close", follow, units);
 		if (strlen(options) + left + (left ? 1 : 0) <= (size_t)cells) {
 			footer->rows = 2;
 			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | r Refresh");
@@ -7404,12 +7405,12 @@ static void watch_tui_environment_footer(const struct watch_tui_state *state,
 		} else if (cells >= 48) {
 			footer->rows = 3;
 			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | t %s", units);
-			snprintf(footer->keys[1], sizeof(footer->keys[1]), "r Refresh | w Follow %s", follow);
+			snprintf(footer->keys[1], sizeof(footer->keys[1]), "r Refresh | w Follow (%s)", follow);
 			snprintf(footer->keys[2], sizeof(footer->keys[2]), "Return, Esc Close");
 		} else {
 			footer->rows = 4;
 			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | r Refresh");
-			snprintf(footer->keys[1], sizeof(footer->keys[1]), "w Follow %s | t %s", follow, units);
+			snprintf(footer->keys[1], sizeof(footer->keys[1]), "w Follow (%s) | t %s", follow, units);
 			snprintf(footer->keys[3], sizeof(footer->keys[3]), "Return, Esc");
 		}
 	}
@@ -7570,7 +7571,7 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 		}
 	} else {
 		char keys[64];
-		snprintf(keys, sizeof(keys), " w Follow:%s | t %c | r | Esc ",
+		snprintf(keys, sizeof(keys), " w Follow (%s) | t %c | r | Esc ",
 			state->environment_follow ? "on" : "off", state->environment_fahrenheit ? 'F' : 'C');
 
 		/* Share the lower frame when three-row margins leave only a tiny view. */
@@ -7797,11 +7798,11 @@ static void watch_tui_draw_operator(struct watch_tui_state *state)
 	mvwhline(window, height - 3, 1, ACS_HLINE, width - 2);
 	if (menu) {
 		watch_tui_menu_text(window, height - 2, 2, width - 4, " r Refresh", 'r', false);
-		mvwaddnstr(window, height - 2, 12, " | Esc, * Close", width - 14);
+		mvwaddnstr(window, height - 2, 12, state->firmware_visible ? " | Esc, * Back" : " | Esc, * Close", width - 14);
 		if (limit) mvwaddnstr(window, height - 2, 27, " | k/j", width - 29);
 	} else if (state->waiting_for_usb && !confirming) {
 		watch_tui_menu_text(window, height - 2, 2, width - 4, "a Clear action", 'a', false);
-		watch_tui_menu_text(window, height - 2, 19, width - 21, "q Quit", 'q', false);
+		mvwaddnstr(window, height - 2, 19, "Ctrl-C Quit", width - 21);
 		mvwaddnstr(window, height - 2, 16, " | ", 3);
 	} else if (state->selected_action == WATCH_TUI_ACTION_POWER_DOWN_AGAIN) {
 		watch_tui_menu_text(window, height - 2, 2, width - 4, "y Yes", 'y', false);
@@ -7809,7 +7810,8 @@ static void watch_tui_draw_operator(struct watch_tui_state *state)
 		mvwaddnstr(window, height - 2, 7, " | ", 3);
 		mvwaddnstr(window, height - 2, 14, " | Return, Esc Cancel", width - 16);
 	} else
-		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ? "q Quit application" : "Esc, * Close", width - 4);
+		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ? "Ctrl-C Quit application" :
+			state->firmware_visible ? "Esc, * Back" : "Esc, * Close", width - 4);
 	if (watch_tui_text_input_active(state)) {
 		wmove(window, 6, 11 + (int)strlen(state->confirmation));
 		wcursyncup(window);
@@ -8017,7 +8019,10 @@ static void watch_tui_render(struct watch_display *display)
 		watch_tui_notice(state, stdscr, LINES - 1, 0, COLS, state->diagnostic_message);
 	} else {
 		if (footer_width) {
-			const char *hints = watch_tui_footer_keys(footer_width);
+			bool modal = state->help_visible || state->environment_visible ||
+				state->operator_visible || state->waiting_for_usb || state->save.phase != TUI_SAVE_NONE;
+			const char *hints = modal ? (footer_width >= 11 ? "Ctrl-C Quit" :
+				footer_width >= 7 ? "^C Quit" : "") : watch_tui_footer_keys(footer_width);
 			int hint_x = footer_width - (int)strlen(hints);
 
 			if (hint_x > 3) {
@@ -8031,7 +8036,9 @@ static void watch_tui_render(struct watch_display *display)
 		mvaddnstr(LINES - 1, clock_x, clock_text, activity_x - clock_x - 1);
 		if (clock_warning)
 			attroff(A_BOLD);
-		mvaddnstr(LINES - 1, activity_x, activity, COLS - activity_x);
+		/* Keep the clock/hints anchored, but align the activity text to the right edge. */
+		int text_x = COLS - (int)strlen(activity) - 1;
+		mvaddnstr(LINES - 1, text_x, activity, COLS - text_x);
 	}
 	attroff(A_REVERSE);
 	wnoutrefresh(stdscr);
@@ -8574,10 +8581,6 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 	size_t length = strlen(state->confirmation);
 	enum watch_tui_action action = WATCH_TUI_ACTION_NONE;
 
-	if (key == 'q' || key == 'Q') {
-		watch_stop_requested = 1;
-		return;
-	}
 	if (state->action_busy || state->pending_action != WATCH_TUI_ACTION_NONE)
 		return;
 	if (key == 27 || key == '*') {
@@ -8716,6 +8719,11 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 	watch_tui_drain_diagnostics(display);
 	wtimeout(stdscr, timeout);
 	key = wgetch(stdscr);
+	/* cbreak normally delivers SIGINT; also handle Ctrl-C received as input. */
+	if (key == 3) {
+		watch_stop_requested = 1;
+		return true;
+	}
 	if (state->save.phase != TUI_SAVE_NONE) {
 		watch_tui_save_key(state, key);
 		if (key == KEY_RESIZE)
@@ -8763,7 +8771,7 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		break;
 	case 'q':
 	case 'Q':
-		watch_stop_requested = 1;
+		if (!state->help_visible) watch_stop_requested = 1;
 		break;
 	case '\t':
 		state->focus = state->focus == WATCH_TUI_FOCUS_LOG ?

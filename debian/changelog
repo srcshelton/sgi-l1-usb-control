@@ -1,3 +1,21 @@
+sgi-l1-usb-control (1.0.67) unstable; urgency=medium
+
+  * Updated components since 1.0.66: user-space sgil1ctl, documentation
+    and TUI regression tests; kernel source is unchanged.
+  * Right-align Console last active text within its reserved field so the
+    label can move as the age changes without shifting clock or shortcuts.
+  * Display Environment Follow state as w Follow (off) / w Follow (on),
+    including compact layouts, and label firmware-menu return keys Back.
+  * Restrict q Quit to the main monitoring view. Ignore q in other menus
+    while preserving it as ordinary text in filename/confirmation input.
+    Use Ctrl-C to quit from any view, including mandatory USB waiting;
+    update Help, status-bar hints and documentation to match.
+  * Add rendered status alignment and modal quit-scope checks, and actual
+    Ctrl-C terminal coverage for the main view, Help, Environment, Operator
+    controls, firmware, confirmation prompts and Save buffer.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 22 Oct 2026 16:51:16 +0100
+
 sgi-l1-usb-control (1.0.66) unstable; urgency=medium
 
   * Updated components since 1.0.65: user-space sgil1ctl, documentation,

@@ -132,7 +132,8 @@ sgil1ctl watch --tui
 The log and LED panes appear side by side in a wide terminal and one above the
 other in a narrower window. Press **Tab** to select a pane, then use the arrow
 keys or **PgUp/PgDn** to scroll through its history. **End** returns to live
-output, **h** opens help, and **q** quits.
+output, **h** opens help, and **q** quits when no dialog is open.
+**Ctrl-C** quits from any view.
 
 Some LED status lines are hidden by default. Press **a** to switch between
 the **Filtered** and **All** views. Filtered LED states show their retained
@@ -150,7 +151,7 @@ a follow-up **y**/**n** prompt offers to send it once. Press **s** in the monito
 all retained data from the selected pane to a file, with overwrite/append
 choices and a full-path confirmation. Press **e** for an Environment dialog
 sized to the live `env` output. It highlights fault and warning readings,
-shows temperatures in Celsius (**t** switches scale), and offers **w Follow**
+shows temperatures in Celsius (**t** switches scale), and offers **w Follow (off/on)**
 for automatic refresh up to once per second alongside log/LED polling.
 Changed rows stand out for ten seconds; **r** refreshes manually. Transport
 diagnostics appear briefly in the status bar and remain in the log buffer.

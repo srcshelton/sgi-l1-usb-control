@@ -62,11 +62,11 @@ def check_pane_controls(capture, send, resize):
         return rendered
 
     def help_order(compact=False):
-        send(b"?")
+        send(b"?qQ")
         rendered = capture()
         lines = rendered.rstrip("\n").split("\n")
         entries = ([("Tab pane" if any("Tab pane" in line for line in lines) else "Tab select pane"), "shrink/grow pane", "t time:",
-                    "p sources:", "q Quit", "h, ?, Esc, Ret Close"] if compact else
+                    "p sources:", "^C Quit", "h, ?, Esc, Ret Close"] if compact else
                    ["Select pane", "Move divider left/right", "LED timestamps",
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
@@ -191,7 +191,9 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
     expect(" Environment ")
     expect("Environmental monitoring is enabled")
     expect("Warning Limits     Fault Limits       Current")
-    expect("w Follow off")
+    expect("w Follow (off)")
+    send(b"qQ")
+    expect(" Environment ")
     expect("t Celsius")
     rendered = capture()
     if "Cols " in rendered or ranges(rendered)[0] != 1 or ranges(rendered)[2] != 41:
@@ -199,7 +201,7 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
     check_modal_footer(rendered, "Cursor keys, PgUp/PgDn")
     lines = rendered.split("\n")
     border = re.search(r"TPP Environment P+W", next(line for line in lines if " Environment " in line))
-    for key in ("Cursor keys, PgUp/PgDn | r Refresh", "w Follow off | t Celsius | Return, Esc Close"):
+    for key in ("Cursor keys, PgUp/PgDn | r Refresh", "w Follow (off) | t Celsius | Return, Esc Close"):
         footer = next(line for line in lines if key in line)
         if not border or footer.index(key) + len(key) != border.end() - 2:
             raise AssertionError(f"Environment keys are not right aligned:\n{rendered}")
@@ -244,14 +246,14 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
         raise AssertionError(f"Wrong narrow Environment range:\n{capture()}")
     expect(f"Cols 1-34 of {longest}")
     expect("Cursor keys, PgUp/PgDn")
-    expect("w Follow off")
+    expect("w Follow (off)")
     expect("t Celsius")
     expect("Return, Esc")
     resize(11, 40)
     send(b">" * 100)
     send(b"\033OF")
     expect("available")
-    rendered = expect("w Follow:off | t C | r | Esc")
+    rendered = expect("w Follow (off) | t C | r | Esc")
     if not any(char != " " and char * 20 in rendered.split("\n")[5] for char in set(rendered.split("\n")[5])):
         raise AssertionError("minimum-size Environment lost its ruler")
     resize(24, 120)
@@ -280,7 +282,7 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
     environment.write_text((ROOT / "tests" / "fixtures" / "env-faults.txt").read_text())
     follow_start = env_count()
     send(b"w")
-    expect("w Follow on")
+    expect("w Follow (on)")
     expect("6 fault, 0 warn")
     if ranges(capture()) != position:
         raise AssertionError("Follow reset the vertical scroll position")
@@ -296,7 +298,7 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
     if env_count() < target or re.search(r"Cols (\d+)-", capture()).group(1) != horizontal:
         raise AssertionError("Follow stalled or reset horizontal scrolling")
     send(b"w")
-    expect("w Follow off")
+    expect("w Follow (off)")
     count = env_count()
     for _ in range(4):
         send(b"")
@@ -318,7 +320,7 @@ def check_environment(capture, send, resize, command_log, environment, timing_lo
         raise AssertionError("Return did not close Environment")
     resize(24, 120)
     send(b"e")
-    expect("w Follow off")
+    expect("w Follow (off)")
     send(b"\033")
     deadline = time.monotonic() + 6
     while "Transport:" in capture().split("\n")[-2] and time.monotonic() < deadline:
@@ -349,7 +351,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
             expect("L1 firmware / reset")
             send(b"c")
         expect("Type YES, then Return to send once")
-        check_modal_footer(expect("Blank input + Return aborts action"), "Esc, * Close")
+        check_modal_footer(expect("Blank input + Return aborts action"), "Esc, * Back" if key == b"l" else "Esc, * Close")
 
     send(b"\f")
     rendered = capture()
@@ -396,6 +398,8 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     resize(24, 120)
     send(b"*")
     expect("Host: off")
+    send(b"qQ")
+    expect("Operator controls")
     checks = commands().count("CMD power check")
     send(b"de")
     expect("Host: off")
@@ -526,6 +530,8 @@ def check_firmware_banks(capture, send, command_log, power_file, flash_file):
     power_file.write_text("off")
     open_menu()
     expect("Running bank: B")
+    send(b"qQ")
+    expect("L1 firmware / reset")
     expect("A: 1.48.1 [valid]")
     expect("B: 1.24.11 [default] running")
     expect("01/22/2007 11:34:20")
@@ -537,8 +543,8 @@ def check_firmware_banks(capture, send, command_log, power_file, flash_file):
     positions = [next(i for i, line in enumerate(lines) if value in line) for value in expected]
     if [b - a for a, b in zip(positions, positions[1:])] != [2, 3, 3, 1, 2]:
         raise AssertionError(f"Firmware sections have incorrect spacing:\n{rendered}")
-    check_modal_footer(rendered, "r Refresh | Esc, * Close")
-    footer_row = next(i for i, line in enumerate(lines) if "r Refresh | Esc, * Close" in line)
+    check_modal_footer(rendered, "r Refresh | Esc, * Back")
+    footer_row = next(i for i, line in enumerate(lines) if "r Refresh | Esc, * Back" in line)
     if footer_row != positions[-1] + 2 or "unavailable;" in lines[footer_row]:
         raise AssertionError(f"Firmware footer has a redundant gap or legend:\n{rendered}")
     before = reboots()
@@ -767,8 +773,9 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     def commands():
         return command_log.read_text().splitlines() if command_log.exists() else []
 
-    send(b"\033*\r")
+    send(b"\033*\rqQ")
     expect("Waiting for USB")
+    expect("Ctrl-C Quit")
     if any(line.startswith("CMD ") or line.startswith("LOCK ") for line in commands()):
         raise AssertionError("missing device was probed or locked")
     if mode == "quit":
@@ -822,7 +829,7 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     print(f"PASS mandatory USB wait: {mode}", flush=True)
 
 
-def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False, wait_mode=None, slow_environment=False):
+def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False, wait_mode=None, slow_environment=False, interrupt_view=None):
     name = f"altscreen-{altscreen}-{'primary' if primary else 'default'}-{stop}"
     if slow_environment:
         name += "-slow-environment"
@@ -830,6 +837,8 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         name += "-operator-timeout"
     if wait_mode:
         name += f"-wait-{wait_mode}"
+    if interrupt_view:
+        name += f"-interrupt-{interrupt_view}"
     directory = temporary / name
     directory.mkdir()
     session = f"sgil1ctl-{os.getpid()}-{name}"
@@ -838,7 +847,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     screenrc = directory / "screenrc"
     child_state = directory / "child.json"
     result = directory / "result.txt"
-    exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout and not wait_mode
+    exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout and not wait_mode and not interrupt_view
     command_log = directory / "commands.log"
     timing_log = directory / "timing.log"
     power_file = directory / "power.txt"
@@ -896,7 +905,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         f'hardstatus alwayslastline "{HARDSTATUS}"\n'
     )
     runner.write_text(
-        "import json, os, subprocess, sys, time\n"
+        "import json, os, signal, subprocess, sys, time\n"
         "from pathlib import Path\n"
         "size = os.get_terminal_size()\n"
         f"sys.stdout.write('\\033[2J\\033[H{SHELL_MARKER}\\n' "
@@ -909,6 +918,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         f"proc = subprocess.Popen({command!r}, env=env)\n"
         f"Path({str(child_state)!r}).write_text(json.dumps(dict("
         "pid=proc.pid, term=os.environ['TERM'], rows=size.lines)))\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
         "status = proc.wait()\n"
         f"sys.stdout.write('{PROMPT} ')\n"
         "sys.stdout.flush()\n"
@@ -990,7 +1000,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             raise AssertionError(f"wrong terminal/hardstatus layout: {child}")
         if HARDSTATUS.encode() not in terminal_output:
             raise AssertionError("attached Screen did not render its hardstatus")
-        if exercise_controls or operator_timeout or wait_mode:
+        if exercise_controls or operator_timeout or wait_mode or interrupt_view:
             def send(keys, cursor_back=0):
                 os.write(master, keys)
                 drain(0.4 if len(keys) < 30 else 1.5)
@@ -1027,7 +1037,28 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
                 os.kill(proc.pid, signal.SIGWINCH)
                 drain(0.4)
 
-            if wait_mode:
+            if interrupt_view:
+                steps, title = {
+                    "main": ([], "L1 log"),
+                    "help": ([b"?"], " Help "),
+                    "environment": ([b"e"], "Environment"),
+                    "operator": ([b"*"], "Operator controls"),
+                    "firmware": ([b"*", b"l"], "L1 firmware / reset"),
+                    "confirmation": ([b"*", b"d"], "Confirm:"),
+                    "firmware-confirmation": ([b"*", b"l", b"c"], "Confirm:"),
+                    "save": ([b"s"], "File path ["),
+                }[interrupt_view]
+                for keys in steps:
+                    send(keys)
+                rendered = capture()
+                if title not in rendered:
+                    raise AssertionError(f"Interrupt test did not reach {interrupt_view}:\n{rendered}")
+                if interrupt_view != "main" and "q Quit" in rendered:
+                    raise AssertionError("Modal still advertises q Quit")
+                actions = command_log.read_text() if command_log.exists() else ""
+                if any(f"CMD {command}\n" in actions for command in ("power down", "softreset", "reboot_l1 current")):
+                    raise AssertionError("Opening a confirmation sent an action")
+            elif wait_mode:
                 check_usb_wait(capture, send, presence, command_log, wait_mode)
             elif operator_timeout:
                 check_operator_timeout(capture, send, command_log)
@@ -1046,7 +1077,9 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
                     else:
                         send(b"\033")
                     check_pane_controls(capture, send, resize)
-        if stop == "q":
+        if stop == "Ctrl-C" or wait_mode == "quit":
+            os.write(master, b"\x03")
+        elif stop == "q":
             os.write(master, b"q")
         else:
             os.kill(child["pid"], getattr(signal, stop))
@@ -1092,6 +1125,8 @@ def main():
                     run_case(screen, Path(temporary), altscreen, primary, stop)
         run_case(screen, Path(temporary), "off", False, "q", slow_environment=True)
         run_case(screen, Path(temporary), "off", False, "q", operator_timeout=True)
+        for view in ("main", "help", "environment", "operator", "firmware", "confirmation", "firmware-confirmation", "save"):
+            run_case(screen, Path(temporary), "off", False, "Ctrl-C", interrupt_view=view)
         for mode in ("up", "cli", "skip", "reset", "down", "unconfirmed", "quit"):
             run_case(screen, Path(temporary), "off", False, "q", wait_mode=mode)
     return 0

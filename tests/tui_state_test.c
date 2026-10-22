@@ -377,9 +377,8 @@ static void test_confirmation(void)
 	state.action_busy = true;
 	keys(&state, "eYES\n");
 	assert(state.wait_action == WATCH_TUI_ACTION_NONE);
-	keys(&state, "q");
-	assert(watch_stop_requested);
-	watch_stop_requested = 0;
+	keys(&state, "qQ");
+	assert(!watch_stop_requested);
 }
 
 static void test_firmware_banks(void)
@@ -881,12 +880,40 @@ static void test_menu_rendering(void)
 			mvwinnstr(stdscr, LINES - 1, 0, current, test_width);
 			assert(strstr(current, "L1 ") - current == clock - baseline);
 			assert(!memcmp(baseline, current, (size_t)(clock - baseline)));
+			assert(current[test_width - 2] != ' ' && current[test_width - 1] == ' ');
+			if (test_width >= 80) {
+				char activity[64];
+				watch_tui_format_console_activity(&display, activity, sizeof(activity));
+				assert(strstr(current, activity) == current + test_width - strlen(activity) - 1);
+			}
+		}
+	}
+	{
+		struct watch_display display = { .tui = true };
+		display.tui_state.initialized = true;
+		display.tui_state.help_visible = true;
+		assert(ungetch('q') != ERR);
+		assert(!watch_tui_wait(&display, 0));
+		assert(display.tui_state.help_visible && !watch_stop_requested);
+		/* A literal Ctrl-C byte takes precedence over every modal input handler. */
+		for (int view = 0; view < 6; view++) {
+			memset(&display.tui_state, 0, sizeof(display.tui_state));
+			display.tui_state.initialized = true;
+			display.tui_state.help_visible = view == 0;
+			display.tui_state.environment_visible = view == 1;
+			display.tui_state.operator_visible = view == 2 || view == 3;
+			display.tui_state.firmware_visible = view == 3;
+			display.tui_state.save.phase = view == 4 ? TUI_SAVE_PATH : TUI_SAVE_NONE;
+			display.tui_state.waiting_for_usb = view == 5;
+			assert(ungetch(3) != ERR);
+			assert(watch_tui_wait(&display, 0) && watch_stop_requested);
+			watch_stop_requested = 0;
 		}
 	}
 	endwin();
 	delscreen(screen);
 	fclose(input); fclose(output);
-	puts("PASS menu rendering: accelerator placement/attributes, disabled legends, bank targets, scrolling and refresh keys");
+	puts("PASS menu rendering: accelerator placement/attributes, disabled legends, bank targets, scrolling, activity alignment and modal quit scope");
 }
 
 static void test_environment_rendering(void)
@@ -969,6 +996,9 @@ static void test_environment_rendering(void)
 	state.environment_text = strdup(text); assert(state.environment_text);
 	watch_tui_environment_key(&state, 'w');
 	assert(state.environment_follow);
+	watch_tui_environment_key(&state, 'q');
+	watch_tui_environment_key(&state, 'Q');
+	assert(state.environment_visible && state.environment_follow && !watch_stop_requested);
 	watch_tui_environment_key(&state, 'f');
 	assert(state.environment_follow); /* CLI-compatible w is the Follow shortcut. */
 	watch_tui_environment_key(&state, 't');

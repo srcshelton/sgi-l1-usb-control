@@ -236,6 +236,10 @@ def run_text_cursor_smoke():
         step(b"NO\r", False)
         step(b"\033", False)
         step(b"?", False)
+        step(b"qQ", False)
+        if proc.poll() is not None:
+            raise AssertionError("q quit from Help")
+        step(b"\r", False)
         os.write(master, b"q")
         proc.wait(timeout=3)
         if proc.returncode:
@@ -502,7 +506,7 @@ def main():
             or b"h, ?, Esc, Ret Close" not in help_view
             or b"^L redraw" not in help_view
             or b"p sources:Off" not in help_view
-            or b"q Quit" not in help_view
+            or b"^C Quit" not in help_view
         ):
             raise AssertionError("minimum-size TUI key guide was incomplete")
 

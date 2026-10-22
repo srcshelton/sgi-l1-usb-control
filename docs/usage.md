@@ -90,7 +90,8 @@ row. The display keeps your width and height settings for the current session.
 | **s** | Save the full selected log or LED buffer |
 | **e** | Show environmental monitoring |
 | **Ctrl-L** | Redraw the screen |
-| **q** | Quit |
+| **q** | Quit from the main monitoring view |
+| **Ctrl-C** | Quit from any view |
 
 The **Filtered** view summarises repeated log messages and LED states.
 The **All** view shows every retained observation, including hidden LED entries.
@@ -100,9 +101,11 @@ observation, and the repeat summary gives its latest observation. Counts and
 times cover retained samples, so they decrease or advance as history expires.
 These are observed snapshots, not a count of distinct firmware events.
 
-**q Quit** also works from Help; **Return**, **Esc**, **h** or **?** closes Help
-and returns to monitoring. The status bar keeps **q Quit** visible alongside
-the available shortcuts.
+**Return**, **Esc**, **h** or **?** closes Help and returns to monitoring.
+**q Quit** works only in the main monitoring view, with no dialog open.
+Elsewhere **q** has no menu action and remains ordinary text in input fields.
+**Ctrl-C** quits from any view, including confirmations and USB waiting. The
+status bar shows the quit shortcut appropriate to the current view.
 
 ### Saving a buffer
 
@@ -181,7 +184,8 @@ Line and column ranges appear only for axes that can scroll. Trailing blank
 lines are excluded from the scrollable output.
 
 **r** refreshes the reading; the view shows when the last successful reading
-was taken. **w Follow** toggles automatic refresh, limited to one request per
+was taken. **w Follow (off)** / **w Follow (on)** shows the current state;
+**w** toggles automatic refresh, limited to one request per
 second. The shared scheduler interleaves log and LED reads between automatic
 environment requests, including when their configured polling intervals are
 longer. Timeouts and queue pressure slow polling, and failures retain the
@@ -198,9 +202,10 @@ also stops Follow and returns to the mandatory waiting dialog; the next
 connection starts with a fresh environment baseline.
 
 Equivalent keys are comma-separated in hints; directional pairs use slashes
-(e.g. `Up/Down`, `PgUp/PgDn`). **Close** dismisses a view; **Cancel** abandons
-a pending input or action. Console activity uses a padded age field so its
-updates do not shift neighbouring status text.
+(e.g. `Up/Down`, `PgUp/PgDn`). **Close** dismisses a view; **Back** returns to a
+parent menu; **Cancel** abandons a pending input or action. Console activity is right-aligned within a reserved
+field: its label can move as the age changes while the clock and shortcuts stay
+in place.
 
 ### Operator controls
 
@@ -244,7 +249,9 @@ Selecting **u** powers on a verified off host without a `YES` prompt; host
 state is checked again immediately before the command is sent. Other actions
 require typing `YES` and pressing **Return** to send the command once. Blank or
 other input followed by **Return** aborts the action and returns to the menu.
-**Esc** or **\*** closes Operator controls; **q** still quits the application.
+**Esc** or **\*** closes Operator controls. The firmware menu labels the same
+keys **Back**, returning to Operator controls. **q** has no menu action here;
+**Ctrl-C** quits the application from either menu or a confirmation prompt.
 If the L1 requests a second power-down signal in its command response or in
 new entries from the very next successful log read, a follow-up dialog offers
 **y Yes** or **n No**; **Return** also cancels. A second `YES` is not required.
@@ -280,7 +287,7 @@ mandatory **Waiting for USB** dialog. **t** toggles clock sync on connection;
 `YES` plus **Return** to arm. **a Clear action** clears the armed power/reset
 action without changing the clock-sync selection; selecting a replacement
 disarms the previous action until the new choice is confirmed. **Esc** and
-**Return** cannot dismiss the waiting dialog; **q** quits the application.
+**Return** cannot dismiss the waiting dialog; **Ctrl-C** quits the application.
 Unconfirmed input is discarded if USB appears. Confirmed actions run once,
 with inapplicable host actions skipped, then normal LED/log following resumes.
 A later disconnect starts a fresh wait with no actions armed. The controller
