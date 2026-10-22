@@ -138,12 +138,14 @@ Some LED status lines are hidden by default. Press **a** to switch between
 the **Filtered** and **All** views. Filtered LED states show their retained
 sample count; **t** shows the first and latest observation times. Press **\***
 to open operator controls for power up, power down, host reset, L1 reset and
-clock sync. The menu shows host state and clock difference; unavailable actions
-stay visible and marked. Power-on starts directly after verifying the host is
-off; other actions require typing `YES` and pressing **Return**, and blank input
-aborts them. The **l** submenu shows both L1 firmware banks, their versions
+clock sync. Use **e** for host reset and **r** to refresh status. The menu
+shows host state and clock difference; unavailable actions stay visible and
+marked. Power-on starts directly after verifying the host is off; other actions
+require typing `YES` and pressing **Return**, and blank input aborts them. The **l** submenu shows both L1 firmware banks, their versions
 and build dates, and the running bank. Choose **c** to reboot the current image
-or **o** to boot the other valid bank; **r** refreshes the bank information. If the L1 requests a second power-down signal,
+or **o** to boot the other valid bank; both choices name the target bank.
+**r** refreshes the bank information, and **Esc** or **\*** returns to the
+parent menu. If the L1 requests a second power-down signal,
 a follow-up **y**/**n** prompt offers to send it once. Press **s** in the monitoring view to save
 all retained data from the selected pane to a file, with overwrite/append
 choices and a full-path confirmation. Press **e** for an Environment dialog
@@ -153,9 +155,11 @@ The status bar also shows L1 time and warns
 when it differs by more than five seconds from this machine.
 
 If USB is absent, the TUI waits in a dialog where you can arm clock or power
-actions for connection. `sgil1ctl wait --tui --set-time --power-up --force`
-preselects clock sync and power up; following starts immediately after the
-commands, without waiting for the SGI system to report that it is on.
+actions for connection. **a Clear action** removes the armed power/reset
+request while leaving clock sync selected.
+`sgil1ctl wait --tui --set-time --power-up --force` preselects clock sync and
+power up; following starts immediately after the commands, without waiting
+for the SGI system to report that it is on.
 To see where LED descriptions come from,
 press **p**, or add `--show-annotations` to `leds` or `watch`.
 The [monitoring reference](docs/usage.md#interactive-terminal-display)

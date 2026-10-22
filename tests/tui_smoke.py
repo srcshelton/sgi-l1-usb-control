@@ -232,9 +232,10 @@ def run_text_cursor_smoke():
         step(b"\r", True)
         step(b"\033", False)
         step(b"*", False)
-        step(b"r", True)
+        step(b"e", True)
         step(b"NO\r", False)
         step(b"\033", False)
+        step(b"?", False)
         os.write(master, b"q")
         proc.wait(timeout=3)
         if proc.returncode:
@@ -352,7 +353,7 @@ def main():
         if (
             b"Help" not in help_view
             or b"Keys" not in help_view
-            or b"Observation view" not in help_view
+            or b"View" not in help_view
             or b"Filtered" not in help_view
             or b"All" not in help_view
             or b"Auto (Fuel)" not in help_view
@@ -369,11 +370,11 @@ def main():
         ):
             raise AssertionError("Help frame did not use graphical line drawing")
 
-        os.write(master, b"q")
+        os.write(master, b"\r")
         help_closed = redraw(proc, master)
         output.extend(help_closed)
-        if b"Observation view" in help_closed or proc.poll() is not None:
-            raise AssertionError("q did not close Help without quitting")
+        if b"View" in help_closed or proc.poll() is not None:
+            raise AssertionError("Return did not close Help without quitting")
 
         os.write(master, b"H")
         output.extend(redraw(proc, master))
@@ -390,7 +391,7 @@ def main():
             )
         help_state = redraw(proc, master)
         output.extend(help_state)
-        if b"Observation view" in help_state:
+        if b"View" in help_state:
             raise AssertionError("Escape left Help visible")
 
         os.write(master, b"h")
@@ -398,7 +399,7 @@ def main():
         os.write(master, b"\r")
         help_closed = redraw(proc, master)
         output.extend(help_closed)
-        if b"Observation view" in help_closed:
+        if b"View" in help_closed:
             raise AssertionError("Return did not close Help")
 
         os.write(master, b"A")
@@ -497,11 +498,11 @@ def main():
         output.extend(help_view)
         if (
             b"a view:All" not in help_view
-            or b"c palette:Auto(Fuel)" not in help_view
+            or b"c:Auto(Fuel)" not in help_view
             or b"h/?/Esc/Ret close" not in help_view
             or b"^L redraw" not in help_view
             or b"p sources:Off" not in help_view
-            or b"q quit" in help_view
+            or b"q Quit" not in help_view
         ):
             raise AssertionError("minimum-size TUI key guide was incomplete")
 

@@ -100,6 +100,10 @@ observation, and the repeat summary gives its latest observation. Counts and
 times cover retained samples, so they decrease or advance as history expires.
 These are observed snapshots, not a count of distinct firmware events.
 
+**q Quit** also works from Help; **Return**, **Esc**, **h** or **?** closes Help
+and returns to monitoring. The status bar keeps **q Quit** visible alongside
+the available shortcuts.
+
 ### Saving a buffer
 
 Select a pane with **Tab**, then press **s** (**Save buffer**, also listed in
@@ -172,11 +176,17 @@ the mandatory waiting dialog.
 
 Press **\*** (also the first Help entry) to open **Operator controls**.
 The menu reads the host power state and the L1 date and timezone on entry and
-on return. It checks again when an action is selected, before asking for
+on return. **r Refresh** below the ruler reads them again without selecting an
+action. Both menus underline the accelerator in each option name when the
+terminal supports it, and style their unavailable-option legends like the
+disabled options. On short terminals, scroll menu content with **Up/Down**,
+**PgUp/PgDn**, **Home** and **End**; Refresh and Back remain visible.
+
+The menu checks again when an action is selected, before asking for
 confirmation, and rechecks host power state immediately before sending a
 host power/reset command. Unavailable host actions remain visible, dimmed or italic
 and marked with `*`: **u** (power up) requires an off host, while **d** (power
-down) and **r** (host soft reset/restart) require an on host. If host state is
+down) and **e** (host soft reset/restart) require an on host. If host state is
 unknown, those actions are unavailable. **l** opens **L1 firmware / reset**;
 **s** sets the L1 clock and timezone from the machine running
 `sgil1ctl`. The menu shows the L1 date and its approximate difference from
@@ -186,8 +196,9 @@ The L1 firmware view reads `flash status` on entry and refresh, showing both
 banks' versions, build dates and status, and identifying the running bank.
 **c** reboots the current image with `reboot_l1 current`; **o** boots the other
 bank using `reboot_l1 a` or `reboot_l1 b`. Both require `YES` and work regardless
-of host power state. **r** refreshes the information; **Esc** returns to Operator
-controls. Blank or invalid confirmation returns to the firmware menu.
+of host power state. **r** refreshes the information; **Esc** or **\*** returns
+to Operator controls. Both reboot choices name the bank that will boot. Blank or
+invalid confirmation returns to the firmware menu.
 
 The other-bank option stays visible and marked unavailable if either bank or
 the running-bank identity is missing, contradictory or unrecognised, or the
@@ -234,9 +245,10 @@ including hidden entries, and each newly received log line refreshes
 
 If USB is absent at startup or disappears while monitoring, the TUI opens a
 mandatory **Waiting for USB** dialog. **t** toggles clock sync on connection;
-**u**, **d** and **r** select power up, power down or host reset, each requiring
-`YES` plus **Return** to arm. **n** clears the armed power action; selecting a replacement disarms the
-previous action until the new choice is confirmed. **Esc** and
+**u**, **d** and **e** select power up, power down or host reset, each requiring
+`YES` plus **Return** to arm. **a Clear action** clears the armed power/reset
+action without changing the clock-sync selection; selecting a replacement
+disarms the previous action until the new choice is confirmed. **Esc** and
 **Return** cannot dismiss the waiting dialog; **q** quits the application.
 Unconfirmed input is discarded if USB appears. Confirmed actions run once,
 with inapplicable host actions skipped, then normal LED/log following resumes.

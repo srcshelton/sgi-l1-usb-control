@@ -38,6 +38,8 @@ def check_modal_footer(rendered, controls):
 def check_pane_controls(capture, send, resize):
     def wide_widths(expected):
         rendered = capture()
+        if "q Quit" not in rendered:
+            raise AssertionError(f"Quit missing from monitoring status bar:\n{rendered}")
         # Screen can encode ACS borders as form feeds; split only at newlines.
         title = rendered.rstrip("\n").split("\n")[1]
         if " LEDs" not in title:
@@ -51,6 +53,8 @@ def check_pane_controls(capture, send, resize):
     def stacked_heights(expected):
         rendered = capture()
         lines = rendered.rstrip("\n").split("\n")
+        if "q Quit" not in rendered:
+            raise AssertionError(f"Quit missing from monitoring status bar:\n{rendered}")
         log_top = next(i for i, line in enumerate(lines) if " L1 log" in line)
         actual = (len(lines) - 1 - log_top, log_top - 1)
         if actual != expected:
@@ -62,7 +66,7 @@ def check_pane_controls(capture, send, resize):
         rendered = capture()
         lines = rendered.rstrip("\n").split("\n")
         entries = ([("Tab pane" if any("Tab pane" in line for line in lines) else "Tab select pane"), "shrink/grow pane", "t time:",
-                    "p sources:", "^L redraw", "h/?/Esc/Ret close"] if compact else
+                    "p sources:", "q Quit", "h/?/Esc/Ret close"] if compact else
                    ["Select pane", "Move divider left/right", "LED timestamps",
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
@@ -70,13 +74,17 @@ def check_pane_controls(capture, send, resize):
         operator_row = next(i for i, line in enumerate(lines) if "Operator controls" in line)
         save_row = next(i for i, line in enumerate(lines) if "Save buffer" in line)
         env_row = next(i for i, line in enumerate(lines) if "Environment" in line)
-        observation_row = next(i for i, line in enumerate(lines) if ("a view:" if compact else "Observation view") in line)
+        observation_row = next(i for i, line in enumerate(lines) if ("a view:" if compact else "View") in line)
         if env_row not in (operator_row, operator_row + 1) or env_row + 1 != rows[0] or save_row + 1 != observation_row:
             raise AssertionError(f"Incorrect action order in Help:\n{rendered}")
         if rows != sorted(rows) or rows[1] not in (rows[0], rows[0] + 1) or rows[3] != rows[2] + 1:
             raise AssertionError(f"wrong help order:\n{rendered}")
-        if rows[-1] not in (rows[-2], rows[-2] + 1):
-            raise AssertionError(f"Redraw and Close are not adjacent:\n{rendered}")
+        if rows[-1] != rows[-2] + (1 if compact else 2):
+            raise AssertionError(f"Quit is not immediately above Close:\n{rendered}")
+        if not compact and "Quit" not in lines[rows[-1] - 1]:
+            raise AssertionError(f"Quit missing from Help:\n{rendered}")
+        if not any("^L redraw" in line for line in lines) and compact:
+            raise AssertionError(f"Redraw missing from compact Help:\n{rendered}")
         title = next(line for line in lines if " Help " in line)
         frame = re.search(r"TPP Help P+W", title)
         if not frame or lines[rows[-1] + 1][frame.start() + 1:frame.end() - 1].strip():
@@ -175,14 +183,14 @@ def check_environment(capture, send, resize, command_log, environment):
     expect("Warning Limits     Fault Limits       Current")
     rendered = capture()
     footer = next(line for line in rendered.split("\n") if "Lines " in line)
-    if "Cols " in footer or "Arrows PgUp PgDn | R Refresh | Return/Esc Close" not in footer:
+    if "Cols " in footer or "Arrows/PgUp/PgDn | r Refresh | Return/Esc Close" not in footer:
         raise AssertionError(f"Environment footer did not group keys/conditional ranges: {footer!r}")
     if not re.search(r"Lines 1-\d+ of 41", footer):
         raise AssertionError(f"Environment footer did not report a visible range: {footer!r}")
     lines = rendered.split("\n")
     title = next(line for line in lines if " Environment " in line)
     border = re.search(r"TPP Environment P+W", title)
-    keys = "Arrows PgUp PgDn | R Refresh | Return/Esc Close"
+    keys = "Arrows/PgUp/PgDn | r Refresh | Return/Esc Close"
     if not border or footer.index(keys) + len(keys) != border.end() - 2 or footer.index("Lines ") != border.start() + 2:
         raise AssertionError("Environment footer is not left/right aligned")
     ruler = lines[lines.index(footer) - 1]
@@ -194,7 +202,7 @@ def check_environment(capture, send, resize, command_log, environment):
     resize(24, 60)
     expect("Lines 1-11 of 41")
     expect(f"Cols 1-54 of {longest}")
-    expect("R Refresh | Return/Esc Close")
+    expect("r Refresh | Return/Esc Close")
     send(b"\x06")
     expect("Lines 12-22 of 41")
     send(b"\x02")
@@ -214,20 +222,20 @@ def check_environment(capture, send, resize, command_log, environment):
         raise AssertionError("Environment showed position counters when all output fits")
     lines = rendered.split("\n")
     top = next(i for i, line in enumerate(lines) if " Environment " in line)
-    bottom = next(i for i, line in enumerate(lines) if "R Refresh | Return/Esc Close" in line) + 1
+    bottom = next(i for i, line in enumerate(lines) if "r Refresh | Return/Esc Close" in line) + 1
     if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().rstrip().splitlines()) + 5:
         raise AssertionError("Environment did not size to content with three-row margins")
     resize(40, 40)
     expect("Lines 1-26 of 41")
     expect(f"Cols 1-34 of {longest}")
-    expect("Arrows PgUp PgDn")
-    expect("R Refresh")
+    expect("Arrows/PgUp/PgDn")
+    expect("r Refresh")
     expect("Return/Esc")
     resize(11, 40)
     send(b">" * 100)
     send(b"\033OF")
     expect("available")
-    rendered = expect("R Refresh | Return/Esc")
+    rendered = expect("r Refresh | Return/Esc")
     if not any(char != " " and char * 20 in rendered.split("\n")[5] for char in set(rendered.split("\n")[5])):
         raise AssertionError("minimum-size Environment view lost its footer ruler")
     resize(24, 120)
@@ -304,17 +312,21 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     help_title = next(line for line in capture().splitlines() if " Help " in line)
     send(b"*")
     menu = expect("Host: off")
-    check_modal_footer(menu, "Esc/* Back")
+    check_modal_footer(menu, "r Refresh | Esc/* Back")
     operator_title = next(line for line in menu.splitlines() if " Operator controls " in line)
     if not re.search(r"TPP Help P+W", help_title) or not re.search(r"TPP Operator controls P+W", operator_title):
         raise AssertionError(f"Help/Operator border mismatch: {help_title!r} / {operator_title!r}")
     if "q quit monitoring" in menu or "q stops monitoring" in menu:
         raise AssertionError("ambiguous quit instruction remains in Operator controls")
     expect("*d Power down")
-    expect("*r Reset/restart host")
+    expect("*e Reset/restart host")
     expect("Unavailable due to current host state")
     rows = menu.splitlines()
-    if next(i for i, row in enumerate(rows) if "l Reset L1" in row) != next(i for i, row in enumerate(rows) if "r Reset/restart host" in row) + 2:
+    legend = next(i for i, row in enumerate(rows) if "Unavailable due to current host state" in row)
+    controls = next(i for i, row in enumerate(rows) if "r Refresh | Esc/* Back" in row)
+    if controls != legend + 2:
+        raise AssertionError(f"Operator menu has an extra gap above its ruler:\n{menu}")
+    if next(i for i, row in enumerate(rows) if "l Reset L1" in row) != next(i for i, row in enumerate(rows) if "e Reset/restart host" in row) + 2:
         raise AssertionError("missing blank row between host and L1 reset")
     if "L1: " not in menu or "L1 behind by ~" not in menu:
         raise AssertionError(f"operator clock information missing:\n{menu}")
@@ -322,9 +334,10 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     if "[out of sync]" not in footer or footer.index("L1 ") > footer.index("Console last active:"):
         raise AssertionError(f"status clock missing or misplaced: {footer}")
     resize(17, 80)  # Sixteen application rows still need the compact footer.
-    check_modal_footer(expect("l Reset L1"), "Esc/* back")
+    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc/* Back")
     resize(11, 40)
-    check_modal_footer(expect("l Reset L1"), "Esc/* back")
+    send(b"\033OF")  # End reveals the lower menu rows at minimum height.
+    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc/* Back")
     send(b"\033")  # The minimum-height modal covers the status row.
     expect("[out of sync]")
     resize(24, 120)
@@ -345,16 +358,22 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     send(b"*")
     expect("Host: on")
     expect("*u Power up")
-    select(b"r")
+    before_refresh = sent()
+    checks = commands().count("CMD power check")
+    send(b"r")
+    expect("Host: on")
+    if sent() != before_refresh or commands().count("CMD power check") <= checks or "Confirm:" in capture():
+        raise AssertionError("Refresh did not recheck status without requesting an action")
+    select(b"e")
     send(b"NO\r")
     expect("Host: on")
     if "Confirm:" in capture() or sent() != ["CMD power up"]:
         raise AssertionError("invalid reset confirmation did not abort")
-    select(b"r")
+    select(b"e")
     send(b"\r")
     if "Confirm:" in capture() or sent() != ["CMD power up"]:
         raise AssertionError("blank reset confirmation did not abort")
-    select(b"r")
+    select(b"e")
     power_file.write_text("off")
     send(b"YES\r")
     if sent() != ["CMD power up"]:
@@ -373,7 +392,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
         raise AssertionError("second signal was not sent exactly once")
     send(b"*")
     expect("Host: off")
-    send(b"r")
+    send(b"e")
     expect("Action unavailable: host is off")
     power_file.write_text("unknown")
     send(b"\033*")
@@ -394,7 +413,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
         raise AssertionError("controller reboot changed host power state")
     power_file.write_text("on")
     send(b"*")
-    select(b"r")
+    select(b"e")
     send(b"YES\r")
     expect("softreset: command acknowledged")
     send(b"*")
@@ -415,8 +434,10 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     resize(11, 40)
     send(b"*")
     expect("*u Power up")
+    send(b"\033OF")
     select(b"l")
     send(b"*")
+    send(b"\033OF")
     expect("c Reboot current")
     send(b"*")
     expect("Host: on")
@@ -453,7 +474,17 @@ def check_firmware_banks(capture, send, command_log, power_file, flash_file):
     expect("B: 1.24.11 [default] running")
     expect("01/22/2007 11:34:20")
     expect("10/29/2003 00:05:26")
-    check_modal_footer(capture(), "r Refresh; Esc Back")
+    rendered = capture()
+    lines = rendered.split("\n")
+    expected = ["Running bank: B", "A: 1.48.1", "B: 1.24.11", "c Reboot current (Bank B)",
+                "o Boot other (Bank A)", "* Other bank unknown/not bootable"]
+    positions = [next(i for i, line in enumerate(lines) if value in line) for value in expected]
+    if [b - a for a, b in zip(positions, positions[1:])] != [2, 3, 3, 1, 2]:
+        raise AssertionError(f"Firmware sections have incorrect spacing:\n{rendered}")
+    check_modal_footer(rendered, "r Refresh | Esc/* Back")
+    footer_row = next(i for i, line in enumerate(lines) if "r Refresh | Esc/* Back" in line)
+    if footer_row != positions[-1] + 2 or "unavailable;" in lines[footer_row]:
+        raise AssertionError(f"Firmware footer has a redundant gap or legend:\n{rendered}")
     before = reboots()
     send(b"o")
     expect("Boot L1 bank A")
@@ -495,6 +526,8 @@ def check_firmware_banks(capture, send, command_log, power_file, flash_file):
     open_menu()
     expect("Running bank: A")
     expect("A: 1.48.1 [valid] running")
+    expect("c Reboot current (Bank A)")
+    expect("o Boot other (Bank B)")
     send(b"o")
     expect("Boot L1 bank B")
     expect("Bank B: 1.24.11 [default]")
@@ -685,11 +718,11 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     if mode == "quit":
         return
     if mode in ("up", "reset", "down", "unconfirmed"):
-        send({"up": b"u", "reset": b"r", "down": b"d", "unconfirmed": b"u"}[mode])
+        send({"up": b"u", "reset": b"e", "down": b"d", "unconfirmed": b"u"}[mode])
         expect("Blank input + Return aborts action")
         if mode != "unconfirmed":
             send(b"YES\r")
-            expect({"up": "u [x]", "reset": "r [x]", "down": "d [x]"}[mode])
+            expect({"up": "u [x]", "reset": "e [x]", "down": "d [x]"}[mode])
         if mode == "up":
             send(b"t")
             expect("t [x]")

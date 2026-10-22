@@ -1,3 +1,27 @@
+sgi-l1-usb-control (1.0.65) unstable; urgency=medium
+
+  * Updated components since 0.1.64: user-space sgil1ctl, documentation
+    and TUI regression tests; kernel module source is unchanged.
+  * Match the L1 firmware menu to Operator controls: separate running-bank,
+    bank A/B and action sections; name both reboot target banks, remove the
+    extra gap above the ruler and duplicate footer legend, and style both
+    menus' unavailable legends like disabled options.
+  * Use r Refresh below both menus' rulers, e for host reset and Esc/* Back
+    in the firmware menu. Keep options on separate rows and allow scrolling
+    in short terminals while retaining the footer controls.
+  * Underline menu accelerators where supported, preferring the first word
+    starting with that letter. Use lowercase refresh hints consistently,
+    Arrows/PgUp/PgDn in Environment, and a Clear action in USB wait mode to
+    clear the queued power/reset request without changing clock sync.
+  * Shorten the Help entry to View, add q Quit above Close Help, preserve
+    the blank line below it, and keep q Quit visible in the monitoring
+    status bar, including narrow terminals with a clock-drift warning.
+  * Add rendered-cell coverage for accelerator/disabled styling and menu
+    geometry; update PTY and GNU Screen coverage for refresh safety,
+    navigation, bank labels, compact Help and quitting from Help.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 22 Oct 2026 12:35:45 +0100
+
 sgi-l1-usb-control (0.1.64) unstable; urgency=medium
 
   * Updated components since 0.1.63: user-space sgil1ctl, tests, build

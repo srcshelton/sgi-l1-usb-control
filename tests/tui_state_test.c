@@ -269,10 +269,13 @@ static void test_confirmation(void)
 	assert(state.wait_action == WATCH_TUI_ACTION_NONE);
 	keys(&state, "\n");
 	assert(state.wait_action == WATCH_TUI_ACTION_NONE);
-	keys(&state, "n");
+	state.wait_set_time = true;
+	state.wait_action = WATCH_TUI_ACTION_POWER_DOWN;
+	keys(&state, "a");
 	assert(state.wait_action == WATCH_TUI_ACTION_NONE);
+	assert(state.wait_set_time);
 	state.action_busy = true;
-	keys(&state, "rYES\n");
+	keys(&state, "eYES\n");
 	assert(state.wait_action == WATCH_TUI_ACTION_NONE);
 	keys(&state, "q");
 	assert(watch_stop_requested);
@@ -679,6 +682,81 @@ static void test_save_clipboard(void)
 	assert(!rmdir(root));
 	puts("PASS Save buffer clipboard: hidden when unavailable, literal path copy, failure and timeout");
 }
+static void test_menu_rendering(void)
+{
+	struct watch_tui_state state = { .operator_visible = true, .host_state = WATCH_TUI_HOST_OFF };
+	FILE *input = fopen("/dev/null", "r"), *output = fopen("/dev/null", "w");
+	SCREEN *screen;
+	char text[128];
+	chtype cell;
+
+	assert(watch_tui_accelerator("Power up", 'u') == 6);
+	assert(watch_tui_accelerator("Reset/restart host", 'e') == 1);
+	assert(watch_tui_accelerator("Reset L1", 'l') == 6);
+	assert(watch_tui_accelerator("Reboot current", 'C') == 7);
+	assert(watch_tui_accelerator("Boot other", 'o') == 5);
+	assert(watch_tui_accelerator("No match", 'z') == SIZE_MAX);
+	for (int width = 0; width <= 200; width++) {
+		const char *keys = watch_tui_footer_keys(width);
+		assert(strlen(keys) <= (size_t)width);
+		assert(width < 6 || strstr(keys, "q Quit"));
+	}
+	watch_tui_operator_key(&state, 'r');
+	assert(state.operator_refresh && state.requested_action == WATCH_TUI_ACTION_NONE);
+	state.operator_refresh = false;
+	watch_tui_operator_key(&state, 'e');
+	assert(state.requested_action == WATCH_TUI_ACTION_HOST_RESET);
+	state.requested_action = WATCH_TUI_ACTION_NONE;
+	state.host_state = WATCH_TUI_HOST_OFF;
+	assert(input && output);
+	screen = newterm("xterm-256color", output, input);
+	assert(screen);
+	assert(resizeterm(24, 120) != ERR);
+	watch_tui_draw_operator(&state);
+	cell = mvwinch(stdscr, 9, 27);
+	assert((cell & A_CHARTEXT) == 'u' && (cell & A_UNDERLINE));
+	cell = mvwinch(stdscr, 10, 28);
+	assert((cell & A_CHARTEXT) == 'd' && (cell & A_UNDERLINE) && (cell & A_DIM));
+	assert(mvwinch(stdscr, 16, 19) & A_DIM);
+#ifdef A_ITALIC
+	assert(mvwinch(stdscr, 16, 19) & A_ITALIC);
+#endif
+	assert((mvwinch(stdscr, 17, 19) & A_CHARTEXT) != ' ');
+	tui_firmware_parse("Flash image B currently booted\n"
+		"A valid 1.48.1 01/22/2007 11:34:20\n"
+		"B default 1.24.11 10/29/2003 00:05:26\n", &state.firmware);
+	state.firmware_visible = true;
+	watch_tui_draw_operator(&state);
+	mvwinnstr(stdscr, 13, 19, text, 40);
+	assert(strstr(text, "c Reboot current (Bank B)"));
+	mvwinnstr(stdscr, 14, 19, text, 40);
+	assert(strstr(text, "o Boot other (Bank A)"));
+	cell = mvwinch(stdscr, 13, 28);
+	assert((cell & A_CHARTEXT) == 'c' && (cell & A_UNDERLINE));
+	cell = mvwinch(stdscr, 14, 26);
+	assert((cell & A_CHARTEXT) == 'o' && (cell & A_UNDERLINE));
+	assert(mvwinch(stdscr, 16, 19) & A_DIM);
+	state.firmware.bank[0].bootable = false;
+	watch_tui_draw_operator(&state);
+	cell = mvwinch(stdscr, 14, 27);
+	assert((cell & A_CHARTEXT) == 'o' && (cell & A_UNDERLINE) && (cell & A_DIM));
+	watch_tui_operator_key(&state, '*');
+	assert(!state.firmware_visible && state.operator_visible);
+	assert(resizeterm(10, 40) != ERR);
+	state.operator_refresh = false;
+	watch_tui_operator_key(&state, KEY_END);
+	assert(state.operator_scroll == 6);
+	watch_tui_draw_operator(&state);
+	mvwinnstr(stdscr, 3, 3, text, 30);
+	assert(strstr(text, "l Reset L1"));
+	watch_tui_operator_key(&state, KEY_HOME);
+	assert(!state.operator_scroll);
+	endwin();
+	delscreen(screen);
+	fclose(input); fclose(output);
+	puts("PASS menu rendering: accelerator placement/attributes, disabled legends, bank targets, scrolling and refresh keys");
+}
+
 int main(void)
 {
 	char fallback[PATH_MAX] = "";
@@ -715,6 +793,7 @@ int main(void)
 	test_save_files();
 	test_save_snapshot();
 	test_save_clipboard();
+	test_menu_rendering();
 	puts("PASS TUI state: retained repeats, hidden changes, timestamps, ring eviction and confirmation");
 	if (*fallback) {
 		assert(!rmdir(fallback));
