@@ -267,6 +267,14 @@ static void log_command(const char *kind, const char *text)
 		return;
 	fprintf(fp, "%s %s\n", kind, text);
 	fclose(fp);
+	path = getenv("SGIL1_MOCK_TIMING_LOG");
+	if (path && *path && !strcmp(kind, "CMD")) {
+		struct timespec now;
+		if (!clock_gettime(CLOCK_MONOTONIC, &now) && (fp = fopen(path, "a"))) {
+			fprintf(fp, "%lld.%09ld %s\n", (long long)now.tv_sec, now.tv_nsec, text);
+			fclose(fp);
+		}
+	}
 }
 
 static int enqueue_frame(struct mock_fd *m, const uint8_t *data, size_t len)

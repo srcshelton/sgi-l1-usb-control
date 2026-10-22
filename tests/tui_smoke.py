@@ -499,7 +499,7 @@ def main():
         if (
             b"a view:All" not in help_view
             or b"c:Auto(Fuel)" not in help_view
-            or b"h/?/Esc/Ret close" not in help_view
+            or b"h, ?, Esc, Ret Close" not in help_view
             or b"^L redraw" not in help_view
             or b"p sources:Off" not in help_view
             or b"q Quit" not in help_view

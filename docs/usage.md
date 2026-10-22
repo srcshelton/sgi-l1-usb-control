@@ -153,8 +153,22 @@ export needs to survive cleanup or a reboot.
 ### Environmental monitoring
 
 Press **e** (**Environment** in Help) to read the L1 `env` table. The view
-preserves the controller's text, blank lines and column alignment. Its size
-is calculated from each actual response: it fits all rows and columns when
+preserves the controller's sensor names, state labels, blank lines and column
+alignment, and interprets the recognised voltage, fan and temperature tables.
+Readings outside fault limits and explicit Fault/Critical states appear in
+bold red; readings outside warning limits, low fan RPM and advisory/critical
+temperature thresholds appear in bold yellow. Monochrome terminals retain
+the bold emphasis. The header counts affected rows. Numeric comparisons
+apply to active sensors, including those still labelled Enabled; Waiting,
+Wait Pwr and Disabled readings do not raise inferred alerts. Unrecognised or
+incomplete fields remain readable without guessed thresholds.
+
+Temperatures default to Celsius, with **t** switching between Celsius and
+Fahrenheit. Both temperature limits and current readings use the selected
+scale, with a degree sign where the terminal locale supports it. This changes
+the display; the controller's reported state labels remain intact.
+
+The view size is calculated from each actual response: it fits all rows and columns when
 possible, uses no more height than needed, and leaves at least three screen
 rows above and below it. Larger output scrolls with **Up/Down**, **PgUp/PgDn**
 and **Left/Right** (or **<**/**>**) for columns. **Home** returns to the top
@@ -167,10 +181,26 @@ Line and column ranges appear only for axes that can scroll. Trailing blank
 lines are excluded from the scrollable output.
 
 **r** refreshes the reading; the view shows when the last successful reading
-was taken. Refresh failures retain the previous table and mark the error.
-**Return**, **Esc** or **e** closes the view. LED/log monitoring continues
-between these one-shot environment requests. A USB disconnect returns to
-the mandatory waiting dialog.
+was taken. **w Follow** toggles automatic refresh, limited to one request per
+second. The shared scheduler interleaves log and LED reads between automatic
+environment requests, including when their configured polling intervals are
+longer. Timeouts and queue pressure slow polling, and failures retain the
+last successful table with an error indication. Manual refreshes also respect
+the rate limit and error backoff. Refreshing preserves both scroll positions.
+
+Changed sensor rows appear in italics for ten seconds after their last data
+change. Terminals without italics use underlining or reverse video. Unchanged
+polls, unit changes and reordered rows do not restart that timer. Initial
+readings are not marked as changes.
+
+**Return**, **Esc** or **e** closes the view and stops Follow. A USB disconnect
+also stops Follow and returns to the mandatory waiting dialog; the next
+connection starts with a fresh environment baseline.
+
+Equivalent keys are comma-separated in hints; directional pairs use slashes
+(e.g. `Up/Down`, `PgUp/PgDn`). **Close** dismisses a view; **Cancel** abandons
+a pending input or action. Console activity uses a padded age field so its
+updates do not shift neighbouring status text.
 
 ### Operator controls
 
@@ -180,14 +210,15 @@ on return. **r Refresh** below the ruler reads them again without selecting an
 action. Both menus underline the accelerator in each option name when the
 terminal supports it, and style their unavailable-option legends like the
 disabled options. On short terminals, scroll menu content with **Up/Down**,
-**PgUp/PgDn**, **Home** and **End**; Refresh and Back remain visible.
+**PgUp/PgDn**, **Home** and **End**; Refresh and Close remain visible.
 
 The menu checks again when an action is selected, before asking for
 confirmation, and rechecks host power state immediately before sending a
 host power/reset command. Unavailable host actions remain visible, dimmed or italic
 and marked with `*`: **u** (power up) requires an off host, while **d** (power
 down) and **e** (host soft reset/restart) require an on host. If host state is
-unknown, those actions are unavailable. **l** opens **L1 firmware / reset**;
+unknown, those actions are unavailable. Disabled shortcuts are ignored silently;
+use **r Refresh** to update availability. **l** opens **L1 firmware / reset**;
 **s** sets the L1 clock and timezone from the machine running
 `sgil1ctl`. The menu shows the L1 date and its approximate difference from
 that machine's time, using years/days or smaller units as appropriate.

@@ -5769,6 +5769,7 @@ enum watch_tui_host_state {
 
 #include "tui_save.h"
 #include "tui_firmware.h"
+#include "tui_environment.h"
 
 struct watch_tui_state {
 	struct tui_save save;
@@ -5781,7 +5782,10 @@ struct watch_tui_state {
 	char diagnostic_line[512], diagnostic_message[560];
 	size_t diagnostic_length;
 	uint64_t diagnostic_until;
-	bool environment_visible, environment_requested;
+	bool environment_visible, environment_requested, environment_follow, environment_fahrenheit;
+	struct tui_environment environment;
+	uint64_t environment_next_ms, environment_expire_ms;
+	int environment_delay_ms;
 	char *environment_text;
 	char environment_status[160];
 	size_t environment_row, environment_column;
@@ -5843,6 +5847,8 @@ struct watch_tui_rect {
 enum watch_tui_color_pair {
 	WATCH_TUI_COLOR_ACCENT = 1,
 	WATCH_TUI_COLOR_WARNING,
+	WATCH_TUI_COLOR_FAULT,
+	WATCH_TUI_COLOR_ENV_WARNING,
 };
 
 enum watch_tui_background {
@@ -6653,7 +6659,9 @@ static bool watch_tui_apply_palette(struct watch_tui_state *state,
 	warning = state->background == WATCH_TUI_BACKGROUND_LIGHT ?
 		  COLOR_RED : COLOR_YELLOW;
 	if (init_pair(WATCH_TUI_COLOR_ACCENT, accent, -1) == ERR ||
-	    init_pair(WATCH_TUI_COLOR_WARNING, warning, -1) == ERR)
+	    init_pair(WATCH_TUI_COLOR_WARNING, warning, -1) == ERR ||
+	    init_pair(WATCH_TUI_COLOR_FAULT, COLORS >= 16 ? 9 : COLOR_RED, -1) == ERR ||
+	    init_pair(WATCH_TUI_COLOR_ENV_WARNING, COLOR_YELLOW, -1) == ERR)
 		return false;
 	state->palette = palette;
 	return true;
@@ -6739,7 +6747,7 @@ static void watch_tui_menu_text(WINDOW *window, int row, int column, int width,
 	}
 	mvwaddnstr(window, row, column, text, width);
 	if (key && (termattrs() & A_UNDERLINE)) {
-		size_t prefix = text[0] == '*' ? 3 : 2;
+		size_t prefix = text[0] == '*' || text[0] == ' ' ? 3 : 2;
 		size_t index = strlen(text) >= prefix ? watch_tui_accelerator(text + prefix, key) : SIZE_MAX;
 
 		if (index != SIZE_MAX && prefix + index < (size_t)width) {
@@ -6747,6 +6755,21 @@ static void watch_tui_menu_text(WINDOW *window, int row, int column, int width,
 			mvwaddch(window, row, column + (int)(prefix + index), (unsigned char)text[prefix + index]);
 		}
 	}
+	wattr_set(window, attributes, pair, NULL);
+}
+
+/* Preserve the caller's attributes while making notices consistent across views. */
+static void watch_tui_notice(const struct watch_tui_state *state, WINDOW *window,
+			     int row, int column, int width, const char *text)
+{
+	attr_t attributes;
+	short pair;
+
+	if (row < 0 || width <= 0 || !*text) return;
+	wattr_get(window, &attributes, &pair, NULL);
+	wattr_set(window, (attributes & ~A_COLOR) | A_BOLD,
+		watch_tui_colors_enabled(state) ? WATCH_TUI_COLOR_FAULT : 0, NULL);
+	mvwaddnstr(window, row, column, text, width);
 	wattr_set(window, attributes, pair, NULL);
 }
 
@@ -6888,7 +6911,7 @@ static void watch_tui_draw_compact_help(const struct watch_tui_state *state,
 		mvwaddnstr(window, redraw, 2, "^L redraw", width - 4);
 		mvwaddnstr(window, redraw + 1, 2, "q Quit", width - 4);
 	}
-	mvwaddnstr(window, height - 3, 2, "h/?/Esc/Ret close", width - 4);
+	mvwaddnstr(window, height - 3, 2, "h, ?, Esc, Ret Close", width - 4);
 }
 
 /* Modal views share Help's border and palette; callers may size to content. */
@@ -7203,6 +7226,8 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 	window = watch_tui_dialog(state, title, 19, &width, &height);
 	if (!window)
 		return;
+	if (save->phase == TUI_SAVE_ERROR)
+		watch_tui_notice(state, window, 0, 3, width - 5, title);
 	mvwhline(window, height - 3, 1, ACS_HLINE, width - 2);
 	if (save->capture_pending) {
 		mvwaddnstr(window, 2, 2, "Capturing the full retained buffer...", width - 4);
@@ -7234,15 +7259,20 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 		size_t count;
 
 		snprintf(body, sizeof(body), "%s\n\n%s", message, *save->path ? save->path : save->input);
+		if (save->phase == TUI_SAVE_ERROR) {
+			wattron(window, A_BOLD);
+			wcolor_set(window, watch_tui_colors_enabled(state) ? WATCH_TUI_COLOR_FAULT : 0, NULL);
+		}
 		count = watch_tui_save_text(window, body, 1,
 			save->phase == TUI_SAVE_DONE ? height - 4 : height - 5, width, &scroll);
+		wattr_set(window, A_NORMAL, 0, NULL);
 		save->path_scroll = scroll;
 		snprintf(line, sizeof(line), "Rows %zu-%zu/%zu; Up/Down scroll",
 			 scroll + 1, scroll + (size_t)(height - 5) < count ? scroll + (size_t)(height - 5) : count, count);
 		if (save->phase != TUI_SAVE_DONE)
 			mvwaddnstr(window, height - 4, 2, line, width - 4);
 		mvwaddnstr(window, height - 2, 2, save->phase == TUI_SAVE_CHOICE ?
-			"o Overwrite a Append Return Cancel" : save->phase == TUI_SAVE_ERROR ?
+			"o Overwrite | a Append | Ret Cancel" : save->phase == TUI_SAVE_ERROR ?
 			"Return Edit path | Esc Cancel" : save->clipboard_kind ?
 			"Return Close | c Copy path" : "Return Close", width - 4);
 	}
@@ -7255,7 +7285,8 @@ static void watch_tui_draw_save(struct watch_tui_state *state)
 
 static const char *watch_tui_environment_text(const struct watch_tui_state *state)
 {
-	return state->environment_text && *state->environment_text ? state->environment_text :
+	return state->environment.text ? state->environment.text :
+		state->environment_text && *state->environment_text ? state->environment_text :
 		state->environment_requested ? "Reading L1 environment..." : state->environment_status;
 }
 
@@ -7279,7 +7310,8 @@ static void watch_tui_environment_bounds(struct watch_tui_state *state,
 			if (!isspace((unsigned char)line[i])) nonblank = true;
 		if (nonblank) {
 			*count = total;
-			if (length > *longest) *longest = length;
+			size_t cells = tui_environment_cells(line, length);
+			if (cells > *longest) *longest = cells;
 		}
 		line = strchr(line, '\n');
 		if (!line)
@@ -7305,9 +7337,15 @@ static void watch_tui_environment_key(struct watch_tui_state *state, int key)
 
 	switch (key) {
 	case 27: case '\n': case '\r': case KEY_ENTER: case 'e': case 'E': case 'q': case 'Q':
-		state->environment_visible = state->environment_requested = false;
+		state->environment_visible = state->environment_requested = state->environment_follow = false;
 		break;
 	case 'r': case 'R': state->environment_requested = true; break;
+	case 'w': case 'W': state->environment_follow = !state->environment_follow; break;
+	case 't': case 'T':
+		if (!tui_environment_update(&state->environment, state->environment_text,
+			!state->environment_fahrenheit, monotonic_milliseconds()))
+			state->environment_fahrenheit = !state->environment_fahrenheit;
+		break;
 	case KEY_UP: case 'k': if (state->environment_row) state->environment_row--; break;
 	case KEY_DOWN: case 'j': if (state->environment_row < SIZE_MAX) state->environment_row++; break;
 	case KEY_PPAGE: case 2:
@@ -7326,7 +7364,7 @@ static void watch_tui_environment_key(struct watch_tui_state *state, int key)
 
 struct watch_tui_environment_footer {
 	char line_range[64], column_range[64], position[132];
-	const char *keys[3];
+	char keys[4][128];
 	int rows;
 };
 
@@ -7334,10 +7372,12 @@ static void watch_tui_environment_footer(const struct watch_tui_state *state,
 					 int cells, int visible, size_t count, size_t longest,
 					 struct watch_tui_environment_footer *footer)
 {
-	const char *all_keys = "Arrows/PgUp/PgDn | r Refresh | Return/Esc Close";
 	size_t line_end = state->environment_row + (size_t)visible;
 	size_t column_end = state->environment_column + (size_t)cells;
 	size_t left;
+	const char *follow = state->environment_follow ? "on" : "off";
+	const char *units = state->environment_fahrenheit ? "Fahrenheit" : "Celsius";
+	char all_keys[128];
 
 	memset(footer, 0, sizeof(*footer));
 	if (count > (size_t)visible)
@@ -7348,21 +7388,29 @@ static void watch_tui_environment_footer(const struct watch_tui_state *state,
 			state->environment_column + 1, column_end < longest ? column_end : longest, longest);
 	snprintf(footer->position, sizeof(footer->position), "%s%s%s", footer->line_range,
 		*footer->line_range && *footer->column_range ? " | " : "", footer->column_range);
+	snprintf(all_keys, sizeof(all_keys), "Cursor keys, PgUp/PgDn | r Refresh | w Follow %s | t %s | Return, Esc Close", follow, units);
 	left = strlen(footer->position);
 	if (strlen(all_keys) + left + (left ? 1 : 0) <= (size_t)cells) {
 		footer->rows = 1;
-		footer->keys[0] = all_keys;
+		snprintf(footer->keys[0], sizeof(footer->keys[0]), "%s", all_keys);
 	} else {
 		left = strlen(footer->line_range) > strlen(footer->column_range) ? strlen(footer->line_range) : strlen(footer->column_range);
-		if (left + (left ? 1 : 0) + strlen("r Refresh | Return/Esc Close") <= (size_t)cells) {
+		char options[96];
+		snprintf(options, sizeof(options), "w Follow %s | t %s | Return, Esc Close", follow, units);
+		if (strlen(options) + left + (left ? 1 : 0) <= (size_t)cells) {
 			footer->rows = 2;
-			footer->keys[0] = "Arrows/PgUp/PgDn";
-			footer->keys[1] = "r Refresh | Return/Esc Close";
-		} else {
+			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | r Refresh");
+			snprintf(footer->keys[1], sizeof(footer->keys[1]), "%s", options);
+		} else if (cells >= 48) {
 			footer->rows = 3;
-			footer->keys[0] = "Arrows/PgUp/PgDn";
-			footer->keys[1] = "r Refresh";
-			footer->keys[2] = "Return/Esc";
+			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | t %s", units);
+			snprintf(footer->keys[1], sizeof(footer->keys[1]), "r Refresh | w Follow %s", follow);
+			snprintf(footer->keys[2], sizeof(footer->keys[2]), "Return, Esc Close");
+		} else {
+			footer->rows = 4;
+			snprintf(footer->keys[0], sizeof(footer->keys[0]), "Cursor keys, PgUp/PgDn | r Refresh");
+			snprintf(footer->keys[1], sizeof(footer->keys[1]), "w Follow %s | t %s", follow, units);
+			snprintf(footer->keys[3], sizeof(footer->keys[3]), "Return, Esc");
 		}
 	}
 }
@@ -7381,9 +7429,9 @@ static void watch_tui_environment_size(struct watch_tui_state *state,
 	state->environment_column = saved_column;
 	desired_width = *longest;
 	if (desired_width < strlen(state->environment_status)) desired_width = strlen(state->environment_status);
-	if (desired_width < 30) desired_width = 30;
+	if (desired_width < 34) desired_width = 34;
 	*width = desired_width > (size_t)(COLS - 6) ? COLS - 2 : (int)desired_width + 4;
-	for (int pass = 0; pass < 3; pass++) {
+	for (int pass = 0; pass < 4; pass++) {
 		int overhead = footer_rows + 4;
 
 		*height = *count > (size_t)(maximum_height > overhead ? maximum_height - overhead : 0) ?
@@ -7398,12 +7446,59 @@ static void watch_tui_environment_size(struct watch_tui_state *state,
 		}
 		*first = 2;
 		*rows = *height - overhead;
+		state->environment_row = saved_row;
+		state->environment_column = saved_column;
 		watch_tui_environment_bounds(state, *rows, *width - 4, count, longest);
 		watch_tui_environment_footer(state, *width - 4, *rows, *count, *longest, &footer);
 		if (footer.rows <= footer_rows) break;
 		footer_rows = footer.rows;
 	}
+	state->environment_row = saved_row;
+	state->environment_column = saved_column;
 	watch_tui_environment_bounds(state, *rows, *width - 4, count, longest);
+}
+
+/* Crop by terminal cells so degree signs and horizontal scrolling stay aligned. */
+static void watch_tui_environment_line(const struct watch_tui_state *state, WINDOW *window,
+		int row, int width, const char *text, size_t bytes, const struct tui_environment_row *reading)
+{
+	mbstate_t conversion = { 0 };
+	size_t offset = 0, column = 0, scroll = state->environment_column;
+	attr_t original, changed = 0;
+	short pair;
+
+	wattr_get(window, &original, &pair, NULL);
+	if (reading && reading->changed_until > monotonic_milliseconds()) {
+#ifdef A_ITALIC
+		if (termattrs() & A_ITALIC) changed = A_ITALIC;
+#endif
+		if (!changed) changed = termattrs() & A_UNDERLINE ? A_UNDERLINE : A_REVERSE;
+	}
+	while (offset < bytes && column < scroll + (size_t)width) {
+		wchar_t character;
+		size_t length = mbrtowc(&character, text + offset, bytes - offset, &conversion);
+		int cells;
+		if (!length || length == (size_t)-1 || length == (size_t)-2) {
+			memset(&conversion, 0, sizeof(conversion));
+			length = 1; character = '?';
+		}
+		cells = wcwidth(character);
+		if (cells < 0) { cells = 1; character = ' '; }
+		if (column >= scroll && column + (size_t)cells <= scroll + (size_t)width) {
+			enum tui_environment_severity severity = TUI_ENV_NORMAL;
+			if (reading) {
+				if (column >= reading->state_first && column < reading->state_last) severity = reading->reported;
+				if (column >= reading->value_first && column < reading->value_last) severity = reading->severity;
+			}
+			wattr_set(window, original | changed | (severity ? A_BOLD : 0), pair, NULL);
+			if (severity && watch_tui_colors_enabled(state))
+				wcolor_set(window, severity == TUI_ENV_FAULT ? WATCH_TUI_COLOR_FAULT : WATCH_TUI_COLOR_ENV_WARNING, NULL);
+			mvwaddnwstr(window, row, 2 + (int)(column - scroll), &character, 1);
+		}
+		offset += length;
+		column += (size_t)cells;
+	}
+	wattr_set(window, original, pair, NULL);
 }
 
 static void watch_tui_draw_environment(struct watch_tui_state *state)
@@ -7420,22 +7515,32 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 		" Environment: error " : " Environment ", width, height);
 	if (!window) return;
 	row = first;
-	if (first == 2)
-		mvwaddnstr(window, 1, 2, state->environment_requested ? "Reading L1 environment..." :
-			state->environment_status, width - 4);
+	state->environment_expire_ms = 0;
+	for (size_t i = 0; i < state->environment.count; i++) {
+		uint64_t expiry = state->environment.rows[i].changed_until;
+		if (expiry > monotonic_milliseconds() && (!state->environment_expire_ms || expiry < state->environment_expire_ms))
+			state->environment_expire_ms = expiry;
+	}
+	if (first == 2) {
+		char status[256];
+		snprintf(status, sizeof(status), "%s | %zu fault, %zu warn | changes 10s",
+			state->environment_requested ? "Reading L1 environment..." : state->environment_status,
+			state->environment.faults, state->environment.warnings);
+		if (!strncmp(state->environment_status, "env failed:", 11)) {
+			watch_tui_notice(state, window, 0, 3, width - 5, " Environment: error ");
+			watch_tui_notice(state, window, 1, 2, width - 4, status);
+		} else mvwaddnstr(window, 1, 2, status, width - 4);
+	}
 	line = watch_tui_environment_text(state);
 	while (*line && index < count && row < first + rows) {
 		size_t length = strcspn(line, "\n");
 
 		if (length && line[length - 1] == '\r') length--;
-		if (index++ >= state->environment_row) {
-			if (length > state->environment_column) {
-				size_t available = length - state->environment_column;
-				mvwaddnstr(window, row, 2, line + state->environment_column,
-					available < (size_t)(width - 4) ? (int)available : width - 4);
-			}
-			row++;
+		if (index >= state->environment_row) {
+			const struct tui_environment_row *reading = index < state->environment.count ? &state->environment.rows[index] : NULL;
+			watch_tui_environment_line(state, window, row++, width - 4, line, length, reading);
 		}
+		index++;
 		line = strchr(line, '\n');
 		if (!line) break;
 		line++;
@@ -7464,7 +7569,9 @@ static void watch_tui_draw_environment(struct watch_tui_state *state)
 					x + (int)(refresh - footer.keys[i]), 9, "r Refresh", 'r', false);
 		}
 	} else {
-		const char *keys = " r Refresh | Return/Esc ";
+		char keys[64];
+		snprintf(keys, sizeof(keys), " w Follow:%s | t %c | r | Esc ",
+			state->environment_follow ? "on" : "off", state->environment_fahrenheit ? 'F' : 'C');
 
 		/* Share the lower frame when three-row margins leave only a tiny view. */
 		mvwhline(window, height - 2, 1, ACS_HLINE, width - 2);
@@ -7571,7 +7678,7 @@ static void watch_tui_operator_option(const struct watch_tui_state *state,
 	bool available = watch_tui_action_available(state, action);
 	char text[96];
 
-	snprintf(text, sizeof(text), "%s%s", available ? "" : "*", label);
+	snprintf(text, sizeof(text), "%s%s", available ? " " : "*", label);
 	watch_tui_menu_text(window, row, column, width, text, label[0], !available);
 }
 
@@ -7585,31 +7692,31 @@ static void watch_tui_draw_firmware(const struct watch_tui_state *state, WINDOW 
 	int current = state->firmware.current;
 
 	snprintf(text, sizeof(text), "Running bank: %c", current >= 0 ? 'A' + current : '?');
-	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 0, rows), 2, width - 4, text, 0, false);
-	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 1, rows), 2, width - 4,
-		*state->firmware_notice ? state->firmware_notice : state->operator_notice, 0, false);
+	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 0, rows), 5, width - 7, text, 0, false);
+	watch_tui_notice(state, window, watch_tui_menu_row(scroll, 1, rows), 5, width - 7,
+		*state->firmware_notice ? state->firmware_notice : state->operator_notice);
 	for (int i = 0; i < 2; i++) {
 		const struct tui_firmware_bank *bank = &state->firmware.bank[i];
 
 		snprintf(text, sizeof(text), "%c: %s [%s]%s", 'A' + i,
 			bank->present ? bank->revision : "version unavailable",
 			bank->present ? bank->status : "unknown", current == i ? " running" : "");
-		watch_tui_menu_text(window, watch_tui_menu_row(scroll, 2 + i * 3, rows), 2, width - 4, text, 0, false);
+		watch_tui_menu_text(window, watch_tui_menu_row(scroll, 2 + i * 3, rows), 5, width - 7, text, 0, false);
 		snprintf(text, sizeof(text), "Built: %s", *bank->built ? bank->built : "unavailable");
-		watch_tui_menu_text(window, watch_tui_menu_row(scroll, 3 + i * 3, rows), 2, width - 4, text, 0, false);
+		watch_tui_menu_text(window, watch_tui_menu_row(scroll, 3 + i * 3, rows), 5, width - 7, text, 0, false);
 	}
 	if (current >= 0)
-		snprintf(text, sizeof(text), "c Reboot current (Bank %c)", 'A' + current);
+		snprintf(text, sizeof(text), " c Reboot current (Bank %c)", 'A' + current);
 	else
-		snprintf(text, sizeof(text), "c Reboot current (Bank unknown)");
+		snprintf(text, sizeof(text), " c Reboot current (Bank unknown)");
 	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 8, rows), 2, width - 4, text, 'c', false);
 	if (current >= 0)
-		snprintf(text, sizeof(text), "%so Boot other (Bank %c)", available ? "" : "*", 'A' + 1 - current);
+		snprintf(text, sizeof(text), "%so Boot other (Bank %c)", available ? " " : "*", 'A' + 1 - current);
 	else
 		snprintf(text, sizeof(text), "*o Boot other (Bank unknown)");
 	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 9, rows), 2, width - 4, text, 'o', !available);
 	watch_tui_menu_text(window, watch_tui_menu_row(scroll, 11, rows), 2, width - 4,
-		"* Other bank unknown/not bootable", 0, true);
+		"*  Other bank unknown/not bootable", 0, true);
 }
 
 static void watch_tui_draw_operator(struct watch_tui_state *state)
@@ -7670,10 +7777,10 @@ static void watch_tui_draw_operator(struct watch_tui_state *state)
 		char text[96];
 		int rows = height - 4;
 		snprintf(text, sizeof(text), "Host: %s", watch_tui_host_label(state));
-		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 0, rows), 2, width - 4, text, 0, false);
-		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 1, rows), 2, width - 4, state->l1_clock, 0, false);
-		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 2, rows), 2, width - 4, state->clock_delta, 0, false);
-		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 3, rows), 2, width - 4, state->operator_notice, 0, false);
+		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 0, rows), 5, width - 7, text, 0, false);
+		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 1, rows), 5, width - 7, state->l1_clock, 0, false);
+		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 2, rows), 5, width - 7, state->clock_delta, 0, false);
+		watch_tui_notice(state, window, watch_tui_menu_row(*scroll, 3, rows), 5, width - 7, state->operator_notice);
 		watch_tui_operator_option(state, window, watch_tui_menu_row(*scroll, 4, rows), 2, width - 4,
 			"u Power up", WATCH_TUI_ACTION_POWER_UP);
 		watch_tui_operator_option(state, window, watch_tui_menu_row(*scroll, 5, rows), 2, width - 4,
@@ -7685,13 +7792,13 @@ static void watch_tui_draw_operator(struct watch_tui_state *state)
 		watch_tui_operator_option(state, window, watch_tui_menu_row(*scroll, 9, rows), 2, width - 4,
 			"s Sync L1 clock", WATCH_TUI_ACTION_SYNC_TIME);
 		watch_tui_menu_text(window, watch_tui_menu_row(*scroll, 11, rows), 2, width - 4,
-			"* Unavailable due to current host state (including unknown)", 0, true);
+			"*  Unavailable due to current host state (including unknown)", 0, true);
 	}
 	mvwhline(window, height - 3, 1, ACS_HLINE, width - 2);
 	if (menu) {
-		watch_tui_menu_text(window, height - 2, 2, width - 4, "r Refresh", 'r', false);
-		mvwaddnstr(window, height - 2, 11, " | Esc/* Back", width - 13);
-		if (limit) mvwaddnstr(window, height - 2, 24, " | Up/Down", width - 26);
+		watch_tui_menu_text(window, height - 2, 2, width - 4, " r Refresh", 'r', false);
+		mvwaddnstr(window, height - 2, 12, " | Esc, * Close", width - 14);
+		if (limit) mvwaddnstr(window, height - 2, 27, " | k/j", width - 29);
 	} else if (state->waiting_for_usb && !confirming) {
 		watch_tui_menu_text(window, height - 2, 2, width - 4, "a Clear action", 'a', false);
 		watch_tui_menu_text(window, height - 2, 19, width - 21, "q Quit", 'q', false);
@@ -7700,9 +7807,9 @@ static void watch_tui_draw_operator(struct watch_tui_state *state)
 		watch_tui_menu_text(window, height - 2, 2, width - 4, "y Yes", 'y', false);
 		watch_tui_menu_text(window, height - 2, 10, width - 12, "n No", 'n', false);
 		mvwaddnstr(window, height - 2, 7, " | ", 3);
-		mvwaddnstr(window, height - 2, 14, " | Return/Esc Cancel", width - 16);
+		mvwaddnstr(window, height - 2, 14, " | Return, Esc Cancel", width - 16);
 	} else
-		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ? "q Quit application" : "Esc/* Back", width - 4);
+		mvwaddnstr(window, height - 2, 2, state->waiting_for_usb ? "q Quit application" : "Esc, * Close", width - 4);
 	if (watch_tui_text_input_active(state)) {
 		wmove(window, 6, 11 + (int)strlen(state->confirmation));
 		wcursyncup(window);
@@ -7748,9 +7855,20 @@ static bool watch_tui_clock_status(const struct watch_tui_state *state,
 
 static void watch_tui_drain_diagnostics(struct watch_display *display);
 
+static int watch_tui_activity_width(const char *activity, int room)
+{
+	const char *colon = strchr(activity, ':');
+	int actual = (int)strlen(activity);
+	int reserved = colon ? (int)(colon - activity) + 2 + 10 : actual;
+
+	if (reserved > room) reserved = room;
+	return reserved > actual ? reserved : actual;
+}
+
 static const char *watch_tui_footer_keys(int width)
 {
-	if (width >= 47) return "h/? Help | s Save | e Env | * Controls | q Quit";
+	static const char full[] = "h, ? Help | s Save | e Env | * Controls | q Quit";
+	if (width >= (int)strlen(full)) return full;
 	if (width >= 32) return "h Help s Save e Env * Ops q Quit";
 	if (width >= 13) return "h Help q Quit";
 	return width >= 6 ? "q Quit" : "";
@@ -7886,7 +8004,7 @@ static void watch_tui_render(struct watch_display *display)
 	int activity_room = COLS - (int)strlen(clock_text) - 10;
 	if (activity_room > 0 && strlen(activity) > (size_t)activity_room)
 		activity[activity_room] = '\0';
-	activity_x = COLS - (int)strlen(activity) - 1;
+	activity_x = COLS - watch_tui_activity_width(activity, activity_room) - 1;
 	if (activity_x < 0)
 		activity_x = 0;
 	clock_x = activity_x - (int)strlen(clock_text) - 1;
@@ -7896,9 +8014,7 @@ static void watch_tui_render(struct watch_display *display)
 	attron(A_REVERSE);
 	mvhline(LINES - 1, 0, ' ', COLS);
 	if (state->diagnostic_until > monotonic_milliseconds()) {
-		attron(A_BOLD);
-		mvaddnstr(LINES - 1, 0, state->diagnostic_message, COLS);
-		attroff(A_BOLD);
+		watch_tui_notice(state, stdscr, LINES - 1, 0, COLS, state->diagnostic_message);
 	} else {
 		if (footer_width) {
 			const char *hints = watch_tui_footer_keys(footer_width);
@@ -8553,9 +8669,7 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 			if (tui_firmware_can_boot_other(&state->firmware))
 				state->requested_action = state->firmware.current == 0 ?
 					WATCH_TUI_ACTION_L1_BANK_B : WATCH_TUI_ACTION_L1_BANK_A;
-			else
-				snprintf(state->operator_notice, sizeof(state->operator_notice),
-					"Other bank unavailable; refresh status");
+
 		}
 		return;
 	}
@@ -8584,6 +8698,8 @@ static void watch_tui_operator_key(struct watch_tui_state *state, int key)
 			state->selected_action = action;
 		}
 	} else {
+		/* Disabled shortcuts are inert; Refresh updates the cached availability. */
+		if (!watch_tui_action_available(state, action)) return;
 		state->requested_action = action;
 		state->host_state = WATCH_TUI_HOST_UNKNOWN;
 	}
@@ -8612,7 +8728,8 @@ static bool watch_tui_wait(struct watch_display *display, int milliseconds)
 		watch_tui_environment_key(state, key);
 		if (key == KEY_RESIZE || key == 12)
 			clearok(stdscr, true);
-		if (key != ERR)
+		if (key != ERR || (state->environment_expire_ms &&
+		    monotonic_milliseconds() >= state->environment_expire_ms))
 			watch_tui_render(display);
 		return watch_stop_requested != 0;
 	}
@@ -8773,6 +8890,7 @@ static void watch_tui_free(struct watch_tui_state *state)
 	tui_save_reset(&state->save);
 	watch_tui_restore_stderr(state);
 	free(state->environment_text);
+	tui_environment_free(&state->environment);
 	watch_tui_free_line_history(&state->raw_log_history);
 	watch_tui_free_line_history(&state->log_history);
 	for (i = 0; i < led->run_count; i++) {
@@ -9385,17 +9503,26 @@ static void watch_tui_refresh_operator(struct watch_display *display,
 	watch_tui_render(display);
 }
 
-static void watch_tui_read_environment(struct watch_display *display, const struct options *opts)
+static void watch_tui_read_environment(struct watch_display *display,
+				       const struct options *opts, unsigned int pressure)
 {
 	struct watch_tui_state *state = &display->tui_state;
 	char *text = NULL;
 	char stamp[SGIL1_TUI_TIMESTAMP_SIZE];
+	uint64_t started;
 	int ret;
 
 	watch_tui_render(display);
+	started = monotonic_milliseconds();
 	ret = l1_text_command_status(opts, "env", false, &text);
 	state->environment_requested = false;
-	if (ret || l1_text_indicates_failure(text)) {
+	bool failed = ret || l1_text_indicates_failure(text);
+	if (!failed && tui_environment_update(&state->environment, text,
+		state->environment_fahrenheit, monotonic_milliseconds())) {
+		failed = true;
+		free(text); text = strdup("unable to interpret reading: out of memory");
+	}
+	if (failed) {
 		char reason[64];
 
 		snprintf(reason, sizeof(reason), "%.*s", text ? (int)strcspn(text, "\r\n") : 0, text ? text : "");
@@ -9403,16 +9530,28 @@ static void watch_tui_read_environment(struct watch_display *display, const stru
 			"env failed: %s%s", state->environment_text ? "previous reading retained; " : "",
 			ret == SGIL1_L1CMD_RESPONSE_TIMEOUT ? "response timed out" : *reason ? reason : "response unavailable");
 		free(text);
+		int delay = state->environment_delay_ms < 1000 ? 1000 : state->environment_delay_ms;
+		state->environment_delay_ms = delay >= 15000 ? 30000 : delay * 2;
+		state->environment_next_ms = milliseconds_after(monotonic_milliseconds(),
+			queue_pressure_scaled_delay(state->environment_delay_ms, pressure));
 	} else {
 		free(state->environment_text);
 		state->environment_text = text;
-		state->environment_row = state->environment_column = 0;
 		watch_tui_format_snapshot_time(stamp, sizeof(stamp));
 		snprintf(state->environment_status, sizeof(state->environment_status), "L1 env | %s%s", stamp,
 			text && *text ? "" : " | empty response");
+		state->environment_delay_ms = 1000;
+		state->environment_next_ms = milliseconds_after(started, queue_pressure_scaled_delay(1000, pressure));
 	}
-	clearok(stdscr, true);
 	watch_tui_render(display);
+}
+
+static bool watch_tui_environment_due(const struct watch_tui_state *state, uint64_t now,
+		bool route_valid, unsigned int failures, bool log_since, bool led_since)
+{
+	return state->environment_visible && (state->environment_requested || state->environment_follow) &&
+		now >= state->environment_next_ms && route_valid && !failures &&
+		(state->environment_requested || (log_since && led_since));
 }
 
 static int watch_tui_sync_clock(struct watch_display *display,
@@ -9604,7 +9743,11 @@ static int watch_tui_connect(const struct options *opts, struct options *cmd_opt
 
 	state->waiting_for_usb = true;
 	state->firmware_visible = false;
-	state->environment_visible = state->environment_requested = false;
+	state->environment_visible = state->environment_requested = state->environment_follow = false;
+	tui_environment_free(&state->environment);
+	free(state->environment_text); state->environment_text = NULL;
+	state->environment_next_ms = state->environment_expire_ms = 0;
+	state->environment_delay_ms = 1000;
 	state->power_down_log_pending = false;
 	state->clock_valid = false;
 	state->l1_timezone[0] = '\0';
@@ -9696,6 +9839,7 @@ static int run_watch_scheduler(const struct options *opts,
 	uint64_t next_led = now;
 #ifdef SGIL1_WITH_TUI
 	uint64_t next_clock = now;
+	bool environment_log_since = false, environment_led_since = false;
 #endif
 	uint64_t next_pressure_decay = UINT64_MAX;
 	int led_delay = watch->led_interval_ms;
@@ -9747,10 +9891,22 @@ static int run_watch_scheduler(const struct options *opts,
 			watch_tui_refresh_operator(display, cmd_opts);
 			continue;
 		}
-		if (display->tui && display->tui_state.environment_requested &&
-		    display->tui_state.pending_action == WATCH_TUI_ACTION_NONE) {
-			watch_tui_read_environment(display, cmd_opts);
+		if (display->tui && display->tui_state.environment_visible &&
+		    display->tui_state.environment_expire_ms && now >= display->tui_state.environment_expire_ms)
+			watch_tui_render(display);
+		if (display->tui && display->tui_state.pending_action == WATCH_TUI_ACTION_NONE &&
+		    watch_tui_environment_due(&display->tui_state, now, route_valid, consecutive_failures,
+			environment_log_since, environment_led_since)) {
+			watch_tui_read_environment(display, cmd_opts, queue_pressure);
+			environment_log_since = environment_led_since = false;
 			continue;
+		}
+		/* A slow configured log interval must not stall Follow. Service both
+		 * monitoring streams before the next automatic environment request. */
+		if (display->tui && display->tui_state.environment_visible && display->tui_state.environment_follow &&
+		    now >= display->tui_state.environment_next_ms && route_valid && !consecutive_failures) {
+			if (!environment_log_since && next_log > now) next_log = now;
+			if (!environment_led_since && next_led > now) next_led = now;
 		}
 		if (display->tui && display->tui_state.pending_action !=
 					WATCH_TUI_ACTION_NONE) {
@@ -9842,6 +9998,9 @@ static int run_watch_scheduler(const struct options *opts,
 				watch_display_read_led_profile(display, cmd_opts, profile);
 				profile_valid = true;
 			}
+#ifdef SGIL1_WITH_TUI
+			environment_led_since = true;
+#endif
 			command_ret = l1_text_command_status(cmd_opts, "leds", false,
 							     &raw);
 			if (command_ret) {
@@ -9922,6 +10081,9 @@ static int run_watch_scheduler(const struct options *opts,
 			bool substantive_new = false;
 			int command_ret;
 
+#ifdef SGIL1_WITH_TUI
+			environment_log_since = true;
+#endif
 			command_ret = l1_text_command_status(cmd_opts, "log", false,
 							     &text);
 			if (command_ret) {

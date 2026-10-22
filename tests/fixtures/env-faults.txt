@@ -1,0 +1,41 @@
+Environmental monitoring is enabled and running.
+
+Description    State       Warning Limits     Fault Limits       Current
+-------------- ----------  -----------------  -----------------  -------
+           12V      Fault  10%  10.80/ 13.20  20%   9.60/ 14.40    0.500
+        12V IO    Enabled  10%  10.80/ 13.20  20%   9.60/ 14.40    11.875
+            5V    Enabled  10%   4.50/  5.50  20%   4.00/  6.00    4.992
+          3.3V    Enabled  10%   2.97/  3.63  20%   2.64/  3.96    3.320
+          2.5V    Enabled  10%   2.25/  2.75  20%   2.00/  3.00    0.390
+          1.5V    Enabled  10%   1.35/  1.65  20%   1.20/  1.80    0.085
+        5V AUX    Enabled  10%   4.50/  5.50  20%   4.00/  6.00    4.992
+      3.3V AUX    Enabled  10%   2.97/  3.63  20%   2.64/  3.96    3.302
+ PIMM 12V BIAS    Enabled  10%  10.80/ 13.20  20%   9.60/ 14.40    11.875
+          SRAM    Enabled  10%   2.25/  2.75  20%   2.00/  3.00    2.522
+          VCPU    Enabled  10%   1.44/  1.76  20%   1.28/  1.92    1.607
+     PIMM 1.5V    Enabled  10%   1.35/  1.65  20%   1.20/  1.80    1.495
+ PIMM 3.3V AUX    Enabled  10%   2.97/  3.63  20%   2.64/  3.96    3.302
+   PIMM 5V AUX    Enabled  10%   4.50/  5.50  20%   4.00/  6.00    4.992
+  XIO 12V BIAS    Enabled  10%  10.80/ 13.20  20%   9.60/ 14.40    0.563
+        XIO 5V    Enabled  10%   4.50/  5.50  20%   4.00/  6.00    4.992
+      XIO 2.5V    Enabled  10%   2.25/  2.75  20%   2.00/  3.00    0.728
+  XIO 3.3V AUX    Enabled  10%   2.97/  3.63  20%   2.64/  3.96    3.285
+
+Description     State       Warning RPM  Current RPM
+--------------- ----------  -----------  -----------
+FAN  0  EXHAUST      Fault          920            0
+FAN  1       HD    Enabled         1560            2177
+FAN  2      PCI    Enabled         1120            1493
+FAN  3    XIO 1    Enabled         1600            2235
+FAN  4    XIO 2    Enabled         1600            2163
+FAN  5       PS    Enabled         1349            1864
+
+                              Advisory   Critical   Fault      Current
+Description       State       Temp       Temp       Temp       Temp
+----------------- ----------  ---------  ---------  ---------  ---------
+ 0 NODE 0            Enabled    [Autofan Control]    80C/176F   23C/ 73F
+ 1 NODE 1            Enabled    [Autofan Control]    80C/176F   34C/ 93F
+ 2 NODE 2            Enabled    [Autofan Control]    80C/176F   31C/ 87F
+ 3 PIMM              Enabled    [Autofan Control]    80C/176F   34C/ 93F
+ 4 ODYSSEY           Enabled    [Autofan Control]    80C/176F   35C/ 95F
+ 5 BEDROCK           Enabled  Not currently available

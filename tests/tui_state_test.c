@@ -138,7 +138,7 @@ static void test_environment_geometry(void)
 	state.environment_text = strdup("one\n\n  columns 1234567890\nlast\n\n  \n\t\n");
 	assert(state.environment_text);
 	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
-	assert(count == 4 && height == 10 && rows == 4 && width == 34);
+	assert(count == 4 && height == 12 && rows == 4 && width == 38);
 	assert((LINES - height) / 2 >= 3 && first == 2);
 	state.environment_row = state.environment_column = SIZE_MAX;
 	watch_tui_environment_size(&state, &width, &height, &first, &rows, &count, &longest);
@@ -164,7 +164,7 @@ static void test_environment_geometry(void)
 
 		state.environment_row = state.environment_column = 0;
 		watch_tui_environment_footer(&state, 71, 40, 42, 70, &footer);
-		assert(!strcmp(footer.line_range, "Lines 1-40 of 42") && !*footer.column_range && footer.rows == 1);
+		assert(!strcmp(footer.line_range, "Lines 1-40 of 42") && !*footer.column_range && footer.rows == 2);
 		watch_tui_environment_footer(&state, 201, 42, 42, 200, &footer);
 		assert(!*footer.line_range && !*footer.column_range && !*footer.position);
 		watch_tui_environment_footer(&state, 34, 1, 1, 200, &footer);
@@ -172,6 +172,106 @@ static void test_environment_geometry(void)
 	}
 	LINES = saved_lines; COLS = saved_cols;
 	puts("PASS Environment geometry: live content dimensions, blank rows, margins, compact view and scroll bounds");
+}
+
+static struct tui_environment_row *environment_sensor(struct tui_environment *view, const char *key)
+{
+	for (size_t i = 0; i < view->count; i++)
+		if (view->rows[i].key && !strcmp(view->rows[i].key, key)) return &view->rows[i];
+	assert(!"sensor missing");
+	return NULL;
+}
+
+static void test_environment_interpretation(void)
+{
+	struct tui_environment view = { 0 };
+	struct watch_tui_state state = { .environment_visible = true, .environment_follow = true,
+		.environment_next_ms = 2000 };
+	char fixture[16384], changed[16384];
+	FILE *file = fopen("tests/fixtures/env-faults.txt", "r");
+	struct tui_environment_row *row;
+	size_t bytes;
+
+	assert(setlocale(LC_CTYPE, "C.UTF-8"));
+	assert(file);
+	bytes = fread(fixture, 1, sizeof(fixture) - 1, file); fixture[bytes] = '\0'; fclose(file);
+	assert(!tui_environment_update(&view, fixture, false, 1000));
+	if (view.faults != 6 || view.warnings) {
+		fprintf(stderr, "Environment fixture: %zu faults, %zu warnings\n", view.faults, view.warnings);
+		for (size_t i = 0; i < view.count; i++)
+			if (view.rows[i].severity) fprintf(stderr, "%s: %d\n", view.rows[i].key, view.rows[i].severity);
+	}
+	assert(view.faults == 6 && !view.warnings);
+	row = environment_sensor(&view, "2.5V");
+	assert(row->severity == TUI_ENV_FAULT && row->reported == TUI_ENV_NORMAL && !row->changed_until);
+	assert(row->value_last - row->value_first == 5);
+	assert(environment_sensor(&view, "FAN 0 EXHAUST")->severity == TUI_ENV_FAULT);
+	assert(environment_sensor(&view, "FAN 1 HD")->severity == TUI_ENV_NORMAL);
+	assert(strstr(view.text, "23\xc2\xb0" "C") && !strstr(view.text, "73F"));
+	assert(strstr(view.text, "Not currently available"));
+	assert(strstr(environment_sensor(&view, "0 NODE 0")->raw, "23C/ 73F"));
+	assert(!tui_environment_update(&view, fixture, true, 2000));
+	assert(strstr(view.text, "73\xc2\xb0" "F") && !environment_sensor(&view, "0 NODE 0")->changed_until);
+	snprintf(changed, sizeof(changed), "%s", fixture);
+	char *value = strstr(changed, "0.390"); assert(value); memcpy(value, "0.500", 5);
+	assert(!tui_environment_update(&view, changed, true, 3000));
+	assert(environment_sensor(&view, "2.5V")->changed_until == 13000);
+	assert(!environment_sensor(&view, "12V")->changed_until);
+	assert(!tui_environment_update(&view, changed, false, 4000));
+	assert(environment_sensor(&view, "2.5V")->changed_until == 13000);
+	tui_environment_free(&view);
+	const char *limits = "Description State Warning Limits Fault Limits Current\n"
+		"low Enabled 10% 2.25/2.75 20% 2.00/3.00 2.25\n"
+		"high Enabled 10% 2.25/2.75 20% 2.00/3.00 2.75\n"
+		"warn Enabled 10% 2.25/2.75 20% 2.00/3.00 2.00\n"
+		"fault Enabled 10% 2.25/2.75 20% 2.00/3.00 3.01\n"
+		"off Wait Pwr 10% 2.25/2.75 20% 2.00/3.00 0.00\n"
+		"disabled Disabled 10% 2.25/2.75 20% 2.00/3.00 0.00\n"
+		"nan Enabled 10% 2.25/2.75 20% 2.00/3.00 nan\n"
+		"malformed Enabled 10% 2.25/2.75 20% 3.00/2.00 0.00\n"
+		"latched Fault 10% 2.25/2.75 20% 2.00/3.00 2.50\n"
+		"Description State Warning RPM Current RPM\n"
+		"FAN 0 Enabled 920 919\nFAN 1 Enabled 920 920\nFAN 2 Wait Pwr 920 0\n"
+		"Description State Temp Temp Temp Temp\n"
+		"advisory Enabled 30C/86F 40C/104F 50C/122F 31C/88F\n"
+		"hot Enabled [Autofan Control] 80C/176F 81C/178F\n"
+		"cold Enabled [Autofan Control] 80c/176F -1c/30F\n"
+		"missing Fault [Autofan Control] 80C/176F Not currently available\n"
+		"single Enabled [Autofan Control] 80C 90C\n"
+		"off Wait Pwr [Autofan Control] 80C/176F 99C/210F\n"
+		"Future unrecognised table format: preserve this verbatim.\n";
+	assert(!tui_environment_update(&view, limits, false, 5000));
+	assert(view.faults == 5 && view.warnings == 3);
+	assert(environment_sensor(&view, "low")->severity == TUI_ENV_NORMAL);
+	assert(environment_sensor(&view, "high")->severity == TUI_ENV_NORMAL);
+	assert(environment_sensor(&view, "nan")->value_last == 0);
+	assert(environment_sensor(&view, "malformed")->value_last == 0);
+	assert(environment_sensor(&view, "missing")->value_last == 0);
+	assert(environment_sensor(&view, "hot")->severity == TUI_ENV_FAULT);
+	assert(environment_sensor(&view, "single")->severity == TUI_ENV_FAULT);
+	assert(environment_sensor(&view, "cold")->severity == TUI_ENV_NORMAL);
+	assert(strstr(view.text, "preserve this verbatim"));
+	tui_environment_free(&view);
+	assert(!tui_environment_update(&view, "Description State Warning RPM Current RPM\n"
+		"FAN 0 Enabled 920 1000\nFAN 1 Enabled 920 1200\n", false, 1000));
+	assert(!tui_environment_update(&view, "Description State Warning RPM Current RPM\n"
+		"FAN 1   Enabled  920   1200\nFAN 0 Enabled 920 1000\n", false, 2000));
+	assert(!environment_sensor(&view, "FAN 0")->changed_until);
+	assert(!environment_sensor(&view, "FAN 1")->changed_until);
+	tui_environment_free(&view);
+	assert(!watch_tui_environment_due(&state, 1999, true, 0, true, true));
+	assert(watch_tui_environment_due(&state, 2000, true, 0, true, true));
+	assert(!watch_tui_environment_due(&state, 2000, true, 0, false, true));
+	assert(!watch_tui_environment_due(&state, 2000, true, 0, true, false));
+	assert(!watch_tui_environment_due(&state, 2000, false, 0, true, true));
+	assert(!watch_tui_environment_due(&state, 2000, true, 1, true, true));
+	state.environment_follow = false;
+	assert(!watch_tui_environment_due(&state, 2000, true, 0, true, true));
+	state.environment_requested = true;
+	assert(watch_tui_environment_due(&state, 2000, true, 0, false, false));
+	state.environment_visible = false;
+	assert(!watch_tui_environment_due(&state, 2000, true, 0, true, true));
+	puts("PASS Environment interpretation: limits, reported faults, inactive sensors, units, changes and polling fairness");
 }
 
 static void test_diagnostic_capture(void)
@@ -235,7 +335,7 @@ static void test_text_input_cursor(void)
 
 static void test_confirmation(void)
 {
-	struct watch_tui_state state = { .operator_visible = true };
+	struct watch_tui_state state = { .operator_visible = true, .host_state = WATCH_TUI_HOST_OFF };
 
 	keys(&state, "u");
 	assert(state.requested_action == WATCH_TUI_ACTION_POWER_UP);
@@ -705,6 +805,9 @@ static void test_menu_rendering(void)
 	assert(state.operator_refresh && state.requested_action == WATCH_TUI_ACTION_NONE);
 	state.operator_refresh = false;
 	watch_tui_operator_key(&state, 'e');
+	assert(state.requested_action == WATCH_TUI_ACTION_NONE && !state.operator_refresh);
+	state.host_state = WATCH_TUI_HOST_ON;
+	watch_tui_operator_key(&state, 'e');
 	assert(state.requested_action == WATCH_TUI_ACTION_HOST_RESET);
 	state.requested_action = WATCH_TUI_ACTION_NONE;
 	state.host_state = WATCH_TUI_HOST_OFF;
@@ -713,7 +816,7 @@ static void test_menu_rendering(void)
 	assert(screen);
 	assert(resizeterm(24, 120) != ERR);
 	watch_tui_draw_operator(&state);
-	cell = mvwinch(stdscr, 9, 27);
+	cell = mvwinch(stdscr, 9, 28);
 	assert((cell & A_CHARTEXT) == 'u' && (cell & A_UNDERLINE));
 	cell = mvwinch(stdscr, 10, 28);
 	assert((cell & A_CHARTEXT) == 'd' && (cell & A_UNDERLINE) && (cell & A_DIM));
@@ -721,7 +824,17 @@ static void test_menu_rendering(void)
 #ifdef A_ITALIC
 	assert(mvwinch(stdscr, 16, 19) & A_ITALIC);
 #endif
-	assert((mvwinch(stdscr, 17, 19) & A_CHARTEXT) != ' ');
+	assert((mvwinch(stdscr, 18, 20) & A_CHARTEXT) == 'r');
+	assert((mvwinch(stdscr, 5, 22) & A_CHARTEXT) == 'H');
+	assert((mvwinch(stdscr, 9, 20) & A_CHARTEXT) == 'u');
+	assert((mvwinch(stdscr, 9, 22) & A_CHARTEXT) == 'P');
+	assert((mvwinch(stdscr, 10, 20) & A_CHARTEXT) == 'd');
+	assert((mvwinch(stdscr, 16, 22) & A_CHARTEXT) == 'U');
+	assert(watch_tui_activity_width("Console last active: now", 100) ==
+		watch_tui_activity_width("Console last active: 59s ago", 100));
+	assert(watch_tui_activity_width("Console last active: never", 100) ==
+		watch_tui_activity_width("Console last active: 999d ago", 100));
+	assert(watch_tui_activity_width("C:now", 8) == 8);
 	tui_firmware_parse("Flash image B currently booted\n"
 		"A valid 1.48.1 01/22/2007 11:34:20\n"
 		"B default 1.24.11 10/29/2003 00:05:26\n", &state.firmware);
@@ -731,9 +844,9 @@ static void test_menu_rendering(void)
 	assert(strstr(text, "c Reboot current (Bank B)"));
 	mvwinnstr(stdscr, 14, 19, text, 40);
 	assert(strstr(text, "o Boot other (Bank A)"));
-	cell = mvwinch(stdscr, 13, 28);
+	cell = mvwinch(stdscr, 13, 29);
 	assert((cell & A_CHARTEXT) == 'c' && (cell & A_UNDERLINE));
-	cell = mvwinch(stdscr, 14, 26);
+	cell = mvwinch(stdscr, 14, 27);
 	assert((cell & A_CHARTEXT) == 'o' && (cell & A_UNDERLINE));
 	assert(mvwinch(stdscr, 16, 19) & A_DIM);
 	state.firmware.bank[0].bootable = false;
@@ -751,10 +864,121 @@ static void test_menu_rendering(void)
 	assert(strstr(text, "l Reset L1"));
 	watch_tui_operator_key(&state, KEY_HOME);
 	assert(!state.operator_scroll);
+	/* Exercise the composed status bar, not just its width calculation. */
+	for (int test_width = 40; test_width <= 120; test_width += 40) {
+		struct watch_display display = { .tui = true };
+		char baseline[256], current[256];
+		display.tui_state.initialized = true;
+		assert(resizeterm(24, test_width) != ERR);
+		watch_tui_render(&display);
+		mvwinnstr(stdscr, LINES - 1, 0, baseline, test_width);
+		const char *clock = strstr(baseline, "L1 ");
+		assert(clock);
+		display.console_activity_seen = true;
+		for (unsigned int seconds = 0; seconds <= 61; seconds++) {
+			display.console_activity_last_seen = monotonic_milliseconds() - seconds * 1000;
+			watch_tui_render(&display);
+			mvwinnstr(stdscr, LINES - 1, 0, current, test_width);
+			assert(strstr(current, "L1 ") - current == clock - baseline);
+			assert(!memcmp(baseline, current, (size_t)(clock - baseline)));
+		}
+	}
 	endwin();
 	delscreen(screen);
 	fclose(input); fclose(output);
 	puts("PASS menu rendering: accelerator placement/attributes, disabled legends, bank targets, scrolling and refresh keys");
+}
+
+static void test_environment_rendering(void)
+{
+	FILE *input = fopen("/dev/null", "r"), *output = fopen("/dev/null", "w");
+	assert(input && output);
+	SCREEN *screen = newterm("xterm-256color", output, input);
+	assert(screen && resizeterm(24, 120) != ERR);
+	assert(start_color() == OK && use_default_colors() == OK);
+	struct watch_tui_state state = { .color_capable = true, .palette_ready = true };
+	assert(watch_tui_apply_palette(&state, WATCH_PALETTE_INDIGO));
+	const char *text = "Description State Warning Limits Fault Limits Current\n"
+		"rail Enabled 10% 2.25/2.75 20% 2.00/3.00 0.390\n"
+		"warn Enabled 10% 2.25/2.75 20% 2.00/3.00 2.100\n"
+		"Description State Temp Temp Temp Temp\n"
+		"temp Enabled [Autofan Control] 80C/176F 33C/91F\n";
+	assert(!tui_environment_update(&state.environment, text, false, monotonic_milliseconds()));
+	struct tui_environment_row *fault = environment_sensor(&state.environment, "rail");
+	struct tui_environment_row *warning = environment_sensor(&state.environment, "warn");
+	struct tui_environment_row *temp = environment_sensor(&state.environment, "temp");
+	WINDOW *window = newwin(4, 110, 0, 0);
+	assert(window);
+	fault->changed_until = milliseconds_after(monotonic_milliseconds(), 10000);
+	watch_tui_environment_line(&state, window, 0, 100, fault->text, strlen(fault->text), fault);
+	chtype cell = mvwinch(window, 0, 2 + (int)fault->value_first);
+	assert((cell & A_BOLD) && PAIR_NUMBER(cell) == WATCH_TUI_COLOR_FAULT);
+#ifdef A_ITALIC
+	assert((cell & A_ITALIC) && (mvwinch(window, 0, 2) & A_ITALIC));
+#endif
+	cell = mvwinch(window, 0, 2 + (int)fault->state_first);
+	assert(!(cell & A_BOLD) && !PAIR_NUMBER(cell)); /* Reported Enabled stays intact. */
+	watch_tui_environment_line(&state, window, 1, 100, warning->text, strlen(warning->text), warning);
+	cell = mvwinch(window, 1, 2 + (int)warning->value_first);
+	assert((cell & A_BOLD) && PAIR_NUMBER(cell) == WATCH_TUI_COLOR_ENV_WARNING);
+#ifdef A_ITALIC
+	assert(!(cell & A_ITALIC));
+#endif
+	fault->changed_until = monotonic_milliseconds() - 1;
+	state.monochrome = true;
+	watch_tui_environment_line(&state, window, 0, 100, fault->text, strlen(fault->text), fault);
+	cell = mvwinch(window, 0, 2 + (int)fault->value_first);
+	assert((cell & A_BOLD) && !PAIR_NUMBER(cell));
+#ifdef A_ITALIC
+	assert(!(cell & A_ITALIC));
+#endif
+	state.environment_column = temp->value_first;
+	watch_tui_environment_line(&state, window, 2, 4, temp->text, strlen(temp->text), temp);
+	cchar_t wide;
+	wchar_t characters[CCHARW_MAX];
+	attr_t attributes; short pair;
+	assert(mvwin_wch(window, 2, 4, &wide) != ERR);
+	assert(getcchar(&wide, characters, &attributes, &pair, NULL) != ERR);
+	assert(characters[0] == 0xb0); /* Horizontal crop cannot split the degree sign. */
+	state.environment_column = 0;
+	state.monochrome = false;
+	watch_tui_notice(&state, window, 3, 2, 80, "Action unavailable");
+	cell = mvwinch(window, 3, 2);
+	assert((cell & A_BOLD) && PAIR_NUMBER(cell) == WATCH_TUI_COLOR_FAULT);
+	state.monochrome = true;
+	watch_tui_notice(&state, window, 3, 2, 80, "Action unavailable");
+	cell = mvwinch(window, 3, 2);
+	assert((cell & A_BOLD) && !PAIR_NUMBER(cell));
+	state.operator_visible = true;
+	snprintf(state.operator_notice, sizeof(state.operator_notice), "Action unavailable: host is off");
+	watch_tui_draw_operator(&state);
+	state.firmware_visible = true;
+	watch_tui_draw_operator(&state);
+	state.save.phase = TUI_SAVE_ERROR;
+	snprintf(state.save.message, sizeof(state.save.message), "Permission denied");
+	watch_tui_draw_save(&state);
+	for (int y = 0; y < LINES; y++)
+		for (int x = 0; x < COLS; x++) {
+			assert(mvwin_wch(stdscr, y, x, &wide) != ERR);
+			assert(getcchar(&wide, characters, &attributes, &pair, NULL) != ERR);
+			assert(!pair);
+		}
+	state.operator_visible = state.firmware_visible = false;
+	state.save.phase = TUI_SAVE_NONE;
+	state.environment_visible = true;
+	state.environment_text = strdup(text); assert(state.environment_text);
+	watch_tui_environment_key(&state, 'w');
+	assert(state.environment_follow);
+	watch_tui_environment_key(&state, 'f');
+	assert(state.environment_follow); /* CLI-compatible w is the Follow shortcut. */
+	watch_tui_environment_key(&state, 't');
+	assert(state.environment_fahrenheit && strstr(state.environment.text, "91\xc2\xb0" "F"));
+	watch_tui_environment_key(&state, '\n');
+	assert(!state.environment_follow && !state.environment_visible);
+	free(state.environment_text);
+	tui_environment_free(&state.environment);
+	delwin(window); endwin(); delscreen(screen); fclose(input); fclose(output);
+	puts("PASS Environment rendering: red/bold faults, yellow warnings, monochrome, row-only changes, expiry and degree cells");
 }
 
 int main(void)
@@ -786,6 +1010,7 @@ int main(void)
 	test_text_input_cursor();
 	test_second_power_down();
 	test_environment_geometry();
+	test_environment_interpretation();
 	test_diagnostic_capture();
 	test_availability_and_clock();
 	test_firmware_banks();
@@ -794,6 +1019,7 @@ int main(void)
 	test_save_snapshot();
 	test_save_clipboard();
 	test_menu_rendering();
+	test_environment_rendering();
 	puts("PASS TUI state: retained repeats, hidden changes, timestamps, ring eviction and confirmation");
 	if (*fallback) {
 		assert(!rmdir(fallback));

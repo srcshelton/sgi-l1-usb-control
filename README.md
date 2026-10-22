@@ -149,7 +149,10 @@ parent menu. If the L1 requests a second power-down signal,
 a follow-up **y**/**n** prompt offers to send it once. Press **s** in the monitoring view to save
 all retained data from the selected pane to a file, with overwrite/append
 choices and a full-path confirmation. Press **e** for an Environment dialog
-sized to the live `env` output, with scrolling and **r** to refresh. Transport
+sized to the live `env` output. It highlights fault and warning readings,
+shows temperatures in Celsius (**t** switches scale), and offers **w Follow**
+for automatic refresh up to once per second alongside log/LED polling.
+Changed rows stand out for ten seconds; **r** refreshes manually. Transport
 diagnostics appear briefly in the status bar and remain in the log buffer.
 The status bar also shows L1 time and warns
 when it differs by more than five seconds from this machine.

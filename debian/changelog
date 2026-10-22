@@ -1,3 +1,27 @@
+sgi-l1-usb-control (1.0.66) unstable; urgency=medium
+
+  * Updated components since 1.0.65: user-space sgil1ctl, documentation,
+    build dependencies and regression tests; kernel source is unchanged.
+  * Interpret Environment readings against voltage, fan and temperature
+    limits; emphasise faults in bold bright red and warnings in yellow.
+    Preserve native states and skip inferred alarms for inactive sensors.
+  * Show temperatures in Celsius with degree signs by default; t switches
+    between Celsius and Fahrenheit without another L1 request.
+  * Add w Follow to Environment: poll at most once a second, interleave log
+    and LED retrieval, back off after errors, retain the last good reading,
+    and emphasise changed sensor rows for ten seconds where supported.
+  * Standardise Close wording, comma-separated equivalent keys and slash-
+    separated directional pairs. Align enabled/disabled Operator controls
+    and firmware options, metadata and legends in consistent columns.
+  * Ignore unavailable action shortcuts silently, retaining fresh state
+    checks for available commands. Give notices consistent bold-red styling
+    and ensure all views remain colour-free in monochrome mode.
+  * Pad the Console last active age field to keep adjacent status items
+    stationary as activity ages. Extend state, rendered-cell, PTY and GNU
+    Screen tests for environment interpretation, polling and menu behaviour.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 22 Oct 2026 16:11:32 +0100
+
 sgi-l1-usb-control (1.0.65) unstable; urgency=medium
 
   * Updated components since 0.1.64: user-space sgil1ctl, documentation

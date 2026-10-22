@@ -66,7 +66,7 @@ def check_pane_controls(capture, send, resize):
         rendered = capture()
         lines = rendered.rstrip("\n").split("\n")
         entries = ([("Tab pane" if any("Tab pane" in line for line in lines) else "Tab select pane"), "shrink/grow pane", "t time:",
-                    "p sources:", "q Quit", "h/?/Esc/Ret close"] if compact else
+                    "p sources:", "q Quit", "h, ?, Esc, Ret Close"] if compact else
                    ["Select pane", "Move divider left/right", "LED timestamps",
                     "LED description sources", "Redraw screen", "Close Help"])
         rows = [next(i for i, line in enumerate(lines) if entry in line)
@@ -167,77 +167,93 @@ def check_pane_controls(capture, send, resize):
     print("PASS pane controls: focus, aliases, limits, wrapping, resize and help order", flush=True)
 
 
-def check_environment(capture, send, resize, command_log, environment):
-    def expect(text):
-        rendered = capture()
-        if text not in rendered:
-            raise AssertionError(f"missing {text!r}:\n{rendered}")
-        return rendered
+def check_environment(capture, send, resize, command_log, environment, timing_log):
+    def expect(text, timeout=7):
+        deadline = time.monotonic() + timeout
+        while True:
+            rendered = capture()
+            if text in rendered:
+                return rendered
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"missing {text!r}:\n{rendered}")
+            send(b"")
 
     def env_count():
         return command_log.read_text().splitlines().count("CMD env")
+
+    def ranges(rendered):
+        value = re.search(r"Lines (\d+)-(\d+) of (\d+)", rendered)
+        if not value:
+            raise AssertionError(f"missing visible line range:\n{rendered}")
+        return tuple(map(int, value.groups()))
 
     send(b"?e")
     expect(" Environment ")
     expect("Environmental monitoring is enabled")
     expect("Warning Limits     Fault Limits       Current")
+    expect("w Follow off")
+    expect("t Celsius")
     rendered = capture()
-    footer = next(line for line in rendered.split("\n") if "Lines " in line)
-    if "Cols " in footer or "Arrows/PgUp/PgDn | r Refresh | Return/Esc Close" not in footer:
-        raise AssertionError(f"Environment footer did not group keys/conditional ranges: {footer!r}")
-    if not re.search(r"Lines 1-\d+ of 41", footer):
-        raise AssertionError(f"Environment footer did not report a visible range: {footer!r}")
+    if "Cols " in rendered or ranges(rendered)[0] != 1 or ranges(rendered)[2] != 41:
+        raise AssertionError(f"Incorrect conditional ranges:\n{rendered}")
+    check_modal_footer(rendered, "Cursor keys, PgUp/PgDn")
     lines = rendered.split("\n")
-    title = next(line for line in lines if " Environment " in line)
-    border = re.search(r"TPP Environment P+W", title)
-    keys = "Arrows/PgUp/PgDn | r Refresh | Return/Esc Close"
-    if not border or footer.index(keys) + len(keys) != border.end() - 2 or footer.index("Lines ") != border.start() + 2:
-        raise AssertionError("Environment footer is not left/right aligned")
-    ruler = lines[lines.index(footer) - 1]
-    if not any(char != " " and char * 20 in ruler for char in set(ruler)):
-        raise AssertionError("Environment output has no footer separator")
+    border = re.search(r"TPP Environment P+W", next(line for line in lines if " Environment " in line))
+    for key in ("Cursor keys, PgUp/PgDn | r Refresh", "w Follow off | t Celsius | Return, Esc Close"):
+        footer = next(line for line in lines if key in line)
+        if not border or footer.index(key) + len(key) != border.end() - 2:
+            raise AssertionError(f"Environment keys are not right aligned:\n{rendered}")
     if env_count() != 1:
         raise AssertionError("Environment entry did not issue one env request")
     longest = max(len(line) for line in environment.read_text().rstrip().splitlines())
     resize(24, 60)
-    expect("Lines 1-11 of 41")
+    visible = ranges(capture())[1]
     expect(f"Cols 1-54 of {longest}")
-    expect("r Refresh | Return/Esc Close")
+    expect("Return, Esc Close")
     send(b"\x06")
-    expect("Lines 12-22 of 41")
+    if ranges(capture()) != (visible + 1, visible * 2, 41):
+        raise AssertionError("Environment page down did not preserve the visible range")
     send(b"\x02")
-    expect("Lines 1-11 of 41")
+    expect(f"Lines 1-{visible} of 41")
     send(b">")
     expect(f"Cols 2-55 of {longest}")
     send(b"\033OH")
     resize(24, 120)
-    send(b"\033OF")  # End reaches the final temperature rows.
+    send(b"\033OF")
     expect("Not currently available")
-    send(b"\033OH")
-    expect("Environmental monitoring is enabled")
+    expect("33°C")
+    before = env_count()
+    send(b"t")
+    expect("91°F")
+    expect("t Fahrenheit")
+    if env_count() != before:
+        raise AssertionError("unit toggle issued an L1 request")
+    send(b"t\033OH")
     resize(80, 120)
     rendered = expect("Environmental monitoring is enabled")
     expect("Not currently available")
     if "Lines " in rendered or "Cols " in rendered:
-        raise AssertionError("Environment showed position counters when all output fits")
+        raise AssertionError("Environment showed counters when all output fits")
     lines = rendered.split("\n")
     top = next(i for i, line in enumerate(lines) if " Environment " in line)
-    bottom = next(i for i, line in enumerate(lines) if "r Refresh | Return/Esc Close" in line) + 1
-    if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().rstrip().splitlines()) + 5:
+    bottom = next(i for i, line in enumerate(lines) if "Return, Esc Close" in line) + 1
+    if top < 3 or bottom > 75 or bottom - top + 1 != len(environment.read_text().rstrip().splitlines()) + 6:
         raise AssertionError("Environment did not size to content with three-row margins")
     resize(40, 40)
-    expect("Lines 1-26 of 41")
+    if ranges(capture()) != (1, 25, 41):
+        raise AssertionError(f"Wrong narrow Environment range:\n{capture()}")
     expect(f"Cols 1-34 of {longest}")
-    expect("Arrows/PgUp/PgDn")
-    expect("r Refresh")
-    expect("Return/Esc")
+    expect("Cursor keys, PgUp/PgDn")
+    expect("w Follow off")
+    expect("t Celsius")
+    expect("Return, Esc")
     resize(11, 40)
     send(b">" * 100)
     send(b"\033OF")
     expect("available")
-    rendered = expect("r Refresh | Return/Esc")
+    rendered = expect("w Follow:off | t C | r | Esc")
     if not any(char != " " and char * 20 in rendered.split("\n")[5] for char in set(rendered.split("\n")[5])):
-        raise AssertionError("minimum-size Environment view lost its footer ruler")
+        raise AssertionError("minimum-size Environment lost its ruler")
     resize(24, 120)
     send(b"\033OH")
     sample = environment.read_text()
@@ -257,22 +273,59 @@ def check_environment(capture, send, resize, command_log, environment):
     expect("0.199")
     if env_count() != 4:
         raise AssertionError("Environment refresh issued duplicate requests")
-    commands = command_log.read_text().splitlines()
-    if commands[-1] not in ("CMD log", "CMD leds", "CMD date", "CMD date tz"):
-        raise AssertionError("monitoring did not continue while Environment was open")
+    # Follow must preserve scrolling, poll at most once per second, and let
+    # both monitoring streams run between consecutive environment requests.
+    send(b"\033OF")
+    position = ranges(capture())
+    environment.write_text((ROOT / "tests" / "fixtures" / "env-faults.txt").read_text())
+    follow_start = env_count()
+    send(b"w")
+    expect("w Follow on")
+    expect("6 fault, 0 warn")
+    if ranges(capture()) != position:
+        raise AssertionError("Follow reset the vertical scroll position")
+    send(b"\033OH>")
+    # At this width output fits horizontally; check column retention below.
+    resize(24, 60)
+    send(b">")
+    horizontal = re.search(r"Cols (\d+)-", capture()).group(1)
+    target = env_count() + 3
+    deadline = time.monotonic() + 7
+    while env_count() < target and time.monotonic() < deadline:
+        send(b"")
+    if env_count() < target or re.search(r"Cols (\d+)-", capture()).group(1) != horizontal:
+        raise AssertionError("Follow stalled or reset horizontal scrolling")
+    send(b"w")
+    expect("w Follow off")
+    count = env_count()
+    for _ in range(4):
+        send(b"")
+    if env_count() != count:
+        raise AssertionError("Follow continued after it was disabled")
+    timed = [(float(stamp), command) for stamp, command in
+             (line.split(" ", 1) for line in timing_log.read_text().splitlines())]
+    envs = [i for i, (_, command) in enumerate(timed) if command == "env"]
+    for first, second in zip(envs, envs[1:]):
+        if timed[second][0] - timed[first][0] < 0.995:
+            raise AssertionError("environment requests exceeded one per second")
+        interleaved = [command for _, command in timed[first + 1:second]]
+        if first >= envs[follow_start] and not all(command in interleaved for command in ("log", "leds")):
+            raise AssertionError(f"environment starved log/LED monitoring: {interleaved}")
+    if timed[envs[2]][0] - timed[envs[1]][0] < 1.995 or timed[envs[3]][0] - timed[envs[2]][0] < 3.995:
+        raise AssertionError("environment errors did not apply increasing retry backoff")
     send(b"\r")
     if " Environment " in capture():
         raise AssertionError("Return did not close Environment")
+    resize(24, 120)
     send(b"e")
-    if env_count() != 5:
-        raise AssertionError("reopening Environment did not refresh")
+    expect("w Follow off")
     send(b"\033")
     deadline = time.monotonic() + 6
     while "Transport:" in capture().split("\n")[-2] and time.monotonic() < deadline:
         send(b"")
     if "Console last active:" not in capture().split("\n")[-2]:
         raise AssertionError("pipe-reset status did not expire")
-    print("PASS Environment: full table, scrolling, resize, refresh, retained errors and continued monitoring", flush=True)
+    print("PASS Environment: interpreted limits, units, geometry, bounded Follow, interleaved monitoring, errors and scrolling", flush=True)
 
 
 def check_operator_controls(capture, send, resize, command_log, power_file):
@@ -296,7 +349,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
             expect("L1 firmware / reset")
             send(b"c")
         expect("Type YES, then Return to send once")
-        check_modal_footer(expect("Blank input + Return aborts action"), "Esc/* Back")
+        check_modal_footer(expect("Blank input + Return aborts action"), "Esc, * Close")
 
     send(b"\f")
     rendered = capture()
@@ -312,7 +365,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     help_title = next(line for line in capture().splitlines() if " Help " in line)
     send(b"*")
     menu = expect("Host: off")
-    check_modal_footer(menu, "r Refresh | Esc/* Back")
+    check_modal_footer(menu, "r Refresh | Esc, * Close")
     operator_title = next(line for line in menu.splitlines() if " Operator controls " in line)
     if not re.search(r"TPP Help P+W", help_title) or not re.search(r"TPP Operator controls P+W", operator_title):
         raise AssertionError(f"Help/Operator border mismatch: {help_title!r} / {operator_title!r}")
@@ -323,7 +376,7 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Unavailable due to current host state")
     rows = menu.splitlines()
     legend = next(i for i, row in enumerate(rows) if "Unavailable due to current host state" in row)
-    controls = next(i for i, row in enumerate(rows) if "r Refresh | Esc/* Back" in row)
+    controls = next(i for i, row in enumerate(rows) if "r Refresh | Esc, * Close" in row)
     if controls != legend + 2:
         raise AssertionError(f"Operator menu has an extra gap above its ruler:\n{menu}")
     if next(i for i, row in enumerate(rows) if "l Reset L1" in row) != next(i for i, row in enumerate(rows) if "e Reset/restart host" in row) + 2:
@@ -334,20 +387,20 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     if "[out of sync]" not in footer or footer.index("L1 ") > footer.index("Console last active:"):
         raise AssertionError(f"status clock missing or misplaced: {footer}")
     resize(17, 80)  # Sixteen application rows still need the compact footer.
-    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc/* Back")
+    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc, * Close")
     resize(11, 40)
     send(b"\033OF")  # End reveals the lower menu rows at minimum height.
-    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc/* Back")
+    check_modal_footer(expect("l Reset L1"), "r Refresh | Esc, * Close")
     send(b"\033")  # The minimum-height modal covers the status row.
     expect("[out of sync]")
     resize(24, 120)
     send(b"*")
     expect("Host: off")
     checks = commands().count("CMD power check")
-    send(b"d")
-    expect("Action unavailable: host is off")
-    if "Confirm:" in capture() or commands().count("CMD power check") <= checks:
-        raise AssertionError("unavailable action was not rechecked/blocked")
+    send(b"de")
+    expect("Host: off")
+    if "Confirm:" in capture() or "Action unavailable:" in capture() or commands().count("CMD power check") != checks:
+        raise AssertionError("disabled shortcuts must be ignored without rechecking")
     send(b"U")  # A verified off host powers on without typing YES.
     expect("power up: command acknowledged")
     if sent() != ["CMD power up"]:
@@ -385,15 +438,18 @@ def check_operator_controls(capture, send, resize, command_log, power_file):
     expect("Second power-down signal")
     if sent().count("CMD power down") != 1:
         raise AssertionError("second signal was automatically sent")
-    check_modal_footer(expect("Send 'pwr d' a second time?"), "y Yes | n No | Return/Esc Cancel")
+    check_modal_footer(expect("Send 'pwr d' a second time?"), "y Yes | n No | Return, Esc Cancel")
     send(b"y")
     expect("power down: command acknowledged")
     if sent().count("CMD power down") != 2:
         raise AssertionError("second signal was not sent exactly once")
     send(b"*")
     expect("Host: off")
+    checks = commands().count("CMD power check")
     send(b"e")
-    expect("Action unavailable: host is off")
+    expect("Host: off")
+    if commands().count("CMD power check") != checks or "Confirm:" in capture():
+        raise AssertionError("disabled reset shortcut was not ignored")
     power_file.write_text("unknown")
     send(b"\033*")
     expect("Host: unknown")
@@ -477,12 +533,12 @@ def check_firmware_banks(capture, send, command_log, power_file, flash_file):
     rendered = capture()
     lines = rendered.split("\n")
     expected = ["Running bank: B", "A: 1.48.1", "B: 1.24.11", "c Reboot current (Bank B)",
-                "o Boot other (Bank A)", "* Other bank unknown/not bootable"]
+                "o Boot other (Bank A)", "*  Other bank unknown/not bootable"]
     positions = [next(i for i, line in enumerate(lines) if value in line) for value in expected]
     if [b - a for a, b in zip(positions, positions[1:])] != [2, 3, 3, 1, 2]:
         raise AssertionError(f"Firmware sections have incorrect spacing:\n{rendered}")
-    check_modal_footer(rendered, "r Refresh | Esc/* Back")
-    footer_row = next(i for i, line in enumerate(lines) if "r Refresh | Esc/* Back" in line)
+    check_modal_footer(rendered, "r Refresh | Esc, * Close")
+    footer_row = next(i for i, line in enumerate(lines) if "r Refresh | Esc, * Close" in line)
     if footer_row != positions[-1] + 2 or "unavailable;" in lines[footer_row]:
         raise AssertionError(f"Firmware footer has a redundant gap or legend:\n{rendered}")
     before = reboots()
@@ -766,8 +822,10 @@ def check_usb_wait(capture, send, presence, command_log, mode):
     print(f"PASS mandatory USB wait: {mode}", flush=True)
 
 
-def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False, wait_mode=None):
+def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False, wait_mode=None, slow_environment=False):
     name = f"altscreen-{altscreen}-{'primary' if primary else 'default'}-{stop}"
+    if slow_environment:
+        name += "-slow-environment"
     if operator_timeout:
         name += "-operator-timeout"
     if wait_mode:
@@ -782,6 +840,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     result = directory / "result.txt"
     exercise_controls = altscreen == "off" and not primary and stop == "q" and not operator_timeout and not wait_mode
     command_log = directory / "commands.log"
+    timing_log = directory / "timing.log"
     power_file = directory / "power.txt"
     clipboard = directory / "clipboard.txt"
     environment = directory / "environment.txt"
@@ -808,7 +867,8 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     if exercise_controls:
         extra_env.update(PATH=str(helpers) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
                          SGIL1_TEST_CLIPBOARD=str(clipboard), TMPDIR=str(directory),
-                         SGIL1_MOCK_ENV_FILE=str(environment), SGIL1_MOCK_FLASH_FILE=str(flash_file))
+                         SGIL1_MOCK_ENV_FILE=str(environment), SGIL1_MOCK_FLASH_FILE=str(flash_file),
+                         SGIL1_MOCK_TIMING_LOG=str(timing_log))
     if operator_timeout:
         extra_env["SGIL1_MOCK_POWER_UP_TIMEOUT"] = "1"
         extra_env["SGIL1_MOCK_RESET_PIPES_EPIPE"] = "1"
@@ -818,7 +878,8 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     command = [
         str(BIN), "--device", "/dev/sgi-l1/l1-0",
         "--status-device", "/dev/sgi-l1/status", "--timeout", "10",
-        "watch", "--tui", "--log-interval", "100", "--led-interval", "100",
+        "watch", "--tui", "--log-interval", "30000" if slow_environment else "100",
+        "--led-interval", "500" if slow_environment else "100",
         "--log-history", "64", "--led-history", "32",
     ]
     if wait_mode in ("cli", "skip"):
@@ -829,6 +890,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         command.append("--no-alternate-screen")
     screenrc.write_text(
         "startup_message off\n"
+        "defutf8 on\n"
         "term screen-256color\n"
         f"altscreen {altscreen}\n"
         f'hardstatus alwayslastline "{HARDSTATUS}"\n'
@@ -865,7 +927,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
     env = os.environ.copy()
     env.update(TERM="xterm-256color", LC_ALL="C.UTF-8")
     proc = subprocess.Popen(
-        [screen, "-S", session, "-c", str(screenrc), sys.executable, str(runner)],
+        [screen, "-U", "-S", session, "-c", str(screenrc), sys.executable, str(runner)],
         stdin=slave, stdout=slave, stderr=slave, env=env,
         preexec_fn=controlling_terminal,
     )
@@ -898,7 +960,15 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
         # Screen can create the hardcopy before it has written its contents.
         while (not hardcopy.exists() or not hardcopy.stat().st_size) and time.monotonic() < deadline:
             drain(0.02)
-        return hardcopy.read_text(errors="replace")
+        # Screen may expose ACS letters or Unicode borders in hardcopy.
+        # Canonicalise the latter for the shared frame/column assertions.
+        # Hardcopy can also contain single-byte ACS/Latin-1 cells. Retain
+        # valid UTF-8 while decoding those cells instead of replacing °.
+        decoded = hardcopy.read_bytes().decode("utf-8", errors="surrogateescape")
+        decoded = "".join(chr(ord(c) - 0xdc00) if 0xdc80 <= ord(c) <= 0xdcff else c for c in decoded)
+        return decoded.translate(str.maketrans({
+            "╔": "T", "═": "P", "╗": "W", "║": "Q", "╚": "Z", "╝": "]",
+        }))
 
     try:
         deadline = time.monotonic() + 10
@@ -962,17 +1032,20 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
             elif operator_timeout:
                 check_operator_timeout(capture, send, command_log)
             else:
-                check_environment(capture, send, resize, command_log, environment)
-                check_operator_controls(capture, send, resize, command_log, power_file)
-                check_firmware_banks(capture, send, command_log, power_file, flash_file)
-                check_save_buffer(capture, send, resize, directory, helper, clipboard)
-                # Restore the fixture's original focus before navigation checks.
-                send(b"s")
-                if "Full retained LED" in capture():
-                    send(b"\033\t")
-                else:
-                    send(b"\033")
-                check_pane_controls(capture, send, resize)
+                check_environment(capture, send, resize, command_log, environment, timing_log)
+                if "°".encode() not in terminal_output:
+                    raise AssertionError("attached UTF-8 Screen did not render the degree sign")
+                if not slow_environment:
+                    check_operator_controls(capture, send, resize, command_log, power_file)
+                    check_firmware_banks(capture, send, command_log, power_file, flash_file)
+                    check_save_buffer(capture, send, resize, directory, helper, clipboard)
+                    # Restore the fixture's original focus before navigation checks.
+                    send(b"s")
+                    if "Full retained LED" in capture():
+                        send(b"\033\t")
+                    else:
+                        send(b"\033")
+                    check_pane_controls(capture, send, resize)
         if stop == "q":
             os.write(master, b"q")
         else:
@@ -989,7 +1062,7 @@ def run_case(screen, temporary, altscreen, primary, stop, operator_timeout=False
                         if line.startswith(PROMPT)]
         if not prompt_lines or prompt_lines[-1].strip() != PROMPT:
             raise AssertionError(f"{name}: stale content on prompt row:\n{rendered}")
-        if "Console last active:" in rendered or "log selected | h/? Help" in rendered:
+        if "Console last active:" in rendered or "log selected | h, ? Help" in rendered:
             raise AssertionError(f"{name}: footer survived exit:\n{rendered}")
         restores_shell = altscreen == "on" and not primary
         if restores_shell:
@@ -1017,6 +1090,7 @@ def main():
             for primary in (False, True):
                 for stop in ("q", "SIGINT", "SIGTERM"):
                     run_case(screen, Path(temporary), altscreen, primary, stop)
+        run_case(screen, Path(temporary), "off", False, "q", slow_environment=True)
         run_case(screen, Path(temporary), "off", False, "q", operator_timeout=True)
         for mode in ("up", "cli", "skip", "reset", "down", "unconfirmed", "quit"):
             run_case(screen, Path(temporary), "off", False, "q", wait_mode=mode)
