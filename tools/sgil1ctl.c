@@ -8012,7 +8012,10 @@ static void watch_tui_render(struct watch_display *display)
 	clock_x = activity_x - (int)strlen(clock_text) - 1;
 	if (clock_x < 0)
 		clock_x = 0;
-	footer_width = clock_x > 1 ? clock_x - 1 : 0;
+	/* Keep the separator beside the clock even if the shortcut list is empty.
+	 * Tight layouts retain their quit hint by omitting separator padding. */
+	int separator_width = clock_x >= 10 ? 3 : 1;
+	footer_width = clock_x > separator_width ? clock_x - separator_width : 0;
 	attron(A_REVERSE);
 	mvhline(LINES - 1, 0, ' ', COLS);
 	if (state->diagnostic_until > monotonic_milliseconds()) {
@@ -8031,6 +8034,9 @@ static void watch_tui_render(struct watch_display *display)
 			}
 			mvaddnstr(LINES - 1, hint_x, hints, footer_width - hint_x);
 		}
+		if (clock_x >= separator_width)
+			mvaddnstr(LINES - 1, clock_x - separator_width,
+				separator_width == 3 ? " | " : "|", separator_width);
 		if (clock_warning)
 			attron(A_BOLD);
 		mvaddnstr(LINES - 1, clock_x, clock_text, activity_x - clock_x - 1);

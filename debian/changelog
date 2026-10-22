@@ -1,3 +1,15 @@
+sgi-l1-usb-control (1.0.68) unstable; urgency=medium
+
+  * Updated components since 1.0.67: user-space sgil1ctl and TUI regression
+    tests; kernel source is unchanged.
+  * Always separate monitoring shortcuts from the L1 clock with a vertical
+    bar, including when dialogs replace q Quit with the global quit hint.
+    Use compact spacing where needed to preserve narrow-terminal controls.
+  * Extend rendered-cell and PTY coverage for the separator, clock drift
+    warnings, modal quit hints and stable console-activity alignment.
+
+ -- Stuart Shelton <stuart@shelton.me>  Thu, 22 Oct 2026 17:16:56 +0100
+
 sgi-l1-usb-control (1.0.67) unstable; urgency=medium
 
   * Updated components since 1.0.66: user-space sgil1ctl, documentation

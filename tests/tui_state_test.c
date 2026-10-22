@@ -871,14 +871,15 @@ static void test_menu_rendering(void)
 		assert(resizeterm(24, test_width) != ERR);
 		watch_tui_render(&display);
 		mvwinnstr(stdscr, LINES - 1, 0, baseline, test_width);
-		const char *clock = strstr(baseline, "L1 ");
-		assert(clock);
+		const char *clock = strstr(baseline, "L1 unavailable");
+		assert(clock && clock > baseline);
+		assert(clock[-1] == '|' || (clock - baseline >= 3 && !memcmp(clock - 3, " | ", 3)));
 		display.console_activity_seen = true;
 		for (unsigned int seconds = 0; seconds <= 61; seconds++) {
 			display.console_activity_last_seen = monotonic_milliseconds() - seconds * 1000;
 			watch_tui_render(&display);
 			mvwinnstr(stdscr, LINES - 1, 0, current, test_width);
-			assert(strstr(current, "L1 ") - current == clock - baseline);
+			assert(strstr(current, "L1 unavailable") - current == clock - baseline);
 			assert(!memcmp(baseline, current, (size_t)(clock - baseline)));
 			assert(current[test_width - 2] != ' ' && current[test_width - 1] == ' ');
 			if (test_width >= 80) {
@@ -886,6 +887,29 @@ static void test_menu_rendering(void)
 				watch_tui_format_console_activity(&display, activity, sizeof(activity));
 				assert(strstr(current, activity) == current + test_width - strlen(activity) - 1);
 			}
+		}
+	}
+	/* Clock warnings squeeze the footer most; preserve the bar and quit hint
+	 * both in monitoring and while a dialog advertises the global shortcut. */
+	for (int test_width = 40; test_width <= 120; test_width += 10) {
+		for (int modal = 0; modal < 2; modal++) {
+			struct watch_display display = { .tui = true };
+			char footer[256];
+			display.tui_state.initialized = true;
+			display.tui_state.help_visible = modal;
+			display.tui_state.clock_valid = true;
+			display.tui_state.clock_epoch = 1000;
+			display.tui_state.clock_sample_ms = monotonic_milliseconds();
+			assert(resizeterm(24, test_width) != ERR);
+			watch_tui_render(&display);
+			mvwinnstr(stdscr, LINES - 1, 0, footer, test_width);
+			const char *separator = strrchr(footer, '|');
+			assert(separator);
+			const char *clock = separator + 1;
+			if (*clock == ' ') clock++;
+			assert(!strncmp(clock, "L1 ", 3) && strstr(clock, "[out of sync]"));
+			assert(clock[-1] == '|' || (clock - footer >= 3 && !memcmp(clock - 3, " | ", 3)));
+			assert(strstr(footer, modal ? "C Quit" : "q Quit"));
 		}
 	}
 	{

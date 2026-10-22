@@ -522,6 +522,8 @@ def main():
         output.extend(monochrome)
         if b"Monochrome" not in monochrome:
             raise AssertionError("monochrome mode was not identified")
+        if not re.search(rb"\| *L1 ", plain_text(monochrome)):
+            raise AssertionError("status bar has no separator before the L1 clock")
         if b"\x1b[38;5;124m" in monochrome:
             raise AssertionError("monochrome mode retained colour output")
 
